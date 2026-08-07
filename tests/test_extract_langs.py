@@ -55,5 +55,41 @@ class TypeScriptExtractTest(unittest.TestCase):
         self.assertEqual(fn.visibility, "pub")
 
 
+@needs_ts
+class ArrowFunctionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(TSMINI / "arrows.ts", TSMINI)
+
+    def test_exported_arrow_is_public_fn(self):
+        fn = next(s for s in self.syms if s.name == "fetchUser")
+        self.assertEqual(fn.kind, "fn")
+        self.assertEqual(fn.visibility, "pub")
+        self.assertEqual(fn.params, ["string"])
+        self.assertEqual(fn.returns, "Promise<string>")
+        self.assertIn("lookup", fn.calls)
+
+    def test_unexported_arrow_is_private(self):
+        fn = next(s for s in self.syms if s.name == "lookup")
+        self.assertEqual(fn.visibility, "priv")
+        self.assertEqual(fn.returns, "string")
+
+    def test_const_non_function_not_extracted(self):
+        self.assertNotIn("cache", {s.name for s in self.syms})
+
+    def test_class_field_arrow_is_method(self):
+        m = next(s for s in self.syms if s.name == "onEvent")
+        self.assertEqual(m.kind, "method")
+        self.assertEqual(m.container, "EventHub")
+        self.assertEqual(m.visibility, "pub")
+        self.assertIn("dispatch", m.calls)
+
+    def test_nested_closures_not_top_level(self):
+        # the arrow body of fetchUser contains no declarators, but guard anyway:
+        # every extracted fn must be fetchUser/lookup or an EventHub member
+        names = {s.name for s in self.syms if s.kind == "fn"}
+        self.assertEqual(names, {"fetchUser", "lookup"})
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -84,9 +84,10 @@ class RenderUnitTest(unittest.TestCase):
                            signature="helperCommon()", visibility="priv"))
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), syms, [], "regen")
-        self.assertNotIn("requireNonNull", out)   # not project-defined -> platform noise
-        self.assertNotIn("helperCommon", out)     # project-defined but ubiquitous -> dropped
-        self.assertIn("helper3", out)             # project-defined and rare -> kept
+        chains = " ".join(ln.split(" > ", 1)[1] for ln in out.splitlines() if " > " in ln)
+        self.assertNotIn("requireNonNull", chains)  # not project-defined -> platform noise
+        self.assertNotIn("helperCommon", chains)    # project-defined but ubiquitous -> dropped
+        self.assertIn("helper3", chains)            # project-defined and rare -> kept
 
     def test_tree_shares_prefixes_once(self):
         types_by_dir = {"com/x/a": ["A(C)"], "com/x/b": ["B(C)"]}
@@ -334,6 +335,55 @@ class GroupExtrasTest(unittest.TestCase):
         self.assertIn("AId,BId(R: String)", out)          # grouped despite extra method
         self.assertEqual(out.count("of(String):⟨X⟩"), 1)  # shared shown once
         self.assertIn("BId: extra():int", out)            # divergence kept -> no coverage loss
+
+
+class PrivateMembersTest(unittest.TestCase):
+    def _syms(self):
+        return [
+            Symbol(name="Cache", kind="class", file="m/cache.py", line=1,
+                   visibility="pub"),
+            Symbol(name="get", kind="method", file="m/cache.py", line=2,
+                   container="Cache", signature="get(str):str", visibility="pub"),
+            Symbol(name="_evict", kind="method", file="m/cache.py", line=3,
+                   container="Cache", signature="_evict(int):int", visibility="priv"),
+            Symbol(name="_rebalance", kind="method", file="m/cache.py", line=4,
+                   container="Cache", signature="_rebalance()", visibility="priv"),
+            Symbol(name="_helper", kind="fn", file="m/util.py", line=1,
+                   signature="_helper():int", visibility="priv"),
+        ]
+
+    def test_private_names_packed_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render_simple(Path(tmp), self._syms(), [], "regen")
+        self.assertIn("- _evict,_rebalance", out)      # class privates, names only
+        self.assertIn("- util: _helper", out)          # module-level privates per file
+        self.assertNotIn("_evict(int)", out)           # no signatures by default
+
+    def test_private_signatures_with_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render_simple(Path(tmp), self._syms(), [], "regen",
+                                private_sigs=True)
+        self.assertIn("-_evict(int):int", out)
+        self.assertIn("-_helper():int", out)
+        self.assertNotIn("- util:", out)               # names-only lines replaced
+
+    def test_cli_private_flag(self):
+        import shutil
+        from hologram import run_cli
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            (root / "svc.py").write_text(
+                "class Svc:\n"
+                "    def run(self) -> int:\n        return self._step()\n"
+                "    def _step(self) -> int:\n        return 1\n"
+            )
+            out = Path(tmp) / "d.md"
+            run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
+            self.assertIn("- _step", out.read_text())
+            run_cli(["build", "--root", str(root), "--out", str(out),
+                     "--private", "--quiet"])
+            self.assertIn("-_step():int", out.read_text())
 
 
 @needs_java

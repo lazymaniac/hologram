@@ -68,6 +68,10 @@ tokenizer (o200k) to be ~5% cheaper than the pretty variant with zero informatio
 - `!E` after a signature = declared throws / raised exceptions, `Exception` suffix implied
   (`!UnknownItem` = `UnknownItemException`). No `:Ret` = returns void/None.
 - `×N` on a type = referenced from N other files (only shown when N ≥ 10).
+- Private members appear as packed name lists (`- evict,rebalance` under their class,
+  `- util: _parse,_walk` per file for module-level helpers) — names alone say a lot about
+  internals at ~⅓ the cost of signatures. `--private` upgrades them to full `-`-prefixed
+  signatures.
 - A one-line legend at the top of every digest explains the notation to any LLM.
 
 ## Architecture
@@ -75,6 +79,59 @@ tokenizer (o200k) to be ~5% cheaper than the pretty variant with zero informatio
 Single file, one pipeline: scan (git-tracked files only when in a repo) → extract → render.
 Language-specific code is confined to three extractors that all produce the same `Symbol`
 records; everything downstream is language-neutral.
+
+## Working with coding agents: an honest assessment
+
+This tool exists because of a specific failure mode: an LLM agent lands in a repo with
+no map, greps its way to a partial picture, and starts writing code that already exists.
+What the digest actually does about that — and what it can't:
+
+**Where it genuinely helps**
+
+- **Session economics.** An agent re-derives project structure every session: dozens of
+  grep/read round-trips, easily 50–100k tokens of file content on a mid-sized repo, most
+  of it discarded. The digest front-loads that map for ~19k tokens, once, and the agent's
+  searches become targeted lookups instead of exploration.
+- **Duplication has a real counterweight.** The classic agent failure — writing a second
+  `normalize()` because it never saw the first one — happens because existence of code is
+  invisible until you grep the exact right word. A complete signature inventory with call
+  chains makes "does this already exist?" answerable by reading, not searching. The `×N`
+  fan-in marker points at the canonical utilities specifically.
+- **Convention transmission dampens bloat.** Generated code bloats worst when the model
+  invents its own patterns. The digest shows the house grammar — all IDs are one-component
+  records, services take their deps by constructor, errors are sealed hierarchies — and a
+  model shown a family extends it rather than inventing a parallel one. Grouped shapes
+  (`AId,BId,…(R: UUID)`) make those families impossible to miss.
+- **Private names orient debugging.** `- rebalance,evict,writeThrough` under a cache class
+  tells an agent where behavior lives before it opens the file, so the file-reads it does
+  spend go to the right places.
+- **The digest diff is a review signal.** Because output is deterministic, a PR that
+  quietly adds three near-duplicate helpers shows up as exactly that in the digest diff.
+
+**Where honesty is due**
+
+- **It prevents nothing by itself.** The digest competes for the model's attention like
+  any other context. An agent can and sometimes will ignore 19k tokens of inventory and
+  reimplement a helper anyway. It shifts probabilities; it is not a guardrail.
+- **Body-level bloat is untouched.** The 80-line method that should be 10 lines happens
+  inside function bodies, which the digest never sees. It fights *architectural*
+  duplication, not verbose implementation.
+- **Stale is worse than absent.** Refresh is commit-grained. An agent that trusts a
+  digest describing deleted code, or missing the function added ten minutes ago, is
+  confidently wrong in a way a grepping agent wouldn't be. If the hooks aren't installed,
+  don't attach the digest.
+- **It amplifies naming, including bad naming.** `doStuff2(Object):Object` compresses to
+  exactly the nothing it says. On codebases with misleading names the digest transmits
+  the misdirection more efficiently than reading the code would.
+- **Existence ≠ correctness.** The digest says a function is there, not that it works,
+  handles your edge case, or was ever finished. Agents wiring against a listed-but-broken
+  function is a real failure mode it cannot see.
+- **Cost is recurring.** ~19k tokens ride along on every request that includes the
+  digest. For a one-file bugfix that's pure overhead — cheaper to let the agent grep.
+  It pays off on tasks that touch unfamiliar parts of the codebase, not surgical ones.
+- **The core claim is still unbenchmarked.** No rigorous eval yet shows agents with the
+  digest duplicate less or navigate faster. The design is argued from failure modes
+  observed in practice, not measured against a control.
 
 ## Honest trade-offs
 
@@ -95,12 +152,12 @@ records; everything downstream is language-neutral.
 
 - Three languages. Java, Python, TypeScript/JavaScript — no Go, Rust, Kotlin, C#, C++.
   The grammar table makes adding one cheap, but each needs its own extractor mapping.
-- TS extraction misses arrow-function exports (`export const f = () => …`) and
-  standalone `type`/`const` declarations — class/interface/enum/`function` only. On
-  idiomatic modern TS that is a real coverage gap.
-- Public surface only. Private helpers, function bodies, and implementation complexity
-  are invisible — a class with 500 lines of private logic looks identical to a stub.
-  The digest tells an LLM *what exists*, not *how it works*.
+- TS extraction covers classes, interfaces, enums, `function` declarations, and arrow/
+  function-expression assignments (top-level and class fields) — but not standalone
+  `type` aliases, object-literal APIs, or re-exports.
+- Function bodies are invisible. Private members appear by name (signatures with
+  `--private`), which says what a class is made of — but a 500-line algorithm and a
+  one-liner still look the same. The digest tells an LLM *what exists*, not *how it works*.
 - Name quality is load-bearing. No docs or comments survive; if the code calls things
   `Manager2` and `doStuff`, the digest faithfully compresses that emptiness.
 - Call chains are capped (12 per function), transitively reduced (direct-vs-indirect

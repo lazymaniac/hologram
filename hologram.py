@@ -521,11 +521,15 @@ def _ts_local_bindings(body) -> dict[str, str]:
 
 
 def _ts_fn_symbol(node, rel: str, container: str | None, visibility: str,
-                  class_binds: dict[str, str] | None = None) -> Symbol:
-    name = _ast_text(_ast_field(node, "name"))
-    params = _ts_params(_ast_field(node, "parameters"))
-    returns = _ts_return(node)
-    body = _ast_field(node, "body")
+                  class_binds: dict[str, str] | None = None,
+                  name: str | None = None, fn_node=None) -> Symbol:
+    """Function/method Symbol. `fn_node` carries params/body when the name lives on a
+    different node (arrow assigned to a const or a class field)."""
+    fn = fn_node if fn_node is not None else node
+    name = name if name is not None else _ast_text(_ast_field(node, "name"))
+    params = _ts_params(_ast_field(fn, "parameters"))
+    returns = _ts_return(fn)
+    body = _ast_field(fn, "body")
     ret_suffix = f":{returns}" if returns and returns != "void" else ""
     return Symbol(
         name=name, kind="method" if container else "fn", file=rel,
@@ -535,9 +539,33 @@ def _ts_fn_symbol(node, rel: str, container: str | None, visibility: str,
         visibility=visibility, container=container, lang="typescript",
         calls=_ts_calls(body, name),
         bindings={**(class_binds or {}),
-                  **_ts_param_bindings(_ast_field(node, "parameters")),
+                  **_ts_param_bindings(_ast_field(fn, "parameters")),
                   **_ts_local_bindings(body)},
     )
+
+
+_TS_FN_VALUES = ("arrow_function", "function_expression")
+
+
+def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
+    """`const f = (…) => …` at module scope (incl. exported). Nested closures are
+    deliberately excluded — only declarations at program/export level count."""
+    symbols = []
+    for top in root_node.children:
+        exported = top.type == "export_statement"
+        decls = top.children if exported else [top]
+        for decl in decls:
+            if decl.type not in ("lexical_declaration", "variable_declaration"):
+                continue
+            for d in decl.children:
+                if d.type != "variable_declarator":
+                    continue
+                val = _ast_field(d, "value")
+                if val is not None and val.type in _TS_FN_VALUES:
+                    symbols.append(_ts_fn_symbol(
+                        d, rel, None, "pub" if exported else "priv",
+                        name=_ast_text(_ast_field(d, "name")), fn_node=val))
+    return symbols
 
 
 def _extract_ts(text: str, rel: str) -> list[Symbol]:
@@ -563,6 +591,16 @@ def _extract_ts(text: str, rel: str) -> list[Symbol]:
         if kind == "class" and body is not None:
             class_binds = _ts_class_bindings(body)
             for c in body.children:
+                if c.type == "public_field_definition":
+                    val = _ast_field(c, "value")
+                    if val is not None and val.type in _TS_FN_VALUES:
+                        vis = "priv" if any(ch.type == "accessibility_modifier"
+                                            and _ast_text(ch) == "private"
+                                            for ch in c.children) else "pub"
+                        symbols.append(_ts_fn_symbol(
+                            c, rel, name, vis, class_binds,
+                            name=_ast_text(_ast_field(c, "name")), fn_node=val))
+                    continue
                 if c.type != "method_definition":
                     continue
                 mname = _ast_text(_ast_field(c, "name"))
@@ -581,6 +619,7 @@ def _extract_ts(text: str, rel: str) -> list[Symbol]:
     for fn in _ast_collect(tree.root_node, ("function_declaration",)):
         symbols.append(_ts_fn_symbol(
             fn, rel, None, "pub" if _ts_exported(fn) else "priv"))
+    symbols.extend(_ts_top_level_arrows(tree.root_node, rel))
     return symbols
 
 
@@ -926,22 +965,41 @@ def _total_loc(files: list[Path]) -> int:
 
 
 def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
-                  regen_cmd: str, scores: dict[str, float] | None = None) -> str:
+                  regen_cmd: str, scores: dict[str, float] | None = None,
+                  private_sigs: bool = False) -> str:
     """Signatures only, as a package trie; each function's calls inline after `>`.
+    Private members render as packed name lists (`- a,b`), or as full `-`-prefixed
+    signatures when `private_sigs` is set.
 
     pkg
       Class(K: components)
         sig > callee, callee
+        - privateName,privateName
     """
     prod = [s for s in symbols if not _is_test_path(s.file)]
     types_by_dir: dict[str, list[Symbol]] = {}
     for s in prod:
-        if s.kind in TYPE_KINDS + ("fn",) and s.container is None and s.visibility == "pub":
+        if (s.kind in TYPE_KINDS + ("fn",) and s.container is None
+                and (s.visibility == "pub" or private_sigs)):
             types_by_dir.setdefault(str(Path(s.file).parent), []).append(s)
     methods_by_owner: dict[tuple[str, str], list[Symbol]] = {}
     for s in prod:
-        if s.container and s.kind == "method" and s.visibility == "pub":
+        if (s.container and s.kind == "method"
+                and (s.visibility == "pub" or private_sigs)):
             methods_by_owner.setdefault((str(Path(s.file).parent), s.container), []).append(s)
+    # names-only private inventory (used when private_sigs is off)
+    priv_methods_by_owner: dict[tuple[str, str], list[str]] = {}
+    priv_top_by_file: dict[tuple[str, str], list[str]] = {}
+    if not private_sigs:
+        for s in prod:
+            if s.visibility != "priv":
+                continue
+            if s.container and s.kind == "method":
+                key = (str(Path(s.file).parent), s.container)
+                priv_methods_by_owner.setdefault(key, []).append(s.name)
+            elif s.container is None and s.kind in TYPE_KINDS + ("fn",):
+                key = (str(Path(s.file).parent), Path(s.file).stem)
+                priv_top_by_file.setdefault(key, []).append(s.name)
 
     defined = {s.name for s in symbols}
     project_types = {s.name for s in prod if s.kind in TYPE_KINDS}
@@ -1006,6 +1064,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     def _sig_line(sym: Symbol, own: str, grouped: bool) -> str:
         sig = sym.signature or sym.name
+        if sym.visibility == "priv":
+            sig = f"-{sig}"
         kept = kept_by_sym.get(id(sym), [])
         if sym.raises:
             sig = f"{sig} !{','.join(_strip_exc(r) for r in sym.raises)}"
@@ -1030,11 +1090,11 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 payload.append(_sig_line(t, t.name, False))
                 continue
             components = t.params or ctors_by_owner.get((d, t.name), [])
-            key = (t.kind, tuple(components), tuple(t.supers), tuple(t.permits))
+            key = (t.kind, t.visibility, tuple(components), tuple(t.supers), tuple(t.permits))
             groups.setdefault(key, []).append(t)
-        for (kind, components, supers, permits), members in groups.items():
+        for (kind, vis, components, supers, permits), members in groups.items():
             members.sort(key=lambda s: s.name)
-            names = ",".join(m.name for m in members)
+            names = ",".join(("-" if vis == "priv" else "") + m.name for m in members)
             letter = KIND_LETTER.get(kind, "?")
             if permits:
                 inner = f"{letter} sealed: {'|'.join(permits)}"
@@ -1051,9 +1111,17 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             member_methods = {m.name: methods_by_owner.get((d, m.name), [])
                               for m in members}
             head = members[0]
+            def _priv_line(owner: str, prefix: str = "") -> str | None:
+                names_only = priv_methods_by_owner.get((d, owner))
+                if not names_only:
+                    return None
+                return f" {prefix}- {','.join(dict.fromkeys(names_only))}"
+
             if len(members) == 1:
                 for ms in member_methods[head.name]:
                     payload.append(" " + _sig_line(ms, head.name, False))
+                if (pl := _priv_line(head.name)) is not None:
+                    payload.append(pl)
                 continue
             normed = {m.name: [_sig_line(ms, m.name, True)
                                for ms in member_methods[m.name]] for m in members}
@@ -1070,6 +1138,12 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                     payload.append(f" {m.name}: "
                                    + "; ".join(_sig_line(ms, m.name, False)
                                                for ms in extras))
+                if (pl := _priv_line(m.name, f"{m.name} ")) is not None:
+                    payload.append(pl)
+
+    for (d, stem), names_only in sorted(priv_top_by_file.items()):
+        payload_by_dir.setdefault(d, []).append(
+            f"- {stem}: {','.join(dict.fromkeys(names_only))}")
 
     loc = _total_loc(files)
     head = (f"# {root.name} @{git_head(root)} {date.today().isoformat()} · "
@@ -1078,15 +1152,17 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             "(C: …)=ctor deps (E: …)=values · name(params):Ret, no :Ret=void · "
             ": X=extends/implements · sealed: A|B=permits · sig > calls, project-only, "
             "transitively reduced · !E=throws, Exception suffix dropped · "
-            "⟨X⟩=member's own name · ×N=referenced from N files\n")
+            "⟨X⟩=member's own name · ×N=referenced from N files · "
+            + ("-sig=private" if private_sigs else "- x,y=private members, names only")
+            + "\n")
     return head + "\n".join(_tree_lines(payload_by_dir)) + "\n"
 
 
 def build_digest(root: Path, regen_cmd: str = "hologram build",
-                 langs: set[str] | None = None) -> str:
+                 langs: set[str] | None = None, private_sigs: bool = False) -> str:
     files, symbols, file_tokens = _gather(root, langs)
     scores = _fan_in_from_tokens(symbols, file_tokens)
-    return render_simple(root, symbols, files, regen_cmd, scores)
+    return render_simple(root, symbols, files, regen_cmd, scores, private_sigs)
 
 
 # ---------------------------------------------------------------------------
@@ -1190,6 +1266,9 @@ def run_cli(argv: list[str] | None = None) -> int:
     common.add_argument("--lang", action="append", default=None,
                         help="restrict to language(s), repeatable or comma-separated "
                              "(java, python, typescript, javascript)")
+    common.add_argument("--private", action="store_true",
+                        help="full signatures for private members "
+                             "(default: names only)")
     common.add_argument("--quiet", action="store_true")
 
     parser = argparse.ArgumentParser(prog="hologram", description=__doc__)
@@ -1216,7 +1295,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     out_path = getattr(args, "out", None) or root / "PROJECT_DIGEST.md"
     digest = build_digest(root,
                           regen_cmd=f'{_hook_python()} "{Path(__file__).resolve()}" build',
-                          langs=langs)
+                          langs=langs, private_sigs=args.private)
     out_path.write_text(digest)
     if not args.quiet:
         print(f"{out_path} written: {estimate_tokens(digest)} tokens")
