@@ -4,11 +4,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from digest import cluster_skeletons, extract_file  # noqa: E402
+import digest  # noqa: E402
+from digest import extract_file  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 PYMINI = FIXTURES / "pymini"
 TSMINI = FIXTURES / "tsmini"
+
+needs_ts = unittest.skipUnless(digest.has_parser("typescript"),
+                               "tree-sitter-typescript not installed")
 
 
 class PythonExtractTest(unittest.TestCase):
@@ -26,14 +30,8 @@ class PythonExtractTest(unittest.TestCase):
         self.assertEqual(fns["price_order"].params, ["OrderId", "list[ItemId]"])
         self.assertEqual(fns["price_order"].returns, "int")
 
-    def test_three_dataclasses_cluster(self):
-        syms = [s for s in extract_file(PYMINI / "models.py", PYMINI) if s.kind == "class"]
-        archetypes, outliers = cluster_skeletons(syms)
-        self.assertEqual(len(archetypes), 1)
-        self.assertEqual(len(archetypes[0].members), 3)
-        self.assertEqual(outliers, [])
 
-
+@needs_ts
 class TypeScriptExtractTest(unittest.TestCase):
     def test_interface_class_function(self):
         syms = extract_file(TSMINI / "api.ts", TSMINI)
@@ -50,6 +48,11 @@ class TypeScriptExtractTest(unittest.TestCase):
         self.assertEqual(m.kind, "method")
         self.assertEqual(m.container, "PricingClient")
         self.assertEqual(m.returns, "Promise<Quote>")
+
+    def test_exported_symbols_public(self):
+        syms = extract_file(TSMINI / "api.ts", TSMINI)
+        fn = next(s for s in syms if s.name == "formatCents")
+        self.assertEqual(fn.visibility, "pub")
 
 
 if __name__ == "__main__":

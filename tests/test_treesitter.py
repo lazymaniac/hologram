@@ -4,30 +4,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-try:
-    import tree_sitter  # noqa: F401
-    HAS_TS = True
-except ImportError:
-    HAS_TS = False
+import digest  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
 
 
-@unittest.skipUnless(HAS_TS, "tree-sitter not installed (regex fallback covered elsewhere)")
+@unittest.skipUnless(digest.has_parser("java"), "tree-sitter-java not installed")
 class TreeSitterJavaTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        from digest import _extract_java_treesitter
-        cls.extract = staticmethod(_extract_java_treesitter)
-
     def _syms(self, rel):
         text = (JAVAMINI / rel).read_text()
-        return self.extract(text, rel)
-
-    def test_dispatch_prefers_treesitter(self):
-        import digest
-        self.assertTrue(digest.USING_TREESITTER)
+        return digest._extract_java(text, rel)
 
     def test_types_methods_params_returns(self):
         syms = self._syms("src/engine/PricingEngine.java")
@@ -75,14 +62,17 @@ class TreeSitterJavaTest(unittest.TestCase):
         ctor = next(s for s in syms if s.kind == "ctor")
         self.assertEqual(ctor.params, ["Map<ItemId,Long>"])
 
-    def test_skeletons_group_identical_ids(self):
-        from digest import cluster_skeletons
-        types = []
-        for rel in ("src/ids/UserId.java", "src/ids/OrderId.java", "src/ids/ItemId.java"):
-            types.extend(s for s in self._syms(rel) if s.kind == "record")
-        archetypes, outliers = cluster_skeletons(types)
-        self.assertEqual(len(archetypes), 1)
-        self.assertEqual(outliers, [])
+
+@unittest.skipUnless(digest.has_parser("java"), "tree-sitter-java not installed")
+class MissingParserErrorTest(unittest.TestCase):
+    def test_extract_file_errors_without_parser(self):
+        saved = digest._PARSERS["java"]
+        digest._PARSERS["java"] = None
+        try:
+            with self.assertRaises(SystemExit):
+                digest.extract_file(JAVAMINI / "src/App.java", JAVAMINI)
+        finally:
+            digest._PARSERS["java"] = saved
 
 
 if __name__ == "__main__":

@@ -1,17 +1,23 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from digest import build_digest, estimate_tokens, extract_file  # noqa: E402
+import digest  # noqa: E402
+from digest import Symbol, _tree_lines, build_digest, extract_file, render_simple  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
 PYMINI = FIXTURES / "pymini"
 
+needs_java = unittest.skipUnless(digest.has_parser("java"),
+                                 "tree-sitter-java not installed")
+
 
 class CallExtractionTest(unittest.TestCase):
+    @needs_java
     def test_java_method_calls_recorded(self):
         syms = extract_file(JAVAMINI / "src/engine/PricingEngine.java", JAVAMINI)
         ev = next(s for s in syms if s.name == "evaluate")
@@ -26,10 +32,11 @@ class CallExtractionTest(unittest.TestCase):
         self.assertIn("item.check", fn.calls)
 
 
+@needs_java
 class SimpleDigestTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.out = build_digest(JAVAMINI, budget=8000)
+        cls.out = build_digest(JAVAMINI)
 
     def test_signatures_present(self):
         self.assertIn("evaluate(OrderId,List<ItemId>):Quote", self.out)
@@ -50,44 +57,22 @@ class SimpleDigestTest(unittest.TestCase):
         self.assertIn("ids", self.out)
         self.assertNotIn("src/ids", self.out)
 
-    def test_no_budget_enforcement_in_simple_mode(self):
-        tight = build_digest(JAVAMINI, budget=260)
-        self.assertIn("PricingEngine", tight)
-        self.assertIn("> ", tight)
-
-    def test_full_mode_still_available(self):
-        full = build_digest(JAVAMINI, budget=8000, mode="full")
-        self.assertIn("## MODULES", full)
+    def test_calls_inline_no_calls_word(self):
+        body = "\n".join(self.out.splitlines()[2:])
+        self.assertNotIn("calls ", body)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
+@needs_java
 class SameShapeGroupingTest(unittest.TestCase):
     def test_identical_types_grouped_with_hole_notation(self):
-        out = build_digest(JAVAMINI, budget=8000)
+        out = build_digest(JAVAMINI)
         self.assertIn("ItemId,OrderId,UserId(R: String)", out)
         self.assertEqual(out.count("of(String):⟨X⟩"), 1)
         self.assertNotIn("of(String):UserId", out)
 
 
-class TreeAndCallFormatTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.out = build_digest(JAVAMINI, budget=8000)
-
-    def test_calls_inline_after_signature_no_calls_word(self):
-        body = "\n".join(self.out.splitlines()[2:])
-        self.assertNotIn("calls ", body)
-        lines = self.out.splitlines()
-        ev = next(ln for ln in lines if "evaluate(OrderId" in ln)
-        self.assertIn("> ", ev)
-        self.assertIn("UnknownItemException", ev)
-
+class RenderUnitTest(unittest.TestCase):
     def test_platform_and_ubiquitous_calls_filtered(self):
-        from digest import Symbol, render_simple
-        import tempfile
         syms = []
         for i in range(30):
             syms.append(Symbol(name=f"fn{i}", kind="fn", file="a/mod.py", line=i,
@@ -104,26 +89,37 @@ class TreeAndCallFormatTest(unittest.TestCase):
         self.assertIn("helper3", out)             # project-defined and rare -> kept
 
     def test_tree_shares_prefixes_once(self):
-        from digest import _tree_lines
         types_by_dir = {"com/x/a": ["A(C)"], "com/x/b": ["B(C)"]}
         lines = _tree_lines(types_by_dir)
         joined = "\n".join(lines)
         self.assertEqual(joined.count("com/x"), 1)
         self.assertNotIn("com/x/a", joined)
 
+    def test_hot_types_marked(self):
+        syms = [Symbol(name="Widget", kind="class", file="a/w.py", line=1, visibility="pub"),
+                Symbol(name="Rare", kind="class", file="b/r.py", line=1, visibility="pub")]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render_simple(Path(tmp), syms, [], "regen",
+                                scores={"Widget": 12.0, "Rare": 2.0})
+        widget_line = next(ln for ln in out.splitlines() if "Widget" in ln)
+        rare_line = next(ln for ln in out.splitlines() if "Rare(" in ln)
+        self.assertIn("×12", widget_line)
+        self.assertNotIn("×", rare_line)
+
 
 class EnumValuesTest(unittest.TestCase):
+    @needs_java
     def test_java_enum_constants_extracted(self):
         syms = extract_file(JAVAMINI / "src/engine/OrderStatus.java", JAVAMINI)
         e = next(s for s in syms if s.kind == "enum")
         self.assertEqual(e.params, ["NEW", "PAID", "SHIPPED"])
 
+    @needs_java
     def test_enum_values_rendered(self):
-        out = build_digest(JAVAMINI, budget=8000)
+        out = build_digest(JAVAMINI)
         self.assertIn("OrderStatus(E: NEW,PAID,SHIPPED)", out)
 
     def test_python_enum_values_extracted(self):
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "status.py"
             p.write_text(
@@ -136,6 +132,7 @@ class EnumValuesTest(unittest.TestCase):
         self.assertEqual(e.params, ["RED", "GREEN"])
 
 
+@needs_java
 class InterfaceMethodTest(unittest.TestCase):
     def test_bodyless_interface_methods_extracted(self):
         syms = extract_file(JAVAMINI / "src/engine/PricePort.java", JAVAMINI)
@@ -152,54 +149,59 @@ class InterfaceMethodTest(unittest.TestCase):
         self.assertIn("isTerminal", methods)
 
     def test_interface_methods_rendered(self):
-        out = build_digest(JAVAMINI, budget=8000)
+        out = build_digest(JAVAMINI)
         idx = out.index("PricePort(I)")
         after = out[idx:idx + 200]
         self.assertIn("quoteFor(OrderId):Quote", after)
 
 
+@needs_java
 class QualifiedCallTest(unittest.TestCase):
     def test_receiver_kept_for_qualified_calls(self):
         syms = extract_file(JAVAMINI / "src/App.java", JAVAMINI)
         main = next(s for s in syms if s.name == "main")
         self.assertIn("engine.evaluate", main.calls)
 
-    def test_render_shows_qualified_project_call(self):
-        out = build_digest(JAVAMINI, budget=8000)
+    def test_render_resolves_receiver_to_declared_type(self):
+        out = build_digest(JAVAMINI)
         main_line = next(ln for ln in out.splitlines() if "main(String[])" in ln)
-        self.assertIn("engine.evaluate", main_line)
+        self.assertIn("PricingEngine.evaluate", main_line)   # engine -> its declared type
+        self.assertNotIn("engine.evaluate", main_line)
+        self.assertNotIn("List.of", main_line)               # platform type literal dropped
+        self.assertNotIn("getenv", main_line)
 
 
+@needs_java
 class CtorComponentsTest(unittest.TestCase):
     def test_class_constructor_params_shown_as_components(self):
-        out = build_digest(JAVAMINI, budget=8000)
+        out = build_digest(JAVAMINI)
         self.assertIn("PricingEngine(C: Map<ItemId,Long>)", out)
 
 
+@needs_java
 class ReconstructablePathTest(unittest.TestCase):
     def test_tree_labels_keep_real_path_segments(self):
-        out = build_digest(JAVAMINI, budget=8000)
+        out = build_digest(JAVAMINI)
         lines = out.splitlines()
         self.assertIn("src", lines)
         self.assertTrue(any(ln.strip() == "engine" for ln in lines))
 
 
+@needs_java
 class LanguageFilterTest(unittest.TestCase):
     def test_only_requested_language_included(self):
         import shutil
-        import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "mixed"
             shutil.copytree(JAVAMINI, root)
             (root / "script.py").write_text("def py_helper() -> int:\n    return 1\n")
-            all_langs = build_digest(root, budget=8000)
+            all_langs = build_digest(root)
             self.assertIn("py_helper", all_langs)
-            java_only = build_digest(root, budget=8000, langs={"java"})
+            java_only = build_digest(root, langs={"java"})
             self.assertNotIn("py_helper", java_only)
             self.assertIn("PricingEngine", java_only)
 
     def test_cli_lang_flag(self):
-        import tempfile
         from digest import run_cli
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "d.md"
@@ -209,6 +211,7 @@ class LanguageFilterTest(unittest.TestCase):
             self.assertIn("PricingEngine", out.read_text())
 
 
+@needs_java
 class RelationsTest(unittest.TestCase):
     def test_implements_extracted(self):
         syms = extract_file(JAVAMINI / "src/engine/PricingEngine.java", JAVAMINI)
@@ -221,15 +224,16 @@ class RelationsTest(unittest.TestCase):
         self.assertEqual(t.permits, ["AddOp", "RemoveOp"])
 
     def test_relations_rendered(self):
-        out = build_digest(JAVAMINI, budget=8000)
+        out = build_digest(JAVAMINI)
         self.assertIn("PricingEngine(C: Map<ItemId,Long>) : PricePort", out)
         self.assertIn("DeltaOp(I sealed: AddOp|RemoveOp)", out)
         self.assertIn("(R: String) : DeltaOp", out)
 
 
+@needs_java
 class LegendTest(unittest.TestCase):
     def test_legend_line_present(self):
-        out = build_digest(JAVAMINI, budget=8000)
+        out = build_digest(JAVAMINI)
         second = out.splitlines()[1]
         self.assertIn("legend", second)
         self.assertIn("⟨X⟩", second)
@@ -237,6 +241,7 @@ class LegendTest(unittest.TestCase):
 
 
 class ThrowsTest(unittest.TestCase):
+    @needs_java
     def test_java_throws_clause_extracted(self):
         syms = extract_file(JAVAMINI / "src/engine/PricingEngine.java", JAVAMINI)
         ev = next(s for s in syms if s.name == "evaluate")
@@ -247,35 +252,104 @@ class ThrowsTest(unittest.TestCase):
         check = next(s for s in syms if s.name == "check" and s.container == "UserId")
         self.assertEqual(check.raises, ["ValueError"])
 
-    def test_throws_rendered_on_signature(self):
-        out = build_digest(JAVAMINI, budget=8000)
-        self.assertIn("evaluate(OrderId,List<ItemId>):Quote !UnknownItemException", out)
+    @needs_java
+    def test_throws_rendered_on_signature_exception_suffix_dropped(self):
+        out = build_digest(JAVAMINI)
+        self.assertIn("evaluate(OrderId,List<ItemId>):Quote !UnknownItem", out)
+        self.assertNotIn("!UnknownItemException", out)
 
 
-class FanInMarkerTest(unittest.TestCase):
-    def test_hot_types_marked(self):
-        from digest import Symbol, render_simple
-        import tempfile
-        syms = [Symbol(name="Widget", kind="class", file="a/w.py", line=1, visibility="pub"),
-                Symbol(name="Rare", kind="class", file="b/r.py", line=1, visibility="pub")]
+class TransitiveReductionTest(unittest.TestCase):
+    def _render(self, calls_a):
+        syms = [
+            Symbol(name="a", kind="fn", file="m/x.py", line=1, signature="a()",
+                   visibility="pub", calls=calls_a),
+            Symbol(name="b", kind="fn", file="m/x.py", line=2, signature="b()",
+                   visibility="pub", calls=["c"]),
+            Symbol(name="c", kind="fn", file="m/x.py", line=3, signature="c()",
+                   visibility="pub"),
+        ]
         with tempfile.TemporaryDirectory() as tmp:
-            out = render_simple(Path(tmp), syms, [], "regen",
-                                scores={"Widget": 12.0, "Rare": 2.0})
-        widget_line = next(ln for ln in out.splitlines() if "Widget" in ln)
-        rare_line = next(ln for ln in out.splitlines() if "Rare(" in ln)
-        self.assertIn("×12", widget_line)
-        self.assertNotIn("×", rare_line)
+            return render_simple(Path(tmp), syms, [], "regen")
 
-    def test_private-corpus_style_marker_via_build(self):
-        out = build_digest(JAVAMINI, budget=8000)
-        self.assertNotIn("×0", out)
+    def test_implied_edge_dropped(self):
+        out = self._render(["b", "c"])          # a>b,c but b>c: c implied
+        a_line = next(ln for ln in out.splitlines() if ln.strip().startswith("a()"))
+        self.assertEqual(a_line.strip(), "a() > b")
+
+    def test_direct_only_edge_kept(self):
+        out = self._render(["c"])
+        a_line = next(ln for ln in out.splitlines() if ln.strip().startswith("a()"))
+        self.assertEqual(a_line.strip(), "a() > c")
+
+    def test_cycle_members_both_kept(self):
+        syms = [
+            Symbol(name="x", kind="fn", file="m/x.py", line=1, signature="x()",
+                   visibility="pub", calls=["y", "z"]),
+            Symbol(name="y", kind="fn", file="m/x.py", line=2, signature="y()",
+                   visibility="pub", calls=["x"]),
+            Symbol(name="z", kind="fn", file="m/x.py", line=3, signature="z()",
+                   visibility="pub", calls=["x"]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render_simple(Path(tmp), syms, [], "regen")
+        x_line = next(ln for ln in out.splitlines() if ln.strip().startswith("x()"))
+        # y and z are in x's cycle-SCC-adjacent set; neither implies the other
+        # via a path that avoids x, so both survive
+        self.assertIn("y", x_line)
+        self.assertIn("z", x_line)
 
 
+class VoidOmissionTest(unittest.TestCase):
+    def test_python_none_return_omitted(self):
+        syms = extract_file(PYMINI / "app.py", PYMINI)
+        main = next(s for s in syms if s.name == "main")
+        self.assertEqual(main.signature, "main()")
+        self.assertEqual(main.returns, "None")   # data kept, rendering omits
+
+    @needs_java
+    def test_java_void_omitted_in_signature(self):
+        syms = extract_file(JAVAMINI / "src/App.java", JAVAMINI)
+        main = next(s for s in syms if s.name == "main")
+        self.assertEqual(main.signature, "main(String[])")
+        self.assertEqual(main.returns, "void")
+
+
+class GroupExtrasTest(unittest.TestCase):
+    def test_shared_methods_once_extras_per_member(self):
+        syms = [
+            Symbol(name="AId", kind="record", file="m/a.py", line=1, params=["String"],
+                   visibility="pub"),
+            Symbol(name="BId", kind="record", file="m/b.py", line=1, params=["String"],
+                   visibility="pub"),
+            Symbol(name="of", kind="method", file="m/a.py", line=2, container="AId",
+                   signature="of(String):AId", visibility="pub"),
+            Symbol(name="of", kind="method", file="m/b.py", line=2, container="BId",
+                   signature="of(String):BId", visibility="pub"),
+            Symbol(name="extra", kind="method", file="m/b.py", line=3, container="BId",
+                   signature="extra():int", visibility="pub"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render_simple(Path(tmp), syms, [], "regen")
+        self.assertIn("AId,BId(R: String)", out)          # grouped despite extra method
+        self.assertEqual(out.count("of(String):⟨X⟩"), 1)  # shared shown once
+        self.assertIn("BId: extra():int", out)            # divergence kept -> no coverage loss
+
+
+@needs_java
 class TightFormatTest(unittest.TestCase):
     def test_ascii_return_sep_and_tight_commas(self):
-        out = build_digest(JAVAMINI, budget=8000)
+        out = build_digest(JAVAMINI)
         self.assertIn("evaluate(OrderId,List<ItemId>):Quote", out)
         self.assertIn("OrderStatus(E: NEW,PAID,SHIPPED)", out)
         self.assertIn("ItemId,OrderId,UserId(R: String)", out)
         self.assertIn("(I sealed: AddOp|RemoveOp)", out)
         self.assertNotIn("→", out)
+
+    def test_no_fanin_zero_marker(self):
+        out = build_digest(JAVAMINI)
+        self.assertNotIn("×0", out)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,15 +1,17 @@
 # mdl-digest
 
-Compresses any codebase into **one token-budgeted markdown file** you can attach to any LLM
-session for instant whole-project context — purpose, structure, flows, invariants, existing
-capabilities — without the model re-grepping the repo every session.
+Compresses any codebase into **one markdown file** you can attach to any LLM session for
+instant whole-project context — structure, signatures, call flows — without the model
+re-grepping the repo every session.
 
-Deterministic (no LLM in generation), project- and language-agnostic, zero maintenance after
-`init`. Python 3.11+ stdlib only.
+Deterministic (no LLM in generation), project-agnostic, zero maintenance after `init`.
+Extraction is AST-based everywhere: **tree-sitter** for Java and TypeScript/JavaScript,
+stdlib `ast` for Python.
 
 ## Install / use
 
-Standalone tool — clone anywhere (e.g. `~/workspace/mdl-digest`) and point it at any repo:
+Standalone, self-sufficient tool — clone anywhere (e.g. `~/workspace/mdl-digest`) and point
+it at any repo:
 
 ```bash
 python3 ~/workspace/mdl-digest/digest.py init --root /path/to/repo   # once per repo: git hooks + .gitignore + first build
@@ -17,14 +19,17 @@ python3 ~/workspace/mdl-digest/digest.py build --root /path/to/repo  # manual re
 python3 ~/workspace/mdl-digest/digest.py build --root . --lang java --out DIGEST.md
 ```
 
-Optional (better Java fidelity): `python3 -m venv .venv && .venv/bin/pip install tree-sitter
-tree-sitter-java` inside this project — hooks and the regen header auto-prefer that venv.
+The first time it meets a Java or TS/JS repo it offers to install its own dependencies
+(creates a `.venv` next to `digest.py`, pip-installs the tree-sitter grammars, and
+re-launches itself — one `y` and it just runs). Once that venv exists, every later run
+re-execs into it automatically, so plain `python3 digest.py …` always works. In
+non-interactive contexts it prints the exact install command instead. Python-only repos
+need no dependencies at all (stdlib `ast`). Installed git hooks auto-prefer the venv.
 
-Output: `PROJECT_DIGEST.md` at the repo root (gitignored). Attach it to any LLM chat or agent
-session. After `init`, post-commit/merge/checkout hooks keep it fresh; a per-blob cache under
-`.git/mdl-digest/` keeps rebuilds fast (~1s warm on a 70k-LOC repo, ~3s cold at 500k LOC).
+Output: `PROJECT_DIGEST.md` at the repo root (gitignored). Attach it to any LLM chat or
+agent session. After `init`, post-commit/merge/checkout hooks keep it fresh.
 
-## Output (default: simple layout)
+## Output
 
 Signatures only — no docs, no prose. The LLM reads semantics from names:
 
@@ -47,32 +52,34 @@ tokenizer (o200k) to be ~5% cheaper than the pretty variant with zero informatio
   reconstruct any file's directory): shared prefixes stated once.
 - Types with identical shape collapse into one entry
   (`AggregateId, ArtifactId, …(R: UUID)` with shared methods shown once as `⟨X⟩`).
-- After `>`: the functions it calls, first-call order, receiver-qualified
-  (`Rational.of`, `registry.resolve`) — filtered to project-defined names (platform noise
-  like `requireNonNull`/`toString` dropped) minus project-wide ubiquitous helpers.
+- After `>`: the functions it calls, first-call order. Receivers are **type-resolved**
+  from declared params/fields/locals: a call through a project-typed variable renders as
+  `Type.method`; calls through platform-typed variables are dropped entirely (no
+  `bigint.signum` noise even when a project method shares the name). Project-wide
+  ubiquitous helpers (logging/guards) are dropped too.
+- Call lists are **transitively reduced**: an entry already reachable through a sibling
+  entry is omitted (SCC-safe, so cycles never disappear). Reachability is preserved
+  exactly; follow the chain.
+- Types with the same shape group even when their method sets diverge: shared methods
+  print once as `⟨X⟩`, each member's extra methods print on its own `Name: …` line.
 - Class components show constructor dependencies (`Service(C: Registry, Clock)`); interface
   methods (bodyless) and enum constants are listed. Test code excluded.
 - Relations: `: X` = extends/implements; `(I sealed: A | B)` = permitted subtypes.
-- `!E` after a signature = declared throws (Java) / raised exceptions (Python).
+- `!E` after a signature = declared throws / raised exceptions, `Exception` suffix implied
+  (`!UnknownItem` = `UnknownItemException`). No `:Ret` = returns void/None.
 - `×N` on a type = referenced from N other files (only shown when N ≥ 10).
 - A one-line legend at the top of every digest explains the notation to any LLM.
-- No token budgeting in this layout (yet) — the complete listing is the product.
 
-`--full` renders the earlier rich sectioned layout (MODULES/API/ARCHETYPES/LINEAGE/…)
-under a hard `--budget` cap.
+## Architecture
 
-## Architecture: engine vs packs
-
-- `digest.py` — language-neutral engine: scan (git-tracked files only when in a repo) →
-  extract → group → render. Python via stdlib `ast`; Java via tree-sitter when the optional
-  `tree-sitter`+`tree-sitter-java` packages are importable (AST-grade calls/throws/relations),
-  regex fallback otherwise — the tool never *requires* non-stdlib deps. A `.venv` next to
-  `digest.py` is auto-preferred by the installed git hooks. TS via regex.
-- `packs/*.toml` — data-only detector packs used by the `--full` layout.
+Single file, one pipeline: scan (git-tracked files only when in a repo) → extract → render.
+Language-specific code is confined to three extractors that all produce the same `Symbol`
+records; everything downstream is language-neutral.
 
 ## Tests
 
 ```bash
-python3 -m unittest discover -s tests            # regex-fallback path
-.venv/bin/python -m unittest discover -s tests   # tree-sitter path
+.venv/bin/python -m unittest discover -s tests
 ```
+
+(Runs under plain `python3` too; Java/TS tests skip when the tree-sitter grammars are absent.)

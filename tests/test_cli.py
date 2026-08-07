@@ -1,4 +1,4 @@
-import json
+import os
 import shutil
 import subprocess
 import sys
@@ -8,10 +8,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from digest import build_digest, run_cli  # noqa: E402
+import digest  # noqa: E402
+from digest import run_cli  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
+PYMINI_FILE = FIXTURES / "pymini" / "app.py"
+
+needs_java = unittest.skipUnless(digest.has_parser("java"),
+                                 "tree-sitter-java not installed")
 
 
 def _make_repo(tmp: Path) -> Path:
@@ -26,18 +31,20 @@ def _make_repo(tmp: Path) -> Path:
     return repo
 
 
+@needs_java
 class CliBuildTest(unittest.TestCase):
     def test_build_writes_digest_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "digest.md"
             code = run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
-                            "--budget", "4000", "--quiet"])
+                            "--quiet"])
             self.assertEqual(code, 0)
             content = out.read_text()
             self.assertIn("PricingEngine", content)
             self.assertIn("> ", content)
 
 
+@needs_java
 class InitHooksTest(unittest.TestCase):
     def test_init_installs_hooks_and_gitignore_idempotently(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -62,34 +69,7 @@ class InitHooksTest(unittest.TestCase):
             self.assertIn("mdl-digest", content)
 
 
-class CacheTest(unittest.TestCase):
-    def test_cache_created_and_output_stable(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp))
-            first = build_digest(repo, budget=4000, cache_dir=repo / ".git" / "mdl-digest")
-            cache_file = repo / ".git" / "mdl-digest" / "cache.json"
-            self.assertTrue(cache_file.exists())
-            second = build_digest(repo, budget=4000, cache_dir=repo / ".git" / "mdl-digest")
-            self.assertEqual(first, second)
-
-    def test_cache_invalidated_on_change(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp))
-            cache_dir = repo / ".git" / "mdl-digest"
-            build_digest(repo, budget=4000, cache_dir=cache_dir)
-            target = repo / "src" / "engine" / "PricingEngine.java"
-            target.write_text(target.read_text().replace("evaluate", "quoteFor"))
-            out = build_digest(repo, budget=4000, cache_dir=cache_dir)
-            self.assertIn("quoteFor", out)
-            cache = json.loads((cache_dir / "cache.json").read_text())
-            entry = cache["files"]["src/engine/PricingEngine.java"]
-            self.assertTrue(any(s["name"] == "quoteFor" for s in entry["symbols"]))
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
+@needs_java
 class InitLangTest(unittest.TestCase):
     def test_lang_flag_baked_into_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -99,6 +79,35 @@ class InitLangTest(unittest.TestCase):
             self.assertIn("--lang java", hook)
 
 
+class BootstrapTest(unittest.TestCase):
+    def test_missing_parser_langs_detects_gap(self):
+        files = [JAVAMINI / "src/App.java", PYMINI_FILE]
+        saved = digest._PARSERS["java"]
+        digest._PARSERS["java"] = None
+        try:
+            self.assertEqual(digest._missing_parser_langs(files), {"java"})
+        finally:
+            digest._PARSERS["java"] = saved
+        # python never needs a parser
+        self.assertEqual(digest._missing_parser_langs([PYMINI_FILE]), set())
+
+    def test_cli_exits_with_instructions_when_bootstrap_exhausted(self):
+        saved = digest._PARSERS["java"]
+        digest._PARSERS["java"] = None
+        os.environ["MDL_DIGEST_BOOTSTRAPPED"] = "1"  # pretend re-exec already happened
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / "d.md"
+                with self.assertRaises(SystemExit) as ctx:
+                    run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
+                             "--quiet"])
+            self.assertIn("pip install", str(ctx.exception))
+            self.assertIn("tree-sitter-java", str(ctx.exception))
+        finally:
+            digest._PARSERS["java"] = saved
+            del os.environ["MDL_DIGEST_BOOTSTRAPPED"]
+
+
 class HookPythonSelectionTest(unittest.TestCase):
     def test_hook_uses_tool_venv_python_when_present(self):
         from digest import _hook_python
@@ -106,3 +115,7 @@ class HookPythonSelectionTest(unittest.TestCase):
         venv_py = tool_dir / ".venv" / "bin" / "python"
         expected = str(venv_py) if venv_py.exists() else "python3"
         self.assertEqual(_hook_python(), expected)
+
+
+if __name__ == "__main__":
+    unittest.main()
