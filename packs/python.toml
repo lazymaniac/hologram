@@ -1,0 +1,46 @@
+lang = "python"
+
+[[detector]]
+concept = "test_spec"
+pattern = 'def (test_\w+)'
+value = 1
+path = '(^|/)test_\w+\.py$|_test\.py$'
+transform = "snake_to_words"
+
+[[detector]]
+concept = "entry_point"
+pattern = 'if __name__ == .__main__.'
+value = 0
+kind = "main"
+
+[[detector]]
+concept = "entry_point"
+pattern = '@(?:app|router)\.(?:get|post|put|delete|patch)\("([^"]+)"\)'
+value = 1
+kind = "http"
+
+[[detector]]
+concept = "invariant"
+pattern = 'raise (?:ValueError|AssertionError)\("([^"]+)"\)'
+value = 1
+
+[[detector]]
+concept = "invariant"
+pattern = 'assert [^\n,]+'
+value = 0
+path = '^(?!.*test).*$'
+
+[[detector]]
+concept = "config"
+pattern = 'os\.(?:environ\[.|getenv\(.)([A-Z0-9_]+)'
+value = 1
+
+[[detector]]
+concept = "error"
+pattern = 'raise (\w+(?:Error|Exception))'
+value = 1
+
+[[detector]]
+concept = "persistence"
+pattern = '"(?:SELECT|INSERT|UPDATE|DELETE|MERGE|MATCH|CREATE) [^"]{0,60}'
+value = 0
