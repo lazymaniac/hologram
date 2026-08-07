@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""mdl-digest: compress a codebase into a single markdown signature listing for LLM sessions.
+"""hologram: compress a codebase into a single markdown signature listing for LLM sessions.
 
 Deterministic. One layout: a path-compressed package trie of public signatures,
 each function's project-internal calls inline after `>`.
@@ -1082,7 +1082,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     return head + "\n".join(_tree_lines(payload_by_dir)) + "\n"
 
 
-def build_digest(root: Path, regen_cmd: str = "mdl-digest build",
+def build_digest(root: Path, regen_cmd: str = "hologram build",
                  langs: set[str] | None = None) -> str:
     files, symbols, file_tokens = _gather(root, langs)
     scores = _fan_in_from_tokens(symbols, file_tokens)
@@ -1123,10 +1123,10 @@ def _bootstrap_or_die(missing: set[str], argv: list[str]) -> None:
               f"{venv_py} -m pip install {' '.join(pkgs)}")
 
     def _reexec() -> None:
-        os.environ["MDL_DIGEST_BOOTSTRAPPED"] = "1"
+        os.environ["HOLOGRAM_BOOTSTRAPPED"] = "1"
         os.execv(str(venv_py), [str(venv_py), script, *argv])
 
-    if os.environ.get("MDL_DIGEST_BOOTSTRAPPED"):
+    if os.environ.get("HOLOGRAM_BOOTSTRAPPED"):
         raise SystemExit(manual)  # second attempt failed too; don't exec-loop
     # NB: compare unresolved paths — the venv python is a symlink to the base
     # interpreter, but only invoking it via the venv path selects the venv's packages.
@@ -1135,7 +1135,7 @@ def _bootstrap_or_die(missing: set[str], argv: list[str]) -> None:
         _reexec()
     if not (sys.stdin.isatty() and sys.stderr.isatty()):
         raise SystemExit(manual)
-    reply = input(f"mdl-digest: no parser for {', '.join(sorted(missing))}; "
+    reply = input(f"hologram: no parser for {', '.join(sorted(missing))}; "
                   f"install {' '.join(pkgs)} into {venv_dir}? [Y/n] ")
     if reply.strip().lower() not in ("", "y", "yes"):
         raise SystemExit(manual)
@@ -1192,7 +1192,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                              "(java, python, typescript, javascript)")
     common.add_argument("--quiet", action="store_true")
 
-    parser = argparse.ArgumentParser(prog="mdl-digest", description=__doc__)
+    parser = argparse.ArgumentParser(prog="hologram", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_build = sub.add_parser("build", parents=[common],
                              help="(re)generate the digest file")

@@ -5,14 +5,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import digest  # noqa: E402
-from digest import Symbol, _tree_lines, build_digest, extract_file, render_simple  # noqa: E402
+import hologram  # noqa: E402
+from hologram import Symbol, _tree_lines, build_digest, extract_file, render_simple  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
 PYMINI = FIXTURES / "pymini"
 
-needs_java = unittest.skipUnless(digest.has_parser("java"),
+needs_java = unittest.skipUnless(hologram.has_parser("java"),
                                  "tree-sitter-java not installed")
 
 
@@ -202,7 +202,7 @@ class LanguageFilterTest(unittest.TestCase):
             self.assertIn("PricingEngine", java_only)
 
     def test_cli_lang_flag(self):
-        from digest import run_cli
+        from hologram import run_cli
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "d.md"
             code = run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),

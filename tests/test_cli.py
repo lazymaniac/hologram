@@ -8,14 +8,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import digest  # noqa: E402
-from digest import run_cli  # noqa: E402
+import hologram  # noqa: E402
+from hologram import run_cli  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
 PYMINI_FILE = FIXTURES / "pymini" / "app.py"
 
-needs_java = unittest.skipUnless(digest.has_parser("java"),
+needs_java = unittest.skipUnless(hologram.has_parser("java"),
                                  "tree-sitter-java not installed")
 
 
@@ -35,7 +35,7 @@ def _make_repo(tmp: Path) -> Path:
 class CliBuildTest(unittest.TestCase):
     def test_build_writes_digest_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "digest.md"
+            out = Path(tmp) / "hologram.md"
             code = run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
                             "--quiet"])
             self.assertEqual(code, 0)
@@ -54,7 +54,7 @@ class InitHooksTest(unittest.TestCase):
             hook = repo / ".git" / "hooks" / "post-commit"
             self.assertTrue(hook.exists())
             content = hook.read_text()
-            self.assertEqual(content.count("digest.py"), 1)
+            self.assertEqual(content.count("hologram.py"), 1)
             gitignore = (repo / ".gitignore").read_text()
             self.assertEqual(gitignore.count("PROJECT_DIGEST.md"), 1)
 
@@ -66,7 +66,7 @@ class InitHooksTest(unittest.TestCase):
             run_cli(["init", "--root", str(repo), "--quiet"])
             content = hook.read_text()
             self.assertIn("echo existing", content)
-            self.assertIn("mdl-digest", content)
+            self.assertIn("hologram", content)
 
 
 @needs_java
@@ -82,19 +82,19 @@ class InitLangTest(unittest.TestCase):
 class BootstrapTest(unittest.TestCase):
     def test_missing_parser_langs_detects_gap(self):
         files = [JAVAMINI / "src/App.java", PYMINI_FILE]
-        saved = digest._PARSERS["java"]
-        digest._PARSERS["java"] = None
+        saved = hologram._PARSERS["java"]
+        hologram._PARSERS["java"] = None
         try:
-            self.assertEqual(digest._missing_parser_langs(files), {"java"})
+            self.assertEqual(hologram._missing_parser_langs(files), {"java"})
         finally:
-            digest._PARSERS["java"] = saved
+            hologram._PARSERS["java"] = saved
         # python never needs a parser
-        self.assertEqual(digest._missing_parser_langs([PYMINI_FILE]), set())
+        self.assertEqual(hologram._missing_parser_langs([PYMINI_FILE]), set())
 
     def test_cli_exits_with_instructions_when_bootstrap_exhausted(self):
-        saved = digest._PARSERS["java"]
-        digest._PARSERS["java"] = None
-        os.environ["MDL_DIGEST_BOOTSTRAPPED"] = "1"  # pretend re-exec already happened
+        saved = hologram._PARSERS["java"]
+        hologram._PARSERS["java"] = None
+        os.environ["HOLOGRAM_BOOTSTRAPPED"] = "1"  # pretend re-exec already happened
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 out = Path(tmp) / "d.md"
@@ -104,13 +104,13 @@ class BootstrapTest(unittest.TestCase):
             self.assertIn("pip install", str(ctx.exception))
             self.assertIn("tree-sitter-java", str(ctx.exception))
         finally:
-            digest._PARSERS["java"] = saved
-            del os.environ["MDL_DIGEST_BOOTSTRAPPED"]
+            hologram._PARSERS["java"] = saved
+            del os.environ["HOLOGRAM_BOOTSTRAPPED"]
 
 
 class HookPythonSelectionTest(unittest.TestCase):
     def test_hook_uses_tool_venv_python_when_present(self):
-        from digest import _hook_python
+        from hologram import _hook_python
         tool_dir = Path(__file__).resolve().parents[1]
         venv_py = tool_dir / ".venv" / "bin" / "python"
         expected = str(venv_py) if venv_py.exists() else "python3"

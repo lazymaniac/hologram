@@ -4,17 +4,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import digest  # noqa: E402
+import hologram  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
 
 
-@unittest.skipUnless(digest.has_parser("java"), "tree-sitter-java not installed")
+@unittest.skipUnless(hologram.has_parser("java"), "tree-sitter-java not installed")
 class TreeSitterJavaTest(unittest.TestCase):
     def _syms(self, rel):
         text = (JAVAMINI / rel).read_text()
-        return digest._extract_java(text, rel)
+        return hologram._extract_java(text, rel)
 
     def test_types_methods_params_returns(self):
         syms = self._syms("src/engine/PricingEngine.java")
@@ -63,16 +63,16 @@ class TreeSitterJavaTest(unittest.TestCase):
         self.assertEqual(ctor.params, ["Map<ItemId,Long>"])
 
 
-@unittest.skipUnless(digest.has_parser("java"), "tree-sitter-java not installed")
+@unittest.skipUnless(hologram.has_parser("java"), "tree-sitter-java not installed")
 class MissingParserErrorTest(unittest.TestCase):
     def test_extract_file_errors_without_parser(self):
-        saved = digest._PARSERS["java"]
-        digest._PARSERS["java"] = None
+        saved = hologram._PARSERS["java"]
+        hologram._PARSERS["java"] = None
         try:
             with self.assertRaises(SystemExit):
-                digest.extract_file(JAVAMINI / "src/App.java", JAVAMINI)
+                hologram.extract_file(JAVAMINI / "src/App.java", JAVAMINI)
         finally:
-            digest._PARSERS["java"] = saved
+            hologram._PARSERS["java"] = saved
 
 
 if __name__ == "__main__":

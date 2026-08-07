@@ -1,4 +1,4 @@
-# mdl-digest
+# hologram
 
 Compresses any codebase into **one markdown file** you can attach to any LLM session for
 instant whole-project context — structure, signatures, call flows — without the model
@@ -10,19 +10,19 @@ stdlib `ast` for Python.
 
 ## Install / use
 
-Standalone, self-sufficient tool — clone anywhere (e.g. `~/workspace/mdl-digest`) and point
+Standalone, self-sufficient tool — clone anywhere (e.g. `~/workspace/hologram`) and point
 it at any repo:
 
 ```bash
-python3 ~/workspace/mdl-digest/digest.py init --root /path/to/repo   # once per repo: git hooks + .gitignore + first build
-python3 ~/workspace/mdl-digest/digest.py build --root /path/to/repo  # manual rebuild (hooks do this automatically)
-python3 ~/workspace/mdl-digest/digest.py build --root . --lang java --out DIGEST.md
+python3 ~/workspace/hologram/hologram.py init --root /path/to/repo   # once per repo: git hooks + .gitignore + first build
+python3 ~/workspace/hologram/hologram.py build --root /path/to/repo  # manual rebuild (hooks do this automatically)
+python3 ~/workspace/hologram/hologram.py build --root . --lang java --out DIGEST.md
 ```
 
 The first time it meets a Java or TS/JS repo it offers to install its own dependencies
-(creates a `.venv` next to `digest.py`, pip-installs the tree-sitter grammars, and
+(creates a `.venv` next to `hologram.py`, pip-installs the tree-sitter grammars, and
 re-launches itself — one `y` and it just runs). Once that venv exists, every later run
-re-execs into it automatically, so plain `python3 digest.py …` always works. In
+re-execs into it automatically, so plain `python3 hologram.py …` always works. In
 non-interactive contexts it prints the exact install command instead. Python-only repos
 need no dependencies at all (stdlib `ast`). Installed git hooks auto-prefer the venv.
 
@@ -83,3 +83,7 @@ records; everything downstream is language-neutral.
 ```
 
 (Runs under plain `python3` too; Java/TS tests skip when the tree-sitter grammars are absent.)
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -4,14 +4,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import digest  # noqa: E402
-from digest import extract_file  # noqa: E402
+import hologram  # noqa: E402
+from hologram import extract_file  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 PYMINI = FIXTURES / "pymini"
 TSMINI = FIXTURES / "tsmini"
 
-needs_ts = unittest.skipUnless(digest.has_parser("typescript"),
+needs_ts = unittest.skipUnless(hologram.has_parser("typescript"),
                                "tree-sitter-typescript not installed")
 
 
