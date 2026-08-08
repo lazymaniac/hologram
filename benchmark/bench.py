@@ -218,5 +218,36 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
         drop_workspace(corpus, ws)
 
 
+def report(rows: list[dict]) -> str:
+    if not rows:
+        return "no runs recorded\n"
+    lines = ["| condition | runs | accepted | duplication (reuse tasks) | "
+             "reads | searches | turns | tokens in | tokens out |",
+             "|---|---|---|---|---|---|---|---|---|"]
+    for cond in sorted({r["condition"] for r in rows}):
+        rs = [r for r in rows if r["condition"] == cond]
+        reuse = [r for r in rs if r["kind"] == "reuse"]
+        dup_rate = (100 * sum(1 for r in reuse if r["duplicated"]) / len(reuse)
+                    if reuse else 0)
+        acc = 100 * sum(1 for r in rs if r["accepted"]) / len(rs)
+
+        def mean(key):
+            return statistics.fmean(r[key] for r in rs)
+
+        lines.append(
+            f"| {cond} | {len(rs)} | {acc:.0f}% | {dup_rate:.0f}% | "
+            f"{mean('reads'):.1f} | {mean('searches'):.1f} | "
+            f"{mean('turns'):.1f} | {mean('tokens_in'):,.0f} | "
+            f"{mean('tokens_out'):,.0f} |")
+    lines.append("")
+    lines.append("Per-task duplication (reuse tasks):")
+    for r in sorted(rows, key=lambda r: (r["task"], r["condition"], r["rep"])):
+        if r["kind"] == "reuse":
+            mark = "DUP:" + ",".join(r["duplicated"]) if r["duplicated"] \
+                else ("reused:" + ",".join(r["reused"]) if r["reused"] else "—")
+            lines.append(f"- {r['task']} [{r['condition']}#{r['rep']}] {mark}")
+    return "\n".join(lines) + "\n"
+
+
 if __name__ == "__main__":
     raise SystemExit(0)

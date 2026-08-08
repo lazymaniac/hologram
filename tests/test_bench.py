@@ -211,5 +211,29 @@ class RunOneTest(unittest.TestCase):
             self.assertTrue((results / "noop-B-1.jsonl").exists())
 
 
+class ReportTest(unittest.TestCase):
+    def test_aggregates_by_condition(self):
+        rows = [
+            {"task": "t1", "kind": "reuse", "condition": "A", "rep": 0,
+             "accepted": True, "reused": ["normalize"], "duplicated": [],
+             "new_lines": 1, "reads": 3, "searches": 2, "edits": 2,
+             "turns": 9, "tokens_in": 100, "tokens_out": 10},
+            {"task": "t1", "kind": "reuse", "condition": "B", "rep": 0,
+             "accepted": True, "reused": [], "duplicated": ["normalize2"],
+             "new_lines": 2, "reads": 9, "searches": 8, "edits": 2,
+             "turns": 15, "tokens_in": 300, "tokens_out": 30},
+        ]
+        md = bench.report(rows)
+        self.assertIn("| A |", md)
+        self.assertIn("| B |", md)
+        # duplication rate: A 0%, B 100% of reuse-kind runs
+        self.assertIn("0%", md)
+        self.assertIn("100%", md)
+        self.assertIn("reads", md)
+
+    def test_empty_rows(self):
+        self.assertIn("no runs", bench.report([]))
+
+
 if __name__ == "__main__":
     unittest.main()
