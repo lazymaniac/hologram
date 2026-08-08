@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import difflib
+import hashlib
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -31,6 +34,8 @@ LANG_EXTENSIONS = {
     ".go": "go",
     ".rs": "rust",
     ".cs": "csharp",
+    ".kt": "kotlin",
+    ".kts": "kotlin",
     ".c": "c",
     ".h": "c",
     ".cpp": "cpp",
@@ -54,7 +59,7 @@ DENYLIST_DIRS = {
     "fixtures", "testdata", "resources",
 }
 
-TYPE_KINDS = ("class", "interface", "record", "enum")
+TYPE_KINDS = ("class", "interface", "record", "enum", "type")
 
 
 @dataclass
@@ -74,6 +79,7 @@ class Symbol:
     permits: list[str] = field(default_factory=list)
     raises: list[str] = field(default_factory=list)
     bindings: dict[str, str] = field(default_factory=dict)  # var/param/field name -> declared type
+    size: int = 0  # body line count (0 = bodyless/unknown)
 
 
 def detect_language(path: Path) -> str | None:
@@ -220,6 +226,7 @@ _GRAMMAR_MODULES = {
     "go": ("tree_sitter_go", "tree-sitter-go"),
     "rust": ("tree_sitter_rust", "tree-sitter-rust"),
     "csharp": ("tree_sitter_c_sharp", "tree-sitter-c-sharp"),
+    "kotlin": ("tree_sitter_kotlin", "tree-sitter-kotlin"),
     "c": ("tree_sitter_c", "tree-sitter-c"),
     "cpp": ("tree_sitter_cpp", "tree-sitter-cpp"),
     "lua": ("tree_sitter_lua", "tree-sitter-lua"),
@@ -233,6 +240,7 @@ _PARSERS = {
     "go": _load_parser("tree_sitter_go"),
     "rust": _load_parser("tree_sitter_rust"),
     "csharp": _load_parser("tree_sitter_c_sharp"),
+    "kotlin": _load_parser("tree_sitter_kotlin"),
     "c": _load_parser("tree_sitter_c"),
     "cpp": _load_parser("tree_sitter_cpp"),
     "lua": _load_parser("tree_sitter_lua"),
@@ -283,6 +291,11 @@ def _ast_calls(body, own_name: str, call_kinds, entry_fn) -> list[str]:
             continue
         seen.append(entry)
     return seen[:12]
+
+
+
+def _body_lines(body) -> int:
+    return body.end_point[0] - body.start_point[0] + 1 if body is not None else 0
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +411,7 @@ def _java_method_symbol(m, type_name: str, rel: str, class_binds: dict[str, str]
             signature=f"{name}({','.join(params)})", params=params, returns=name,
             visibility=_ast_vis(mods),
             container=type_name, lang="java", raises=throws,
-            calls=_java_calls(body, name), bindings=binds,
+            calls=_java_calls(body, name), bindings=binds, size=_body_lines(body),
         )
     returns = _ast_text(_ast_field(m, "type"))
     ret_suffix = f":{returns}" if returns != "void" else ""
@@ -409,6 +422,7 @@ def _java_method_symbol(m, type_name: str, rel: str, class_binds: dict[str, str]
         visibility=_ast_vis(mods),
         container=type_name, lang="java",
         calls=_java_calls(body, name), raises=throws, bindings=binds,
+        size=_body_lines(body),
     )
 
 
@@ -575,7 +589,7 @@ def _ts_fn_symbol(node, rel: str, container: str | None, visibility: str,
         signature=f"{name}({','.join(params)}){ret_suffix}",
         params=params, returns=returns,
         visibility=visibility, container=container, lang="typescript",
-        calls=_ts_calls(body, name),
+        calls=_ts_calls(body, name), size=_body_lines(body),
         bindings={**(class_binds or {}),
                   **_ts_param_bindings(_ast_field(fn, "parameters")),
                   **_ts_local_bindings(body)},
@@ -586,8 +600,9 @@ _TS_FN_VALUES = ("arrow_function", "function_expression")
 
 
 def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
-    """`const f = (…) => …` at module scope (incl. exported). Nested closures are
-    deliberately excluded — only declarations at program/export level count."""
+    """Module-scope `const f = (…) => …` plus object-literal APIs
+    (`export const api = { get(){}, … }`). Nested closures are deliberately
+    excluded — only declarations at program/export level count."""
     symbols = []
     for top in root_node.children:
         exported = top.type == "export_statement"
@@ -598,11 +613,55 @@ def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
             for d in decl.children:
                 if d.type != "variable_declarator":
                     continue
+                name = _ast_text(_ast_field(d, "name"))
                 val = _ast_field(d, "value")
-                if val is not None and val.type in _TS_FN_VALUES:
+                if val is None:
+                    continue
+                if val.type in _TS_FN_VALUES:
                     symbols.append(_ts_fn_symbol(
                         d, rel, None, "pub" if exported else "priv",
-                        name=_ast_text(_ast_field(d, "name")), fn_node=val))
+                        name=name, fn_node=val))
+                elif val.type == "object":
+                    fns = []
+                    for c in val.children:
+                        if c.type == "method_definition":
+                            fns.append((_ast_text(_ast_field(c, "name")), c, c))
+                        elif c.type == "pair":
+                            v = _ast_field(c, "value")
+                            if v is not None and v.type in _TS_FN_VALUES:
+                                fns.append((_ast_text(_ast_field(c, "key")), c, v))
+                    if not fns:
+                        continue  # plain config object, not an API
+                    symbols.append(Symbol(
+                        name=name, kind="class", file=rel, line=d.start_point[0] + 1,
+                        signature=f"const {name}",
+                        visibility="pub" if exported else "priv", lang="typescript"))
+                    for mname, node, fn_node in fns:
+                        symbols.append(_ts_fn_symbol(
+                            node, rel, name, "pub", name=mname, fn_node=fn_node))
+    return symbols
+
+
+def _ts_aliases_and_reexports(root_node, rel: str) -> list[Symbol]:
+    symbols = []
+    for al in _ast_collect(root_node, ("type_alias_declaration",)):
+        target = tight_type(_ast_text(_ast_field(al, "value")))[:40]
+        symbols.append(Symbol(
+            name=_ast_text(_ast_field(al, "name")), kind="type", file=rel,
+            line=al.start_point[0] + 1,
+            signature=f"type {_ast_text(_ast_field(al, 'name'))}",
+            params=[target] if target else [],
+            visibility="pub" if _ts_exported(al) else "priv", lang="typescript"))
+    for ex in root_node.children:
+        if ex.type != "export_statement" or _ast_field(ex, "source") is None:
+            continue  # only `export … from './x'` barrels
+        for spec in _ast_collect(ex, ("export_specifier",)):
+            nm = _ast_field(spec, "alias") or _ast_field(spec, "name")
+            if nm is not None:
+                symbols.append(Symbol(
+                    name=_ast_text(nm), kind="reexport", file=rel,
+                    line=ex.start_point[0] + 1, signature=_ast_text(nm),
+                    visibility="pub", lang="typescript"))
     return symbols
 
 
@@ -658,6 +717,7 @@ def _extract_ts(text: str, rel: str, lang: str = "typescript") -> list[Symbol]:
         symbols.append(_ts_fn_symbol(
             fn, rel, None, "pub" if _ts_exported(fn) else "priv"))
     symbols.extend(_ts_top_level_arrows(tree.root_node, rel))
+    symbols.extend(_ts_aliases_and_reexports(tree.root_node, rel))
     return symbols
 
 
@@ -833,6 +893,7 @@ def _extract_go(text: str, rel: str) -> list[Symbol]:
             params=params, returns=returns,
             visibility=_go_vis(name), container=container, lang="go",
             calls=_ast_calls(body, name, ("call_expression",), _go_call_entry),
+            size=_body_lines(body),
             bindings=binds,
         ))
     return symbols
@@ -921,6 +982,7 @@ def _rs_fn_symbol(fn, rel: str, container: str | None, vis: str,
         visibility=vis, container=container, lang="rust",
         calls=_ast_calls(body, name,
                          ("call_expression", "struct_expression"), _rs_call_entry),
+        size=_body_lines(body),
         bindings=binds,
     )
 
@@ -1105,8 +1167,136 @@ def _extract_cs(text: str, rel: str) -> list[Symbol]:
                 signature=f"{mname}({','.join(mparams)}){ret_suffix}",
                 params=mparams, returns=returns,
                 visibility=_cs_vis(m), container=name, lang="csharp",
-                calls=calls, bindings=binds,
+                calls=calls, bindings=binds, size=_body_lines(mbody),
             ))
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Kotlin extraction
+# ---------------------------------------------------------------------------
+
+def _kt_vis(node) -> str:
+    for m in node.children:
+        if m.type == "modifiers" and any(
+                _ast_text(c) in ("private", "protected") for c in m.children):
+            return "priv"
+    return "pub"
+
+
+def _kt_params(pnode) -> tuple[list[str], dict[str, str]]:
+    """Types + name bindings from function_value_parameters / class_parameters."""
+    types: list[str] = []
+    binds: dict[str, str] = {}
+    if pnode is None:
+        return types, binds
+    for p in pnode.children:
+        if p.type not in ("parameter", "class_parameter"):
+            continue
+        idents = [c for c in p.children if c.type == "identifier"]
+        tnodes = [c for c in p.children
+                  if c.type in ("user_type", "nullable_type", "function_type")]
+        if not idents or not tnodes:
+            continue
+        t = tight_type(_ast_text(tnodes[-1]))
+        types.append(t)
+        binds[_ast_text(idents[0])] = _base_type(t.rstrip("?"))
+    return types, binds
+
+
+def _kt_return(fn) -> str | None:
+    """Return type: the user_type sibling between the parameter list and the body."""
+    seen_params = False
+    for c in fn.children:
+        if c.type == "function_value_parameters":
+            seen_params = True
+        elif seen_params and c.type in ("user_type", "nullable_type"):
+            return tight_type(_ast_text(c))
+        elif c.type == "function_body":
+            break
+    return None
+
+
+def _kt_call_entry(n) -> tuple[str, str]:
+    head = n.children[0] if n.children else None
+    if head is None:
+        return "", ""
+    if head.type in ("identifier", "simple_identifier"):
+        name = _ast_text(head)
+        return name, name
+    if head.type == "navigation_expression":
+        parts = _ast_text(head).split(".")
+        name = parts[-1]
+        if len(parts) == 2 and _IDENT_RE.fullmatch(parts[0]):
+            return name, f"{parts[0]}.{name}"
+        return name, name
+    return "", ""
+
+
+def _kt_fn_symbol(fn, rel: str, container: str | None, vis: str,
+                  class_binds: dict[str, str]) -> Symbol:
+    name = _ast_text(_ast_field(fn, "name"))
+    pnode = next((c for c in fn.children if c.type == "function_value_parameters"), None)
+    params, binds = _kt_params(pnode)
+    body = next((c for c in fn.children if c.type == "function_body"), None)
+    returns = _kt_return(fn)
+    ret_suffix = f":{returns}" if returns and returns != "Unit" else ""
+    return Symbol(
+        name=name, kind="method" if container else "fn", file=rel,
+        line=fn.start_point[0] + 1,
+        signature=f"{name}({','.join(params)}){ret_suffix}",
+        params=params, returns=returns,
+        visibility=vis, container=container, lang="kotlin",
+        calls=_ast_calls(body, name, ("call_expression",), _kt_call_entry),
+        bindings={**class_binds, **binds},
+        size=(body.end_point[0] - body.start_point[0] + 1) if body is not None else 0,
+    )
+
+
+def _extract_kotlin(text: str, rel: str) -> list[Symbol]:
+    tree = _PARSERS["kotlin"].parse(text.encode())
+    symbols: list[Symbol] = []
+    for tn in _ast_collect(tree.root_node,
+                           ("class_declaration", "object_declaration")):
+        name = _ast_text(_ast_field(tn, "name"))
+        if not name:
+            continue
+        is_iface = any(c.type == "interface" for c in tn.children)
+        is_enum = any(_ast_text(m) == "enum"
+                      for m in _ast_collect(tn, ("class_modifier",)))
+        is_data = any(_ast_text(m) == "data"
+                      for m in _ast_collect(tn, ("class_modifier",)))
+        ctor = next((c for c in tn.children if c.type == "primary_constructor"), None)
+        cparams: list[str] = []
+        class_binds: dict[str, str] = {}
+        if ctor is not None:
+            pl = next((c for c in ctor.children if c.type == "class_parameters"), None)
+            cparams, class_binds = _kt_params(pl)
+        supers = []
+        for ds in tn.children:
+            if ds.type == "delegation_specifiers":
+                supers = [_base_type(re.sub(r"\(.*", "", _ast_text(d)))
+                          for d in ds.children if d.type == "delegation_specifier"]
+        body = next((c for c in tn.children
+                     if c.type in ("class_body", "enum_class_body")), None)
+        if is_enum and body is not None:
+            cparams = [_ast_text(e.children[0])
+                       for e in _ast_collect(body, ("enum_entry",)) if e.children]
+        kind = ("enum" if is_enum else "interface" if is_iface
+                else "record" if is_data else "class")
+        symbols.append(Symbol(
+            name=name, kind=kind, file=rel, line=tn.start_point[0] + 1,
+            signature=f"{kind} {name}", params=cparams, supers=supers,
+            visibility=_kt_vis(tn), lang="kotlin",
+        ))
+        if body is not None:
+            for fn in body.children:
+                if fn.type == "function_declaration":
+                    vis = _kt_vis(fn) if not is_iface else _kt_vis(tn)
+                    symbols.append(_kt_fn_symbol(fn, rel, name, vis, class_binds))
+    for fn in tree.root_node.children:
+        if fn.type == "function_declaration":
+            symbols.append(_kt_fn_symbol(fn, rel, None, _kt_vis(fn), {}))
     return symbols
 
 
@@ -1238,6 +1428,7 @@ def _extract_c(text: str, rel: str) -> list[Symbol]:
             params=params, returns=returns,
             visibility="priv" if _c_static(fn) else "pub", lang="c",
             calls=_ast_calls(body, name, ("call_expression",), _c_call_entry),
+            size=_body_lines(body),
             bindings=binds,
         ))
     for decl in tree.root_node.children:  # top-level prototypes (headers)
@@ -1311,7 +1502,7 @@ def _extract_cpp(text: str, rel: str) -> list[Symbol]:
                     calls=_ast_calls(mbody, mname,
                                      ("call_expression", "new_expression"),
                                      _c_call_entry),
-                    bindings=binds,
+                    bindings=binds, size=_body_lines(mbody),
                 )
                 symbols.append(sym)
                 members[(cname, mname)] = sym
@@ -1414,6 +1605,7 @@ def _extract_lua(text: str, rel: str) -> list[Symbol]:
             container=container, lang="lua",
             calls=_ast_calls(_ast_field(fn, "body"), name,
                              ("function_call",), _lua_call_entry),
+            size=_body_lines(_ast_field(fn, "body")),
         ))
     return symbols
 
@@ -1559,6 +1751,7 @@ def _py_fn_symbol(node, rel: str, container: str | None) -> Symbol:
         calls=[c for c in _py_calls(node) if c != node.name],
         raises=_py_raises(node),
         bindings=_py_bindings(node),
+        size=(getattr(node, "end_lineno", node.lineno) - node.lineno + 1),
     )
 
 
@@ -1605,6 +1798,7 @@ EXTRACTORS = {
     "tsx": _extract_tsx,
     "vue": _extract_sfc,
     "svelte": _extract_sfc,
+    "kotlin": _extract_kotlin,
     "go": _extract_go,
     "rust": _extract_rust,
     "csharp": _extract_cs,
@@ -1637,19 +1831,50 @@ def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol
 # ---------------------------------------------------------------------------
 
 def _gather(root: Path, langs: set[str] | None = None):
-    """Extract symbols and identifier-token sets per file.
+    """Extract symbols, identifier-token sets per file, and the corpus state hash.
     `langs` restricts to those languages (e.g. {"java"}); None means all."""
     files = scan_files(root)
     if langs is not None:
         files = [f for f in files if detect_language(f) in langs]
     symbols: list[Symbol] = []
     file_tokens: dict[str, set[str]] = {}
+    state = hashlib.md5()
     for f in files:
         rel = str(f.relative_to(root))
-        text = f.read_text(errors="replace")
+        raw = f.read_bytes()
+        state.update(rel.encode())
+        state.update(hashlib.md5(raw).digest())
+        text = raw.decode(errors="replace")
         symbols.extend(extract_file(f, root, text))
         file_tokens[rel] = set(_IDENT_RE.findall(strip_comments_and_strings(text)))
-    return files, symbols, file_tokens
+    return files, symbols, file_tokens, state.hexdigest()[:12]
+
+
+def _state_hash(root: Path, langs: set[str] | None = None) -> str:
+    """The corpus hash `_gather` would produce, without parsing anything — cheap
+    freshness probe for `check` / `--if-stale`."""
+    files = scan_files(root)
+    if langs is not None:
+        files = [f for f in files if detect_language(f) in langs]
+    state = hashlib.md5()
+    for f in files:
+        try:
+            raw = f.read_bytes()
+        except OSError:
+            continue
+        state.update(str(f.relative_to(root)).encode())
+        state.update(hashlib.md5(raw).digest())
+    return state.hexdigest()[:12]
+
+
+def _digest_state(out_path: Path) -> str | None:
+    """The `state` stamp recorded in an existing digest's header, if any."""
+    try:
+        head = out_path.read_text(errors="replace").split("\n", 1)[0]
+    except OSError:
+        return None
+    m = re.search(r"· state (\w{12})", head)
+    return m.group(1) if m else None
 
 
 def _fan_in_from_tokens(symbols: list[Symbol], file_tokens: dict[str, set[str]]) -> dict[str, float]:
@@ -1668,7 +1893,8 @@ def _fan_in_from_tokens(symbols: list[Symbol], file_tokens: dict[str, set[str]])
 # Rendering
 # ---------------------------------------------------------------------------
 
-KIND_LETTER = {"record": "R", "class": "C", "interface": "I", "enum": "E", "fn": "F"}
+KIND_LETTER = {"record": "R", "class": "C", "interface": "I", "enum": "E", "fn": "F",
+               "type": "T"}
 
 
 def estimate_tokens(text: str) -> int:
@@ -1812,6 +2038,59 @@ def _reduce_calls(edges: dict[str, set[str]],
     return reduced
 
 
+_BOILERPLATE_PARTS = ("src", "main", "java", "kotlin", "test", "tests", "lib")
+
+
+def _dep_lines(symbols: list[Symbol], file_tokens: dict[str, set[str]],
+               min_refs: int = 2) -> list[str]:
+    """Module dependency edges (`a→b` = code in a references types defined in b),
+    from data already in hand. Modules are top path segments after boilerplate
+    and the corpus-wide shared prefix."""
+    type_dir: dict[str, str] = {}
+    for s in symbols:
+        if s.kind in TYPE_KINDS and not _is_test_path(s.file):
+            type_dir.setdefault(s.name, str(Path(s.file).parent))
+    dirs = {str(Path(rel).parent) for rel in file_tokens} | set(type_dir.values())
+    stripped = {d: [p for p in Path(d).parts if p not in _BOILERPLATE_PARTS]
+                for d in dirs}
+    common: list[str] = []
+    lists = [p for p in stripped.values() if p]
+    while lists and all(len(p) > len(common) + 1 for p in lists) \
+            and len({p[len(common)] for p in lists}) == 1:
+        common.append(lists[0][len(common)])
+
+    def label(d: str) -> str:
+        parts = stripped[d]
+        if common and parts[:len(common)] == common and len(parts) > len(common):
+            parts = parts[len(common):]
+        return parts[0] if parts else "."
+
+    counts: dict[tuple[str, str], int] = {}
+    for rel, toks in file_tokens.items():
+        if _is_test_path(rel):
+            continue
+        m_from = label(str(Path(rel).parent))
+        for t in toks & set(type_dir):
+            m_to = label(type_dir[t])
+            if m_from != m_to:
+                counts[(m_from, m_to)] = counts.get((m_from, m_to), 0) + 1
+    by_src: dict[str, list[str]] = {}
+    for (a, b), n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        if n >= min_refs:
+            by_src.setdefault(a, []).append(b)
+    cells = [f"{a}→{','.join(bs)}" for a, bs in sorted(by_src.items())]
+    lines, cur = [], ""
+    for c in cells:
+        if cur and len(cur) + len(c) + 3 > 110:
+            lines.append(f"· deps {cur}")
+            cur = c
+        else:
+            cur = f"{cur} | {c}" if cur else c
+    if cur:
+        lines.append(f"· deps {cur}")
+    return lines
+
+
 def _ubiquitous_calls(fns_by_lang: dict[str, list[Symbol]]) -> set[str]:
     """Callees named by >25% of a language's functions (log/guard helpers): noise."""
     ubiquitous: set[str] = set()
@@ -1838,7 +2117,9 @@ def _total_loc(files: list[Path]) -> int:
 
 def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   regen_cmd: str, scores: dict[str, float] | None = None,
-                  private_sigs: bool = False) -> str:
+                  private_sigs: bool = False, tested: set[str] | None = None,
+                  behaviors: bool = False, state: str = "",
+                  deps: list[str] | None = None) -> str:
     """Signatures only, as a package trie; each function's calls inline after `>`.
     Private members render as packed name lists (`- a,b`), or as full `-`-prefixed
     signatures when `private_sigs` is set.
@@ -1941,6 +2222,10 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         sig = sym.signature or sym.name
         if sym.visibility == "priv":
             sig = f"-{sig}"
+        if sym.size >= 40:
+            sig = f"{sig} ⋮{sym.size}"
+        if tested and sym.visibility == "pub" and sym.name in tested:
+            sig = f"{sig} ✓"
         kept = kept_by_sym.get(id(sym), [])
         if sym.raises:
             sig = f"{sig} !{','.join(_strip_exc(r) for r in sym.raises)}"
@@ -2019,25 +2304,71 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     for (d, stem), names_only in sorted(priv_top_by_file.items()):
         payload_by_dir.setdefault(d, []).append(
             f"- {stem}: {','.join(dict.fromkeys(names_only))}")
+    reex_by_file: dict[tuple[str, str], list[str]] = {}
+    for s in prod:
+        if s.kind == "reexport":
+            key = (str(Path(s.file).parent), Path(s.file).name)
+            names_r = reex_by_file.setdefault(key, [])
+            if s.name not in names_r:
+                names_r.append(s.name)
+    for (d, fname), names_r in sorted(reex_by_file.items()):
+        payload_by_dir.setdefault(d, []).append(f"» {fname}: {','.join(names_r)}")
+
+    tail = ""
+    if behaviors:
+        by_owner: dict[str, list[str]] = {}
+        for s in symbols:
+            if _is_test_path(s.file) and s.kind in ("fn", "method"):
+                owner = re.sub(r"(Test|Tests|IT|Spec)$", "",
+                               s.container or Path(s.file).stem) or s.container
+                if s.name not in by_owner.setdefault(owner, []):
+                    by_owner[owner].append(s.name)
+        blines = []
+        for owner, names_b in sorted(by_owner.items()):
+            cur = f"? {owner}:"
+            for n in names_b:
+                if len(cur) + len(n) + 1 > 150:
+                    blines.append(cur)
+                    cur = f"? {owner}: {n}"
+                else:
+                    cur += f" {n},"
+            blines.append(cur.rstrip(","))
+        if blines:
+            tail = "\n" + "\n".join(blines)
 
     loc = _total_loc(files)
+    state_part = f" · state {state}" if state else ""
     head = (f"# {root.name} @{git_head(root)} {date.today().isoformat()} · "
-            f"{loc:,} LOC · regen: {regen_cmd}\n"
-            "· legend: (C)lass (R)ecord (I)nterface (E)num (F)n · (R: …)=components "
-            "(C: …)=ctor deps (E: …)=values · name(params):Ret, no :Ret=void · "
-            ": X=extends/implements · sealed: A|B=permits · sig > calls, project-only, "
-            "transitively reduced · !E=throws, Exception suffix dropped · "
-            "⟨X⟩=member's own name · ×N=referenced from N files · "
+            f"{loc:,} LOC{state_part} · regen: {regen_cmd}\n"
+            "· legend: (C)lass (R)ecord (I)nterface (E)num (F)n (T)ype-alias · "
+            "(R: …)=components (C: …)=ctor deps (E: …)=values · "
+            "name(params):Ret, no :Ret=void · : X=extends/implements · "
+            "sealed: A|B=permits · sig > calls, project-only, transitively reduced · "
+            "!E=throws, Exception suffix dropped · ⟨X⟩=member's own name · "
+            "×N=referenced from N files · ⋮N=body lines · ✓=referenced from tests · "
+            "»file: re-exports · "
             + ("-sig=private" if private_sigs else "- x,y=private members, names only")
+            + (" · ? Owner: test names" if behaviors else "")
             + "\n")
-    return head + "\n".join(_tree_lines(payload_by_dir)) + "\n"
+    dep_part = ("\n".join(deps) + "\n") if deps else ""
+    return head + dep_part + "\n".join(_tree_lines(payload_by_dir)) + tail + "\n"
 
 
 def build_digest(root: Path, regen_cmd: str = "hologram build",
-                 langs: set[str] | None = None, private_sigs: bool = False) -> str:
-    files, symbols, file_tokens = _gather(root, langs)
+                 langs: set[str] | None = None, private_sigs: bool = False,
+                 behaviors: bool = False) -> str:
+    files, symbols, file_tokens, state = _gather(root, langs)
     scores = _fan_in_from_tokens(symbols, file_tokens)
-    return render_simple(root, symbols, files, regen_cmd, scores, private_sigs)
+    test_tokens: set[str] = set()
+    for rel, toks in file_tokens.items():
+        if _is_test_path(rel):
+            test_tokens |= toks
+    tested = {s.name for s in symbols
+              if not _is_test_path(s.file) and s.visibility == "pub"
+              and s.kind in ("fn", "method")} & test_tokens
+    deps = _dep_lines(symbols, file_tokens)
+    return render_simple(root, symbols, files, regen_cmd, scores, private_sigs,
+                         tested=tested, behaviors=behaviors, state=state, deps=deps)
 
 
 # ---------------------------------------------------------------------------
@@ -2144,33 +2475,80 @@ def run_cli(argv: list[str] | None = None) -> int:
     common.add_argument("--private", action="store_true",
                         help="full signatures for private members "
                              "(default: names only)")
+    common.add_argument("--behaviors", action="store_true",
+                        help="append test-method names as behavior specs "
+                             "(costly on test-heavy repos)")
+    common.add_argument("--out", type=Path, default=None)
     common.add_argument("--quiet", action="store_true")
 
     parser = argparse.ArgumentParser(prog="hologram", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_build = sub.add_parser("build", parents=[common],
                              help="(re)generate the digest file")
-    p_build.add_argument("--out", type=Path, default=None)
+    p_build.add_argument("--if-stale", action="store_true",
+                         help="skip the rebuild when the digest's state stamp "
+                              "matches the current sources")
     sub.add_parser("init", parents=[common],
                    help="install git hooks and gitignore entry, then build")
+    sub.add_parser("check", parents=[common],
+                   help="exit 0 if the digest is fresh, 1 if stale or missing")
+    p_diff = sub.add_parser("diff", parents=[common],
+                            help="diff the digest against another git revision")
+    p_diff.add_argument("rev", nargs="?", default="HEAD~1")
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
     langs = None
     if getattr(args, "lang", None):
         langs = {l.strip() for arg in args.lang for l in arg.split(",") if l.strip()}
+    out_path = args.out or root / "PROJECT_DIGEST.md"
+
+    if args.cmd == "check":
+        fresh = _digest_state(out_path) == _state_hash(root, langs)
+        if not args.quiet:
+            print(f"{out_path}: {'fresh' if fresh else 'stale or missing'}")
+        return 0 if fresh else 1
+    if args.cmd == "build" and args.if_stale \
+            and _digest_state(out_path) == _state_hash(root, langs):
+        if not args.quiet:
+            print(f"{out_path}: fresh, skipping rebuild")
+        return 0
+
     files = scan_files(root)
     if langs is not None:
         files = [f for f in files if detect_language(f) in langs]
     missing = _missing_parser_langs(files)
     if missing:
         _bootstrap_or_die(missing, argv if argv is not None else sys.argv[1:])
+
+    if args.cmd == "diff":
+        with tempfile.TemporaryDirectory(prefix="hologram-diff-") as tmp:
+            wt = Path(tmp) / "wt"
+            r = subprocess.run(
+                ["git", "-C", str(root), "worktree", "add", "--detach", "-f",
+                 str(wt), args.rev],
+                capture_output=True, text=True)
+            if r.returncode != 0:
+                raise SystemExit(f"git worktree failed: {r.stderr.strip()}")
+            try:
+                old = build_digest(wt, langs=langs, private_sigs=args.private)
+                new = build_digest(root, langs=langs, private_sigs=args.private)
+            finally:
+                subprocess.run(["git", "-C", str(root), "worktree", "remove",
+                                "--force", str(wt)], capture_output=True)
+        body_old = old.splitlines()[2:]  # drop header+legend: date/state/path noise
+        body_new = new.splitlines()[2:]
+        for ln in difflib.unified_diff(body_old, body_new, fromfile=args.rev,
+                                       tofile="worktree", lineterm=""):
+            print(ln)
+        return 0
+
     if args.cmd == "init":
         _install_hooks(root, args.quiet, langs)
-    out_path = getattr(args, "out", None) or root / "PROJECT_DIGEST.md"
     digest = build_digest(root,
                           regen_cmd=f'{_hook_python()} "{Path(__file__).resolve()}" build',
-                          langs=langs, private_sigs=args.private)
+                          langs=langs, private_sigs=args.private,
+                          behaviors=args.behaviors)
     out_path.write_text(digest)
     if not args.quiet:
         print(f"{out_path} written: {estimate_tokens(digest)} tokens")

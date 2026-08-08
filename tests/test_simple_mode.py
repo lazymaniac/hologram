@@ -394,7 +394,8 @@ class TightFormatTest(unittest.TestCase):
         self.assertIn("OrderStatus(E: NEW,PAID,SHIPPED)", out)
         self.assertIn("ItemId,OrderId,UserId(R: String)", out)
         self.assertIn("(I sealed: AddOp|RemoveOp)", out)
-        self.assertNotIn("→", out)
+        ev = next(ln for ln in out.splitlines() if "evaluate(OrderId" in ln)
+        self.assertNotIn("→", ev)   # ascii `:Ret`, not the pretty arrow
 
     def test_no_fanin_zero_marker(self):
         out = build_digest(JAVAMINI)

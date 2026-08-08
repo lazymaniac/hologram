@@ -198,6 +198,66 @@ class HelmExtractTest(unittest.TestCase):
             self.assertEqual(extract_file(p, Path(tmp)), [])
 
 
+@_needs("kotlin")
+class KotlinExtractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(POLY / "Sample.kt", POLY)
+
+    def test_data_class_enum_interface(self):
+        oid = next(s for s in self.syms if s.name == "OrderId")
+        self.assertEqual(oid.kind, "record")
+        self.assertEqual(oid.params, ["String"])
+        status = next(s for s in self.syms if s.name == "Status")
+        self.assertEqual(status.params, ["NEW", "PAID"])
+        pricer = next(s for s in self.syms if s.name == "Pricer")
+        self.assertEqual(pricer.kind, "interface")
+
+    def test_class_supers_methods_visibility(self):
+        eng = next(s for s in self.syms if s.name == "PricingEngine")
+        self.assertEqual(eng.supers, ["Pricer"])
+        self.assertEqual(eng.params, ["Map<String,Long>"])
+        quote = next(s for s in self.syms if s.name == "quote"
+                     and s.container == "PricingEngine")
+        self.assertEqual(quote.visibility, "pub")
+        self.assertEqual(quote.returns, "Long")
+        self.assertIn("compute", quote.calls)
+        comp = next(s for s in self.syms if s.name == "compute")
+        self.assertEqual(comp.visibility, "priv")
+
+    def test_top_level_fn(self):
+        fn = next(s for s in self.syms if s.name == "normalize")
+        self.assertEqual(fn.kind, "fn")
+        self.assertEqual(fn.returns, "List<Long>")
+
+
+@_needs("typescript")
+class TsGapsTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(POLY / "barrel.ts", POLY)
+
+    def test_type_aliases(self):
+        uid = next(s for s in self.syms if s.name == "UserId")
+        self.assertEqual(uid.kind, "type")
+        self.assertEqual(uid.params, ["string"])
+        self.assertEqual(uid.visibility, "pub")
+
+    def test_object_literal_api(self):
+        api = next(s for s in self.syms if s.name == "api")
+        self.assertEqual(api.kind, "class")
+        get = next(s for s in self.syms if s.name == "get")
+        self.assertEqual(get.container, "api")
+        self.assertIn("fetchIt", get.calls)
+        post = next(s for s in self.syms if s.name == "post")
+        self.assertEqual(post.container, "api")
+        self.assertEqual(post.returns, "string")
+
+    def test_reexports(self):
+        reex = {s.name for s in self.syms if s.kind == "reexport"}
+        self.assertEqual(reex, {"OrderId", "PriceQuote"})
+
+
 @_needs("tsx")
 class TsxExtractTest(unittest.TestCase):
     def test_jsx_component_arrow_extracted(self):

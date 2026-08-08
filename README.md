@@ -10,8 +10,9 @@ languages, stdlib `ast` for Python.
 
 | Language | Depth |
 |---|---|
-| Java, C#, TypeScript/JS, TSX/JSX | types, signatures, relations, resolved call chains, ctor deps, privates |
+| Java, C#, TypeScript/JS, TSX/JSX | types, signatures, relations, resolved call chains, ctor deps, privates, type aliases, object-literal APIs, barrel re-exports |
 | Python (stdlib `ast`, zero deps) | same |
+| Kotlin | classes/data/enums/interfaces, ctor deps, supers, calls, visibility |
 | Go, Rust, C, C++ | types/traits/structs, signatures, calls, receiver bindings, visibility |
 | Vue, Svelte | component symbol + everything in `<script>` blocks |
 | Lua | functions/methods with call chains (params by name — untyped) |
@@ -27,6 +28,10 @@ it at any repo:
 python3 ~/workspace/hologram/hologram.py init --root /path/to/repo   # once per repo: git hooks + .gitignore + first build
 python3 ~/workspace/hologram/hologram.py build --root /path/to/repo  # manual rebuild (hooks do this automatically)
 python3 ~/workspace/hologram/hologram.py build --root . --lang java --out DIGEST.md
+python3 ~/workspace/hologram/hologram.py check --root .        # exit 0 fresh / 1 stale — for agent harnesses
+python3 ~/workspace/hologram/hologram.py build --root . --if-stale   # rebuild only when sources changed
+python3 ~/workspace/hologram/hologram.py diff HEAD~3 --root .  # API drift between revisions, as a digest diff
+python3 ~/workspace/hologram/hologram.py build --root . --behaviors  # opt-in: test names as behavior specs
 ```
 
 The first time it meets a Java or TS/JS repo it offers to install its own dependencies
@@ -64,11 +69,14 @@ Read it BEFORE:
   private internals, so you open the right file first
 
 Rules:
-- The digest says what exists, not what works — read the source before wiring
-  anything critical to it.
-- If the header `@hash` is not the current HEAD, regenerate it (the header shows
-  the exact command) before trusting it.
-- For a surgical fix in a file you already know, skip the digest entirely.
+- Read this file on demand — do not paste it into every prompt. It pays off on
+  tasks touching unfamiliar parts of the codebase; skip it for surgical fixes
+  in files you already know.
+- The digest says what exists, not what works. `✓` means a symbol is at least
+  referenced from tests; absence of `✓` means no test names it. Read the source
+  before wiring anything critical.
+- Before trusting it, run the regen command from its header with `--if-stale`
+  appended (instant when fresh), or `check` to just test freshness.
 ```
 
 ## Output
@@ -110,6 +118,11 @@ tokenizer (o200k) to be ~5% cheaper than the pretty variant with zero informatio
 - `!E` after a signature = declared throws / raised exceptions, `Exception` suffix implied
   (`!UnknownItem` = `UnknownItemException`). No `:Ret` = returns void/None.
 - `×N` on a type = referenced from N other files (only shown when N ≥ 10).
+- `✓` = the symbol's name appears in test files; `⋮N` = body is N lines long
+  (shown only at ≥40 — where the implementation weight hides).
+- `» index.ts: A,B` = barrel re-exports; `(T: string)` = type alias and its target.
+- `· deps a→b,c` lines under the legend: module a's code references types defined
+  in b and c — the import architecture without reading imports.
 - Private members appear as packed name lists (`- evict,rebalance` under their class,
   `- util: _parse,_walk` per file for module-level helpers) — names alone say a lot about
   internals at ~⅓ the cost of signatures. `--private` upgrades them to full `-`-prefixed
@@ -155,22 +168,26 @@ What the digest actually does about that — and what it can't:
 - **It prevents nothing by itself.** The digest competes for the model's attention like
   any other context. An agent can and sometimes will ignore 19k tokens of inventory and
   reimplement a helper anyway. It shifts probabilities; it is not a guardrail.
-- **Body-level bloat is untouched.** The 80-line method that should be 10 lines happens
-  inside function bodies, which the digest never sees. It fights *architectural*
-  duplication, not verbose implementation.
-- **Stale is worse than absent.** Refresh is commit-grained. An agent that trusts a
-  digest describing deleted code, or missing the function added ten minutes ago, is
-  confidently wrong in a way a grepping agent wouldn't be. If the hooks aren't installed,
-  don't attach the digest.
+- **Body-level bloat is visible only at its edge.** `⋮N` marks bodies ≥40 lines, and a
+  method growing 20→200 lines shows up in `hologram diff` — but the digest still can't
+  say whether those lines are earned. It fights *architectural* duplication; verbose
+  implementation it can only flag by weight.
+- **Stale is worse than absent — now checkable.** Refresh is commit-grained, but the
+  header carries a content-state stamp: `hologram check` exits 0/1 in milliseconds and
+  `build --if-stale` makes "rebuild when unsure" free. The residual risk is the agent
+  that never checks.
 - **It amplifies naming, including bad naming.** `doStuff2(Object):Object` compresses to
   exactly the nothing it says. On codebases with misleading names the digest transmits
   the misdirection more efficiently than reading the code would.
-- **Existence ≠ correctness.** The digest says a function is there, not that it works,
-  handles your edge case, or was ever finished. Agents wiring against a listed-but-broken
-  function is a real failure mode it cannot see.
-- **Cost is recurring.** ~19k tokens ride along on every request that includes the
-  digest. For a one-file bugfix that's pure overhead — cheaper to let the agent grep.
-  It pays off on tasks that touch unfamiliar parts of the codebase, not surgical ones.
+- **Existence ≠ correctness, partially signaled.** `✓` marks symbols referenced from
+  test files — evidence of exercise, not proof of correctness. An unmarked function is
+  a warning; a marked one can still be wrong. `--behaviors` adds test names as specs,
+  but measured honestly: on a test-heavy repo that can double the digest, so it is
+  opt-in.
+- **Cost discipline is on the agent.** The recommended pattern is read-on-demand — the
+  digest sits on disk and costs nothing until a task needs the map. Inlining ~20k tokens
+  into every prompt is the anti-pattern; the shipped agent instructions say so, but
+  nothing enforces it.
 - **The core claim is still unbenchmarked.** No rigorous eval yet shows agents with the
   digest duplicate less or navigate faster. The design is argued from failure modes
   observed in practice, not measured against a control.
@@ -195,10 +212,7 @@ What the digest actually does about that — and what it can't:
 - Language depth is uneven. Java/C#/TS/Python get full treatment; Go/Rust/C/C++ are
   solid but skip idioms like Go `const`/`iota` enums and C++ templates (flattened);
   Lua is untyped so params are names, not types; Helm is regex over templates, not a
-  parser. Kotlin has no reliable pip grammar yet and is absent.
-- TS extraction covers classes, interfaces, enums, `function` declarations, and arrow/
-  function-expression assignments (top-level and class fields) — but not standalone
-  `type` aliases, object-literal APIs, or re-exports.
+  parser; Kotlin rests on a community grammar.
 - Function bodies are invisible. Private members appear by name (signatures with
   `--private`), which says what a class is made of — but a 500-line algorithm and a
   one-liner still look the same. The digest tells an LLM *what exists*, not *how it works*.
