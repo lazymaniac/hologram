@@ -133,5 +133,46 @@ def judge_reuse(before: str, after: str, expect_reuse: list[str]) -> dict:
             "duplicated": sorted(set(duplicated))}
 
 
+_AGENT_SNIPPET = """## Project map: PROJECT_DIGEST.md
+
+`PROJECT_DIGEST.md` at the repo root is a generated inventory of this codebase:
+every public signature, type relation, and call chain, plus private member names.
+Line 2 is the legend.
+
+Consult it BEFORE:
+- writing any new function, class, or helper — search for an existing one first
+  and reuse it (`×N` marks widely-used utilities, `✓` marks test-exercised ones)
+- placing new code — the package tree, the `· deps a→b` lines, and grouped
+  families are the house structure; extend it rather than inventing a parallel one
+- exploratory grepping — look here first, then grep for the specific thing this
+  file says exists
+"""
+
+_BASE_CLAUDE_MD = """# Working notes
+
+Complete the requested task directly. Keep changes minimal and idiomatic.
+"""
+
+
+def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
+    """Detached git worktree of the corpus, prepared for one condition.
+    A = digest + agent instructions; B = control."""
+    subprocess.run(["git", "-C", str(corpus), "worktree", "add", "--detach",
+                    "-f", str(ws), "HEAD"], check=True, capture_output=True)
+    claude_md = _BASE_CLAUDE_MD
+    if condition == "A":
+        subprocess.run([sys.executable, str(HOLOGRAM), "build",
+                        "--root", str(ws), "--quiet"], check=True)
+        claude_md += "\n" + _AGENT_SNIPPET
+    (ws / "CLAUDE.md").write_text(claude_md)
+    return ws
+
+
+def drop_workspace(corpus: Path, ws: Path) -> None:
+    subprocess.run(["git", "-C", str(corpus), "worktree", "remove", "--force",
+                    str(ws)], capture_output=True)
+    shutil.rmtree(ws, ignore_errors=True)
+
+
 if __name__ == "__main__":
     raise SystemExit(0)

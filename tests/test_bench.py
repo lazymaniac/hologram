@@ -121,5 +121,53 @@ class DuplicationDetectorTest(unittest.TestCase):
         self.assertEqual(v, {"new_lines": [], "reused": [], "duplicated": []})
 
 
+import subprocess  # noqa: E402
+
+
+def _mini_corpus(tmp: Path) -> Path:
+    repo = tmp / "corpus"
+    repo.mkdir()
+    (repo / "svc.py").write_text(
+        "def normalize(xs: list) -> list:\n    return xs\n")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "-c", "user.email=b@b", "-c", "user.name=b",
+                    "commit", "-qm", "seed"], cwd=repo, check=True)
+    return repo
+
+
+class WorkspaceTest(unittest.TestCase):
+    def test_condition_a_has_digest_and_instructions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            ws = bench.make_workspace(repo, Path(tmp) / "wsA", "A")
+            try:
+                self.assertTrue((ws / "PROJECT_DIGEST.md").exists())
+                self.assertIn("PROJECT_DIGEST.md", (ws / "CLAUDE.md").read_text())
+                self.assertTrue((ws / "svc.py").exists())
+            finally:
+                bench.drop_workspace(repo, ws)
+
+    def test_condition_b_is_control(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            ws = bench.make_workspace(repo, Path(tmp) / "wsB", "B")
+            try:
+                self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
+                self.assertNotIn("PROJECT_DIGEST", (ws / "CLAUDE.md").read_text())
+            finally:
+                bench.drop_workspace(repo, ws)
+
+    def test_workspace_is_isolated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            ws = bench.make_workspace(repo, Path(tmp) / "wsA", "A")
+            try:
+                (ws / "svc.py").write_text("changed")
+                self.assertIn("normalize", (repo / "svc.py").read_text())
+            finally:
+                bench.drop_workspace(repo, ws)
+
+
 if __name__ == "__main__":
     unittest.main()
