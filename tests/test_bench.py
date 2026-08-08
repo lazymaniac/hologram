@@ -169,5 +169,47 @@ class WorkspaceTest(unittest.TestCase):
                 bench.drop_workspace(repo, ws)
 
 
+class RunOneTest(unittest.TestCase):
+    def test_full_cycle_with_fake_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            task = bench.Task(
+                id="avg", kind="reuse",
+                prompt="Add average() that reuses normalize.",
+                accept_cmd="grep -q average {ws}/svc.py",
+                expect_reuse=["normalize"])
+
+            def fake_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
+                # the "agent" appends a function that calls normalize
+                (ws / "svc.py").write_text(
+                    (ws / "svc.py").read_text()
+                    + "\ndef average(xs: list) -> float:\n"
+                      "    return sum(normalize(xs)) / len(xs)\n")
+                return TRANSCRIPT
+
+            row = bench.run_one(repo, task, "A", rep=0,
+                                results_dir=Path(tmp) / "results",
+                                model="sonnet", max_turns=40,
+                                runner=fake_runner)
+        self.assertEqual(row["task"], "avg")
+        self.assertEqual(row["condition"], "A")
+        self.assertTrue(row["accepted"])
+        self.assertEqual(row["reused"], ["normalize"])
+        self.assertEqual(row["duplicated"], [])
+        self.assertEqual(row["reads"], 1)
+        self.assertEqual(row["tokens_in"], 91000)
+
+    def test_transcript_saved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            task = bench.Task(id="noop", kind="navigate", prompt="look around",
+                              accept_cmd="true", expect_reuse=[])
+            results = Path(tmp) / "results"
+            bench.run_one(repo, task, "B", rep=1, results_dir=results,
+                          model="sonnet", max_turns=40,
+                          runner=lambda *a, **k: TRANSCRIPT)
+            self.assertTrue((results / "noop-B-1.jsonl").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

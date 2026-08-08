@@ -174,5 +174,49 @@ def drop_workspace(corpus: Path, ws: Path) -> None:
     shutil.rmtree(ws, ignore_errors=True)
 
 
+def claude_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
+    """The only function that spends tokens. Runs claude headless in the
+    workspace; returns the raw stream-json transcript."""
+    r = subprocess.run(
+        ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
+         "--max-turns", str(max_turns), "--model", model,
+         "--dangerously-skip-permissions"],
+        cwd=ws, capture_output=True, text=True, timeout=1800)
+    return r.stdout
+
+
+def _digest_of(ws: Path) -> str:
+    out = ws / ".bench-digest.md"
+    subprocess.run([sys.executable, str(HOLOGRAM), "build", "--root", str(ws),
+                    "--out", str(out), "--quiet"], check=True)
+    text = out.read_text()
+    out.unlink()
+    return text
+
+
+def run_one(corpus: Path, task: Task, condition: str, rep: int,
+            results_dir: Path, model: str, max_turns: int,
+            runner=claude_runner) -> dict:
+    results_dir.mkdir(parents=True, exist_ok=True)
+    ws = results_dir / f"ws-{task.id}-{condition}-{rep}"
+    make_workspace(corpus, ws, condition)
+    try:
+        before = _digest_of(ws)
+        transcript = runner(task.prompt, ws, model, max_turns)
+        (results_dir / f"{task.id}-{condition}-{rep}.jsonl").write_text(transcript)
+        after = _digest_of(ws)
+        verdict = judge_reuse(before, after, task.expect_reuse)
+        accepted = subprocess.run(
+            task.accept_cmd.format(ws=ws), shell=True,
+            capture_output=True).returncode == 0
+        metrics = parse_transcript(transcript)
+        return {"task": task.id, "kind": task.kind, "condition": condition,
+                "rep": rep, "accepted": accepted,
+                "reused": verdict["reused"], "duplicated": verdict["duplicated"],
+                "new_lines": len(verdict["new_lines"]), **metrics}
+    finally:
+        drop_workspace(corpus, ws)
+
+
 if __name__ == "__main__":
     raise SystemExit(0)
