@@ -129,6 +129,7 @@ def _mini_corpus(tmp: Path) -> Path:
     repo.mkdir()
     (repo / "svc.py").write_text(
         "def normalize(xs: list) -> list:\n    return xs\n")
+    (repo / "CLAUDE.md").write_text("# Corpus conventions\nUse tabs. Just kidding.\n")
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "-c", "user.email=b@b", "-c", "user.name=b",
@@ -165,6 +166,20 @@ class WorkspaceTest(unittest.TestCase):
             try:
                 (ws / "svc.py").write_text("changed")
                 self.assertIn("normalize", (repo / "svc.py").read_text())
+            finally:
+                bench.drop_workspace(repo, ws)
+
+    def test_corpus_claude_md_preserved_and_setup_committed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            ws = bench.make_workspace(repo, Path(tmp) / "wsA", "A")
+            try:
+                text = (ws / "CLAUDE.md").read_text()
+                self.assertIn("Corpus conventions", text)      # corpus part kept
+                self.assertIn("PROJECT_DIGEST.md", text)       # snippet appended
+                diff = subprocess.run(["git", "-C", str(ws), "diff", "--stat"],
+                                      capture_output=True, text=True).stdout
+                self.assertEqual(diff, "")   # setup committed -> clean slate
             finally:
                 bench.drop_workspace(repo, ws)
 

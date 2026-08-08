@@ -156,15 +156,25 @@ Complete the requested task directly. Keep changes minimal and idiomatic.
 
 def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
     """Detached git worktree of the corpus, prepared for one condition.
-    A = digest + agent instructions; B = control."""
+    A = digest + agent instructions; B = control. The corpus's own CLAUDE.md is
+    preserved (appended to, identically in both conditions except the snippet),
+    and the setup is committed in the detached worktree so that any later
+    `git diff` shows exactly what the agent changed."""
     subprocess.run(["git", "-C", str(corpus), "worktree", "add", "--detach",
                     "-f", str(ws), "HEAD"], check=True, capture_output=True)
-    claude_md = _BASE_CLAUDE_MD
+    claude_path = ws / "CLAUDE.md"
+    existing = claude_path.read_text() if claude_path.exists() else ""
+    claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
     if condition == "A":
         subprocess.run([sys.executable, str(HOLOGRAM), "build",
                         "--root", str(ws), "--quiet"], check=True)
         claude_md += "\n" + _AGENT_SNIPPET
-    (ws / "CLAUDE.md").write_text(claude_md)
+    claude_path.write_text(claude_md)
+    subprocess.run(["git", "-C", str(ws), "add", "-A"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",
+                    "-c", "user.name=bench", "commit", "-qm", "bench setup"],
+                   check=True, capture_output=True)
     return ws
 
 
