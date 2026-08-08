@@ -24,9 +24,28 @@ LANG_EXTENSIONS = {
     ".java": "java",
     ".py": "python",
     ".ts": "typescript",
-    ".tsx": "typescript",
+    ".tsx": "tsx",
     ".js": "javascript",
-    ".jsx": "javascript",
+    ".jsx": "tsx",
+    ".mjs": "javascript",
+    ".go": "go",
+    ".rs": "rust",
+    ".cs": "csharp",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".cc": "cpp",
+    ".cxx": "cpp",
+    ".hpp": "cpp",
+    ".hh": "cpp",
+    ".lua": "lua",
+    ".html": "html",
+    ".htm": "html",
+    ".vue": "vue",
+    ".svelte": "svelte",
+    ".yaml": "helm",
+    ".yml": "helm",
+    ".tpl": "helm",
 }
 
 DENYLIST_DIRS = {
@@ -195,13 +214,32 @@ _GRAMMAR_MODULES = {
     "java": ("tree_sitter_java", "tree-sitter-java"),
     "typescript": ("tree_sitter_typescript", "tree-sitter-typescript"),
     "javascript": ("tree_sitter_typescript", "tree-sitter-typescript"),
+    "tsx": ("tree_sitter_typescript", "tree-sitter-typescript"),
+    "vue": ("tree_sitter_typescript", "tree-sitter-typescript"),
+    "svelte": ("tree_sitter_typescript", "tree-sitter-typescript"),
+    "go": ("tree_sitter_go", "tree-sitter-go"),
+    "rust": ("tree_sitter_rust", "tree-sitter-rust"),
+    "csharp": ("tree_sitter_c_sharp", "tree-sitter-c-sharp"),
+    "c": ("tree_sitter_c", "tree-sitter-c"),
+    "cpp": ("tree_sitter_cpp", "tree-sitter-cpp"),
+    "lua": ("tree_sitter_lua", "tree-sitter-lua"),
+    "html": ("tree_sitter_html", "tree-sitter-html"),
 }
 
 _PARSERS = {
     "java": _load_parser("tree_sitter_java"),
     "typescript": _load_parser("tree_sitter_typescript", "language_typescript"),
+    "tsx": _load_parser("tree_sitter_typescript", "language_tsx"),
+    "go": _load_parser("tree_sitter_go"),
+    "rust": _load_parser("tree_sitter_rust"),
+    "csharp": _load_parser("tree_sitter_c_sharp"),
+    "c": _load_parser("tree_sitter_c"),
+    "cpp": _load_parser("tree_sitter_cpp"),
+    "lua": _load_parser("tree_sitter_lua"),
+    "html": _load_parser("tree_sitter_html"),
 }
 _PARSERS["javascript"] = _PARSERS["typescript"]
+_PARSERS["vue"] = _PARSERS["svelte"] = _PARSERS["typescript"]
 
 USING_TREESITTER = _PARSERS["java"] is not None  # kept for callers/tests
 
@@ -568,8 +606,8 @@ def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
     return symbols
 
 
-def _extract_ts(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["typescript"].parse(text.encode())
+def _extract_ts(text: str, rel: str, lang: str = "typescript") -> list[Symbol]:
+    tree = _PARSERS[lang].parse(text.encode())
     symbols: list[Symbol] = []
     for tn in _ast_collect(tree.root_node, _TS_TYPE_NODE_KINDS):
         kind = _TS_TYPE_NODE_KINDS[tn.type]
@@ -620,6 +658,829 @@ def _extract_ts(text: str, rel: str) -> list[Symbol]:
         symbols.append(_ts_fn_symbol(
             fn, rel, None, "pub" if _ts_exported(fn) else "priv"))
     symbols.extend(_ts_top_level_arrows(tree.root_node, rel))
+    return symbols
+
+
+def _extract_tsx(text: str, rel: str) -> list[Symbol]:
+    return _extract_ts(text, rel, "tsx")
+
+
+_SFC_SCRIPT_RE = re.compile(r"<script[^>]*>(.*?)</script>", re.S | re.I)
+
+
+def _extract_sfc(text: str, rel: str) -> list[Symbol]:
+    """Vue/Svelte single-file components: the component itself plus everything the
+    TS extractor finds inside its <script> blocks (line numbers preserved)."""
+    stem = Path(rel).stem
+    symbols = [Symbol(name=stem, kind="class", file=rel, line=1,
+                      signature=f"component {stem}", visibility="pub",
+                      lang=Path(rel).suffix.lstrip("."))]
+    for m in _SFC_SCRIPT_RE.finditer(text):
+        offset = text.count("\n", 0, m.start(1))
+        for s in _extract_ts(m.group(1), rel):
+            s.line += offset
+            symbols.append(s)
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Go extraction
+# ---------------------------------------------------------------------------
+
+def _go_vis(name: str) -> str:
+    return "pub" if name[:1].isupper() else "priv"
+
+
+def _go_type_text(node) -> str:
+    return tight_type(_ast_text(node).lstrip("*&"))
+
+
+def _go_params(plist) -> tuple[list[str], dict[str, str]]:
+    """(declared types in order, name->type bindings) from a parameter_list."""
+    types: list[str] = []
+    binds: dict[str, str] = {}
+    if plist is None:
+        return types, binds
+    for p in plist.children:
+        if p.type not in ("parameter_declaration", "variadic_parameter_declaration"):
+            continue
+        t = _go_type_text(_ast_field(p, "type"))
+        if p.type == "variadic_parameter_declaration":
+            t = "..." + t
+        names = [c for c in p.children if c.type == "identifier"]
+        for n in names or [None]:
+            types.append(t)
+            if n is not None:
+                binds[_ast_text(n)] = _base_type(t)
+    return types, binds
+
+
+def _go_result(node) -> str | None:
+    res = _ast_field(node, "result")
+    if res is None:
+        return None
+    if res.type == "parameter_list":
+        types, _ = _go_params(res)
+        return f"({','.join(types)})" if len(types) > 1 else (types[0] if types else None)
+    return _go_type_text(res)
+
+
+def _go_call_entry(n) -> tuple[str, str]:
+    fn = _ast_field(n, "function")
+    if fn is None:
+        return "", ""
+    if fn.type == "selector_expression":
+        name = _ast_text(_ast_field(fn, "field"))
+        op = _ast_field(fn, "operand")
+        entry = (f"{_ast_text(op)}.{name}"
+                 if op is not None and op.type == "identifier" else name)
+        return name, entry
+    if fn.type == "identifier":
+        name = _ast_text(fn)
+        return name, name
+    return "", ""
+
+
+def _go_local_bindings(body) -> dict[str, str]:
+    binds: dict[str, str] = {}
+    if body is None:
+        return binds
+    for d in _ast_collect(body, ("var_spec", "short_var_declaration")):
+        if d.type == "var_spec":
+            t = _ast_field(d, "type")
+            n = _ast_field(d, "name")
+            if t is not None and n is not None:
+                binds[_ast_text(n)] = _base_type(_go_type_text(t))
+            continue
+        left, right = _ast_field(d, "left"), _ast_field(d, "right")
+        if left is None or right is None:
+            continue
+        lids = [c for c in left.children if c.type == "identifier"]
+        lits = _ast_collect(right, ("composite_literal",))
+        if len(lids) == 1 and len(lits) == 1:
+            binds[_ast_text(lids[0])] = _base_type(
+                _go_type_text(_ast_field(lits[0], "type")))
+    return binds
+
+
+def _extract_go(text: str, rel: str) -> list[Symbol]:
+    tree = _PARSERS["go"].parse(text.encode())
+    symbols: list[Symbol] = []
+    struct_fields: dict[str, dict[str, str]] = {}
+    for ts_node in _ast_collect(tree.root_node, ("type_spec",)):
+        name = _ast_text(_ast_field(ts_node, "name"))
+        tnode = _ast_field(ts_node, "type")
+        if tnode is None:
+            continue
+        if tnode.type == "struct_type":
+            components: list[str] = []
+            supers: list[str] = []
+            fields: dict[str, str] = {}
+            for f in _ast_collect(tnode, ("field_declaration",)):
+                ftype = _ast_field(f, "type")
+                fnames = [c for c in f.children if c.type == "field_identifier"]
+                if not fnames:  # embedded type = composition/promotion
+                    supers.append(_base_type(_go_type_text(ftype)))
+                    continue
+                for fn in fnames:
+                    components.append(_go_type_text(ftype))
+                    fields[_ast_text(fn)] = _base_type(_go_type_text(ftype))
+            struct_fields[name] = fields
+            symbols.append(Symbol(
+                name=name, kind="class", file=rel, line=ts_node.start_point[0] + 1,
+                signature=f"struct {name}", params=components, supers=supers,
+                visibility=_go_vis(name), lang="go",
+            ))
+        elif tnode.type == "interface_type":
+            symbols.append(Symbol(
+                name=name, kind="interface", file=rel,
+                line=ts_node.start_point[0] + 1,
+                signature=f"interface {name}",
+                visibility=_go_vis(name), lang="go",
+            ))
+            for m in _ast_collect(tnode, ("method_elem", "method_spec")):
+                mname = _ast_text(_ast_field(m, "name"))
+                params, _ = _go_params(_ast_field(m, "parameters"))
+                returns = _go_result(m)
+                ret_suffix = f":{returns}" if returns else ""
+                symbols.append(Symbol(
+                    name=mname, kind="method", file=rel, line=m.start_point[0] + 1,
+                    signature=f"{mname}({','.join(params)}){ret_suffix}",
+                    params=params, returns=returns,
+                    visibility=_go_vis(mname), container=name, lang="go",
+                ))
+    for fn in _ast_collect(tree.root_node,
+                           ("function_declaration", "method_declaration")):
+        name = _ast_text(_ast_field(fn, "name"))
+        container = None
+        binds: dict[str, str] = {}
+        if fn.type == "method_declaration":
+            rtypes, rbinds = _go_params(_ast_field(fn, "receiver"))
+            container = _base_type(rtypes[0]) if rtypes else None
+            binds.update(rbinds)
+            if container is not None:
+                binds.update(struct_fields.get(container, {}))
+        params, pbinds = _go_params(_ast_field(fn, "parameters"))
+        binds.update(pbinds)
+        body = _ast_field(fn, "body")
+        binds.update(_go_local_bindings(body))
+        returns = _go_result(fn)
+        ret_suffix = f":{returns}" if returns else ""
+        symbols.append(Symbol(
+            name=name, kind="method" if container else "fn", file=rel,
+            line=fn.start_point[0] + 1,
+            signature=f"{name}({','.join(params)}){ret_suffix}",
+            params=params, returns=returns,
+            visibility=_go_vis(name), container=container, lang="go",
+            calls=_ast_calls(body, name, ("call_expression",), _go_call_entry),
+            bindings=binds,
+        ))
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Rust extraction
+# ---------------------------------------------------------------------------
+
+def _rs_vis(node) -> str:
+    return ("pub" if any(c.type == "visibility_modifier" for c in node.children)
+            else "priv")
+
+
+def _rs_params(params_node) -> tuple[list[str], dict[str, str]]:
+    types: list[str] = []
+    binds: dict[str, str] = {}
+    if params_node is None:
+        return types, binds
+    for p in params_node.children:
+        if p.type != "parameter":
+            continue
+        t = tight_type(_ast_text(_ast_field(p, "type")))
+        types.append(t)
+        pat = _ast_field(p, "pattern")
+        if pat is not None and pat.type == "identifier":
+            binds[_ast_text(pat)] = _base_type(t.lstrip("&"))
+    return types, binds
+
+
+def _rs_call_entry(n) -> tuple[str, str]:
+    if n.type == "struct_expression":
+        name = _base_type(_ast_text(_ast_field(n, "name")))
+        return name, name
+    fn = _ast_field(n, "function")
+    if fn is None:
+        return "", ""
+    if fn.type == "field_expression":
+        name = _ast_text(_ast_field(fn, "field"))
+        val = _ast_field(fn, "value")
+        entry = (f"{_ast_text(val)}.{name}"
+                 if val is not None and val.type == "identifier" else name)
+        return name, entry
+    if fn.type == "scoped_identifier":
+        name = _ast_text(_ast_field(fn, "name"))
+        path = _ast_field(fn, "path")
+        prefix = _base_type(_ast_text(path).split("::")[-1]) if path is not None else ""
+        return name, (f"{prefix}.{name}" if prefix else name)
+    if fn.type == "identifier":
+        name = _ast_text(fn)
+        return name, name
+    return "", ""
+
+
+def _rs_local_bindings(body) -> dict[str, str]:
+    binds: dict[str, str] = {}
+    if body is None:
+        return binds
+    for d in _ast_collect(body, ("let_declaration",)):
+        pat = _ast_field(d, "pattern")
+        if pat is None or pat.type != "identifier":
+            continue
+        t = _ast_field(d, "type")
+        val = _ast_field(d, "value")
+        if t is not None:
+            binds[_ast_text(pat)] = _base_type(tight_type(_ast_text(t)).lstrip("&"))
+        elif val is not None and val.type == "struct_expression":
+            binds[_ast_text(pat)] = _base_type(_ast_text(_ast_field(val, "name")))
+    return binds
+
+
+def _rs_fn_symbol(fn, rel: str, container: str | None, vis: str,
+                  extra_binds: dict[str, str] | None = None) -> Symbol:
+    name = _ast_text(_ast_field(fn, "name"))
+    params, binds = _rs_params(_ast_field(fn, "parameters"))
+    body = _ast_field(fn, "body")
+    binds = {**(extra_binds or {}), **binds, **_rs_local_bindings(body)}
+    rt = _ast_field(fn, "return_type")
+    returns = tight_type(_ast_text(rt)) if rt is not None else None
+    ret_suffix = f":{returns}" if returns else ""
+    return Symbol(
+        name=name, kind="method" if container else "fn", file=rel,
+        line=fn.start_point[0] + 1,
+        signature=f"{name}({','.join(params)}){ret_suffix}",
+        params=params, returns=returns,
+        visibility=vis, container=container, lang="rust",
+        calls=_ast_calls(body, name,
+                         ("call_expression", "struct_expression"), _rs_call_entry),
+        bindings=binds,
+    )
+
+
+def _extract_rust(text: str, rel: str) -> list[Symbol]:
+    tree = _PARSERS["rust"].parse(text.encode())
+    symbols: list[Symbol] = []
+    type_syms: dict[str, Symbol] = {}
+    for tn in _ast_collect(tree.root_node,
+                           ("struct_item", "enum_item", "trait_item")):
+        name = _ast_text(_ast_field(tn, "name"))
+        vis = _rs_vis(tn)
+        line = tn.start_point[0] + 1
+        body = _ast_field(tn, "body")
+        if tn.type == "struct_item":
+            components = [tight_type(_ast_text(_ast_field(f, "type")))
+                          for f in _ast_collect(body, ("field_declaration",))
+                          ] if body is not None else []
+            sym = Symbol(name=name, kind="class", file=rel, line=line,
+                         signature=f"struct {name}", params=components,
+                         visibility=vis, lang="rust")
+        elif tn.type == "enum_item":
+            variants = [_ast_text(_ast_field(v, "name"))
+                        for v in _ast_collect(body, ("enum_variant",))
+                        ] if body is not None else []
+            sym = Symbol(name=name, kind="enum", file=rel, line=line,
+                         signature=f"enum {name}", params=variants,
+                         visibility=vis, lang="rust")
+        else:
+            sym = Symbol(name=name, kind="interface", file=rel, line=line,
+                         signature=f"trait {name}", visibility=vis, lang="rust")
+            for m in _ast_collect(body, ("function_signature_item", "function_item")
+                                  ) if body is not None else []:
+                symbols.append(_rs_fn_symbol(m, rel, name, vis))
+        symbols.append(sym)
+        type_syms[name] = sym
+    for imp in _ast_collect(tree.root_node, ("impl_item",)):
+        container = _base_type(_ast_text(_ast_field(imp, "type")))
+        trait = _ast_field(imp, "trait")
+        if trait is not None and container in type_syms:
+            type_syms[container].supers.append(_base_type(_ast_text(trait)))
+        body = _ast_field(imp, "body")
+        self_bind = {"self": container}
+        for m in (_ast_collect(body, ("function_item",)) if body is not None else []):
+            if m.parent is not None and m.parent.type != "declaration_list":
+                continue  # skip fns nested inside method bodies
+            symbols.append(_rs_fn_symbol(m, rel, container, _rs_vis(m), self_bind))
+    for fn in tree.root_node.children:
+        if fn.type == "function_item":
+            symbols.append(_rs_fn_symbol(fn, rel, None, _rs_vis(fn)))
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# C# extraction
+# ---------------------------------------------------------------------------
+
+_CS_TYPE_NODE_KINDS = {
+    "class_declaration": "class",
+    "struct_declaration": "class",
+    "interface_declaration": "interface",
+    "record_declaration": "record",
+    "enum_declaration": "enum",
+}
+
+
+def _cs_vis(node) -> str:
+    mods = [_ast_text(c) for c in node.children if c.type == "modifier"]
+    return "priv" if any(m in ("private", "protected") for m in mods) else "pub"
+
+
+def _cs_params(plist) -> tuple[list[str], dict[str, str]]:
+    types: list[str] = []
+    binds: dict[str, str] = {}
+    if plist is None:
+        return types, binds
+    for p in plist.children:
+        if p.type != "parameter":
+            continue
+        t = tight_type(_ast_text(_ast_field(p, "type")))
+        types.append(t)
+        n = _ast_field(p, "name")
+        if n is not None:
+            binds[_ast_text(n)] = _base_type(t)
+    return types, binds
+
+
+def _cs_call_entry(n) -> tuple[str, str]:
+    if n.type == "object_creation_expression":
+        entry = _base_type(_ast_text(_ast_field(n, "type")))
+        return entry, entry
+    fn = _ast_field(n, "function")
+    if fn is None:
+        return "", ""
+    if fn.type == "member_access_expression":
+        name = _ast_text(_ast_field(fn, "name"))
+        expr = _ast_field(fn, "expression")
+        entry = (f"{_ast_text(expr)}.{name}"
+                 if expr is not None and expr.type == "identifier" else name)
+        return name, entry
+    if fn.type == "identifier":
+        name = _ast_text(fn)
+        return name, name
+    return "", ""
+
+
+def _cs_local_bindings(body) -> dict[str, str]:
+    binds: dict[str, str] = {}
+    if body is None:
+        return binds
+    for d in _ast_collect(body, ("variable_declaration",)):
+        t = _ast_text(_ast_field(d, "type"))
+        for dec in _ast_collect(d, ("variable_declarator",)):
+            n = _ast_field(dec, "name")
+            if n is None:
+                continue
+            if t == "var":
+                lits = _ast_collect(dec, ("object_creation_expression",))
+                if len(lits) == 1:
+                    binds[_ast_text(n)] = _base_type(
+                        _ast_text(_ast_field(lits[0], "type")))
+            else:
+                binds[_ast_text(n)] = _base_type(t)
+    return binds
+
+
+def _extract_cs(text: str, rel: str) -> list[Symbol]:
+    tree = _PARSERS["csharp"].parse(text.encode())
+    symbols: list[Symbol] = []
+    for tn in _ast_collect(tree.root_node, _CS_TYPE_NODE_KINDS):
+        kind = _CS_TYPE_NODE_KINDS[tn.type]
+        name = _ast_text(_ast_field(tn, "name"))
+        body = _ast_field(tn, "body")
+        supers = []
+        for c in tn.children:
+            if c.type == "base_list":
+                supers = [_base_type(_ast_text(b)) for b in c.children
+                          if b.type in ("identifier", "generic_name",
+                                        "qualified_name")]
+        params: list[str] = []
+        if kind == "record":
+            for c in tn.children:
+                if c.type == "parameter_list":
+                    params, _ = _cs_params(c)
+        elif kind == "enum" and body is not None:
+            params = [_ast_text(_ast_field(m, "name"))
+                      for m in _ast_collect(body, ("enum_member_declaration",))]
+        symbols.append(Symbol(
+            name=name, kind=kind, file=rel, line=tn.start_point[0] + 1,
+            signature=f"{kind} {name}", params=params, supers=supers,
+            visibility=_cs_vis(tn), lang="csharp",
+        ))
+        if body is None:
+            continue
+        class_binds: dict[str, str] = {}
+        for f in body.children:
+            if f.type == "field_declaration":
+                class_binds.update(_cs_local_bindings(f))
+        for m in body.children:
+            if m.type not in ("method_declaration", "constructor_declaration"):
+                continue
+            mname = _ast_text(_ast_field(m, "name"))
+            mparams, pbinds = _cs_params(_ast_field(m, "parameters"))
+            mbody = _ast_field(m, "body")
+            binds = {**class_binds, **pbinds, **_cs_local_bindings(mbody)}
+            calls = _ast_calls(mbody, mname,
+                               ("invocation_expression",
+                                "object_creation_expression"), _cs_call_entry)
+            if m.type == "constructor_declaration":
+                symbols.append(Symbol(
+                    name=mname, kind="ctor", file=rel, line=m.start_point[0] + 1,
+                    signature=f"{mname}({','.join(mparams)})",
+                    params=mparams, returns=mname,
+                    visibility=_cs_vis(m), container=name, lang="csharp",
+                    calls=calls, bindings=binds,
+                ))
+                continue
+            returns = tight_type(_ast_text(_ast_field(m, "returns")))
+            ret_suffix = f":{returns}" if returns and returns != "void" else ""
+            symbols.append(Symbol(
+                name=mname, kind="method", file=rel, line=m.start_point[0] + 1,
+                signature=f"{mname}({','.join(mparams)}){ret_suffix}",
+                params=mparams, returns=returns,
+                visibility=_cs_vis(m), container=name, lang="csharp",
+                calls=calls, bindings=binds,
+            ))
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# C / C++ extraction (shared declarator machinery)
+# ---------------------------------------------------------------------------
+
+def _c_fn_declarator(node):
+    """(function_declarator, name_node) beneath a definition/declaration, peeling
+    pointer/reference wrappers. name_node may be identifier/field_identifier/
+    qualified_identifier."""
+    fd = None
+    n = _ast_field(node, "declarator")
+    while n is not None:
+        if n.type == "function_declarator":
+            fd = n
+            n = _ast_field(n, "declarator")
+        elif n.type in ("pointer_declarator", "reference_declarator"):
+            n = _ast_field(n, "declarator")
+        else:
+            break
+    return fd, n
+
+
+def _c_params(plist) -> tuple[list[str], dict[str, str]]:
+    types: list[str] = []
+    binds: dict[str, str] = {}
+    if plist is None:
+        return types, binds
+    for p in plist.children:
+        if p.type != "parameter_declaration":
+            continue
+        base = tight_type(_ast_text(_ast_field(p, "type")))
+        d = _ast_field(p, "declarator")
+        stars = _ast_text(d).count("*") if d is not None else 0
+        types.append(base + "*" * stars)
+        while d is not None and d.type in ("pointer_declarator", "reference_declarator"):
+            d = _ast_field(d, "declarator")
+        if d is not None and d.type == "identifier":
+            binds[_ast_text(d)] = _base_type(base)
+    return types, binds
+
+
+def _c_call_entry(n) -> tuple[str, str]:
+    if n.type == "new_expression":
+        entry = _base_type(_ast_text(_ast_field(n, "type")))
+        return entry, entry
+    fn = _ast_field(n, "function")
+    if fn is None:
+        return "", ""
+    if fn.type == "identifier":
+        name = _ast_text(fn)
+        return name, name
+    if fn.type == "field_expression":
+        name = _ast_text(_ast_field(fn, "field"))
+        obj = _ast_field(fn, "argument")
+        entry = (f"{_ast_text(obj)}.{name}"
+                 if obj is not None and obj.type == "identifier" else name)
+        return name, entry
+    if fn.type == "qualified_identifier":
+        name = _ast_text(_ast_field(fn, "name"))
+        scope = _ast_field(fn, "scope")
+        return name, (f"{_base_type(_ast_text(scope))}.{name}"
+                      if scope is not None else name)
+    return "", ""
+
+
+def _c_static(node) -> bool:
+    return any(c.type == "storage_class_specifier" and _ast_text(c) == "static"
+               for c in node.children)
+
+
+def _c_enum_symbol(tn, name: str, rel: str, lang: str) -> Symbol:
+    body = _ast_field(tn, "body")
+    values = [_ast_text(_ast_field(e, "name"))
+              for e in (_ast_collect(body, ("enumerator",)) if body is not None else [])]
+    return Symbol(name=name, kind="enum", file=rel, line=tn.start_point[0] + 1,
+                  signature=f"enum {name}", params=values, visibility="pub", lang=lang)
+
+
+def _extract_c(text: str, rel: str) -> list[Symbol]:
+    tree = _PARSERS["c"].parse(text.encode())
+    symbols: list[Symbol] = []
+    for tn in _ast_collect(tree.root_node, ("struct_specifier", "enum_specifier",
+                                            "type_definition")):
+        if tn.type == "type_definition":
+            inner = _ast_field(tn, "type")
+            alias = _ast_text(_ast_field(tn, "declarator"))
+            if inner is None or _ast_field(inner, "body") is None or not alias:
+                continue
+            if inner.type == "enum_specifier":
+                symbols.append(_c_enum_symbol(inner, alias, rel, "c"))
+            elif inner.type == "struct_specifier":
+                comps = [tight_type(_ast_text(_ast_field(f, "type")))
+                         for f in _ast_collect(inner, ("field_declaration",))]
+                symbols.append(Symbol(
+                    name=alias, kind="class", file=rel, line=tn.start_point[0] + 1,
+                    signature=f"struct {alias}", params=comps,
+                    visibility="pub", lang="c"))
+            continue
+        name_node = _ast_field(tn, "name")
+        if name_node is None or _ast_field(tn, "body") is None:
+            continue
+        name = _ast_text(name_node)
+        if tn.type == "enum_specifier":
+            symbols.append(_c_enum_symbol(tn, name, rel, "c"))
+        else:
+            comps = [tight_type(_ast_text(_ast_field(f, "type")))
+                     for f in _ast_collect(_ast_field(tn, "body"),
+                                           ("field_declaration",))]
+            symbols.append(Symbol(
+                name=name, kind="class", file=rel, line=tn.start_point[0] + 1,
+                signature=f"struct {name}", params=comps,
+                visibility="pub", lang="c"))
+    defined_fns: set[str] = set()
+    for fn in _ast_collect(tree.root_node, ("function_definition",)):
+        fd, name_node = _c_fn_declarator(fn)
+        if fd is None or name_node is None or name_node.type != "identifier":
+            continue
+        name = _ast_text(name_node)
+        defined_fns.add(name)
+        params, binds = _c_params(_ast_field(fd, "parameters"))
+        returns = tight_type(_ast_text(_ast_field(fn, "type")))
+        body = _ast_field(fn, "body")
+        symbols.append(Symbol(
+            name=name, kind="fn", file=rel, line=fn.start_point[0] + 1,
+            signature=f"{name}({','.join(params)})"
+                      + (f":{returns}" if returns != "void" else ""),
+            params=params, returns=returns,
+            visibility="priv" if _c_static(fn) else "pub", lang="c",
+            calls=_ast_calls(body, name, ("call_expression",), _c_call_entry),
+            bindings=binds,
+        ))
+    for decl in tree.root_node.children:  # top-level prototypes (headers)
+        if decl.type != "declaration":
+            continue
+        fd, name_node = _c_fn_declarator(decl)
+        if fd is None or name_node is None or name_node.type != "identifier":
+            continue
+        name = _ast_text(name_node)
+        if name in defined_fns:
+            continue
+        params, _ = _c_params(_ast_field(fd, "parameters"))
+        returns = tight_type(_ast_text(_ast_field(decl, "type")))
+        symbols.append(Symbol(
+            name=name, kind="fn", file=rel, line=decl.start_point[0] + 1,
+            signature=f"{name}({','.join(params)})"
+                      + (f":{returns}" if returns != "void" else ""),
+            params=params, returns=returns,
+            visibility="priv" if _c_static(decl) else "pub", lang="c",
+        ))
+    return symbols
+
+
+def _extract_cpp(text: str, rel: str) -> list[Symbol]:
+    tree = _PARSERS["cpp"].parse(text.encode())
+    symbols: list[Symbol] = []
+    members: dict[tuple[str, str], Symbol] = {}
+    for tn in _ast_collect(tree.root_node, ("class_specifier", "struct_specifier",
+                                            "enum_specifier")):
+        name_node = _ast_field(tn, "name")
+        body = _ast_field(tn, "body")
+        if name_node is None or body is None:
+            continue
+        cname = _ast_text(name_node)
+        if tn.type == "enum_specifier":
+            symbols.append(_c_enum_symbol(tn, cname, rel, "cpp"))
+            continue
+        comps: list[str] = []
+        supers = []
+        for c in tn.children:
+            if c.type == "base_class_clause":
+                supers = [_base_type(_ast_text(b)) for b in c.children
+                          if b.type in ("type_identifier", "qualified_identifier")]
+        access = "private" if tn.type == "class_specifier" else "public"
+        type_sym = Symbol(
+            name=cname, kind="class", file=rel, line=tn.start_point[0] + 1,
+            signature=f"class {cname}", supers=supers, visibility="pub", lang="cpp")
+        symbols.append(type_sym)
+        for m in body.children:
+            if m.type == "access_specifier":
+                access = _ast_text(m).rstrip(":")
+                continue
+            fd, name_node = _c_fn_declarator(m)
+            if m.type in ("function_definition", "declaration", "field_declaration") \
+                    and fd is not None and name_node is not None:
+                mname = _ast_text(name_node)
+                params, binds = _c_params(_ast_field(fd, "parameters"))
+                rtype = _ast_field(m, "type")
+                returns = tight_type(_ast_text(rtype)) if rtype is not None else None
+                mbody = _ast_field(m, "body")
+                kind = "ctor" if mname == cname else "method"
+                ret_suffix = (f":{returns}"
+                              if kind == "method" and returns and returns != "void"
+                              else "")
+                sym = Symbol(
+                    name=mname, kind=kind, file=rel, line=m.start_point[0] + 1,
+                    signature=f"{mname}({','.join(params)}){ret_suffix}",
+                    params=params, returns=returns or (cname if kind == "ctor" else None),
+                    visibility="pub" if access == "public" else "priv",
+                    container=cname, lang="cpp",
+                    calls=_ast_calls(mbody, mname,
+                                     ("call_expression", "new_expression"),
+                                     _c_call_entry),
+                    bindings=binds,
+                )
+                symbols.append(sym)
+                members[(cname, mname)] = sym
+            elif m.type == "field_declaration" and fd is None:
+                t = _ast_field(m, "type")
+                if t is not None:
+                    comps.append(tight_type(_ast_text(t)))
+        type_sym.params = comps
+    for fn in _ast_collect(tree.root_node, ("function_definition",)):
+        fd, name_node = _c_fn_declarator(fn)
+        if fd is None or name_node is None:
+            continue
+        body = _ast_field(fn, "body")
+        if name_node.type == "qualified_identifier":  # out-of-line member def
+            container = _base_type(_ast_text(_ast_field(name_node, "scope")))
+            mname = _ast_text(_ast_field(name_node, "name"))
+            calls = _ast_calls(body, mname, ("call_expression", "new_expression"),
+                               _c_call_entry)
+            existing = members.get((container, mname))
+            if existing is not None:
+                if not existing.calls:
+                    existing.calls = calls
+                continue
+            params, binds = _c_params(_ast_field(fd, "parameters"))
+            rtype = _ast_field(fn, "type")
+            returns = tight_type(_ast_text(rtype)) if rtype is not None else None
+            symbols.append(Symbol(
+                name=mname, kind="method", file=rel, line=fn.start_point[0] + 1,
+                signature=f"{mname}({','.join(params)})"
+                          + (f":{returns}" if returns and returns != "void" else ""),
+                params=params, returns=returns,
+                visibility="pub", container=container, lang="cpp",
+                calls=calls, bindings=binds,
+            ))
+        elif name_node.type == "identifier" and fn.parent is not None \
+                and fn.parent.type in ("translation_unit", "namespace_definition",
+                                       "declaration_list"):
+            name = _ast_text(name_node)
+            params, binds = _c_params(_ast_field(fd, "parameters"))
+            returns = tight_type(_ast_text(_ast_field(fn, "type")))
+            symbols.append(Symbol(
+                name=name, kind="fn", file=rel, line=fn.start_point[0] + 1,
+                signature=f"{name}({','.join(params)})"
+                          + (f":{returns}" if returns != "void" else ""),
+                params=params, returns=returns,
+                visibility="priv" if _c_static(fn) else "pub", lang="cpp",
+                calls=_ast_calls(body, name, ("call_expression", "new_expression"),
+                                 _c_call_entry),
+                bindings=binds,
+            ))
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Lua extraction
+# ---------------------------------------------------------------------------
+
+def _lua_call_entry(n) -> tuple[str, str]:
+    fn = _ast_field(n, "name")
+    if fn is None:
+        return "", ""
+    if fn.type == "identifier":
+        name = _ast_text(fn)
+        return name, name
+    if fn.type in ("dot_index_expression", "method_index_expression"):
+        field = _ast_field(fn, "field") or _ast_field(fn, "method")
+        table = _ast_field(fn, "table")
+        name = _ast_text(field)
+        entry = (f"{_ast_text(table)}.{name}"
+                 if table is not None and table.type == "identifier" else name)
+        return name, entry
+    return "", ""
+
+
+def _extract_lua(text: str, rel: str) -> list[Symbol]:
+    tree = _PARSERS["lua"].parse(text.encode())
+    symbols: list[Symbol] = []
+    for fn in _ast_collect(tree.root_node, ("function_declaration",)):
+        name_node = _ast_field(fn, "name")
+        if name_node is None:
+            continue
+        container = None
+        is_local = any(c.type == "local" for c in fn.children)
+        if name_node.type == "identifier":
+            name = _ast_text(name_node)
+        elif name_node.type in ("dot_index_expression", "method_index_expression"):
+            field = _ast_field(name_node, "field") or _ast_field(name_node, "method")
+            name = _ast_text(field)
+            container = _ast_text(_ast_field(name_node, "table"))
+        else:
+            continue
+        pnode = _ast_field(fn, "parameters")
+        params = [_ast_text(c) for c in (pnode.children if pnode is not None else [])
+                  if c.type == "identifier"]
+        symbols.append(Symbol(
+            name=name, kind="method" if container else "fn", file=rel,
+            line=fn.start_point[0] + 1,
+            signature=f"{name}({','.join(params)})", params=params,
+            visibility="priv" if is_local or name.startswith("_") else "pub",
+            container=container, lang="lua",
+            calls=_ast_calls(_ast_field(fn, "body"), name,
+                             ("function_call",), _lua_call_entry),
+        ))
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# HTML extraction (ids and custom elements, names only)
+# ---------------------------------------------------------------------------
+
+def _extract_html(text: str, rel: str) -> list[Symbol]:
+    tree = _PARSERS["html"].parse(text.encode())
+    symbols: list[Symbol] = []
+    seen: set[str] = set()
+    for attr in _ast_collect(tree.root_node, ("attribute",)):
+        parts = [c for c in attr.children]
+        if not parts or _ast_text(parts[0]) != "id":
+            continue
+        vals = _ast_collect(attr, ("attribute_value",))
+        if vals and (v := _ast_text(vals[0])) and f"#{v}" not in seen:
+            seen.add(f"#{v}")
+            symbols.append(Symbol(
+                name=f"#{v}", kind="fn", file=rel,
+                line=attr.start_point[0] + 1, signature=f"#{v}",
+                visibility="priv", lang="html"))
+    for tag in _ast_collect(tree.root_node, ("tag_name",)):
+        t = _ast_text(tag)
+        if "-" in t and t not in seen:  # custom element
+            seen.add(t)
+            symbols.append(Symbol(
+                name=t, kind="fn", file=rel, line=tag.start_point[0] + 1,
+                signature=t, visibility="priv", lang="html"))
+    return symbols
+
+
+# ---------------------------------------------------------------------------
+# Helm extraction (no grammar: define names, values keys, chart name)
+# ---------------------------------------------------------------------------
+
+_HELM_DEFINE_RE = re.compile(r'\{\{-?\s*define\s+"([^"]+)"')
+
+
+def _extract_helm(text: str, rel: str) -> list[Symbol]:
+    """Only fires inside a chart layout (templates/, Chart.yaml, values.yaml) so
+    ordinary YAML (CI configs, k8s manifests) stays out of the digest."""
+    parts = Path(rel).parts
+    base = Path(rel).name
+    in_chart = "templates" in parts or base in ("Chart.yaml", "values.yaml")
+    if not in_chart:
+        return []
+    symbols: list[Symbol] = []
+    if base == "Chart.yaml":
+        m = re.search(r"(?m)^name:\s*(\S+)", text)
+        if m:
+            symbols.append(Symbol(
+                name=m.group(1), kind="class", file=rel,
+                line=text.count("\n", 0, m.start()) + 1,
+                signature=f"chart {m.group(1)}", visibility="pub", lang="helm"))
+    elif base == "values.yaml":
+        for m in re.finditer(r"(?m)^([A-Za-z_][\w-]*):", text):
+            symbols.append(Symbol(
+                name=m.group(1), kind="fn", file=rel,
+                line=text.count("\n", 0, m.start()) + 1,
+                signature=m.group(1), visibility="priv", lang="helm"))
+    for m in _HELM_DEFINE_RE.finditer(text):
+        symbols.append(Symbol(
+            name=m.group(1), kind="fn", file=rel,
+            line=text.count("\n", 0, m.start()) + 1,
+            signature=f'define "{m.group(1)}"', visibility="pub", lang="helm"))
     return symbols
 
 
@@ -741,6 +1602,17 @@ EXTRACTORS = {
     "python": _extract_python,
     "typescript": _extract_ts,
     "javascript": _extract_ts,
+    "tsx": _extract_tsx,
+    "vue": _extract_sfc,
+    "svelte": _extract_sfc,
+    "go": _extract_go,
+    "rust": _extract_rust,
+    "csharp": _extract_cs,
+    "c": _extract_c,
+    "cpp": _extract_cpp,
+    "lua": _extract_lua,
+    "html": _extract_html,
+    "helm": _extract_helm,
 }
 
 
@@ -982,23 +1854,26 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if (s.kind in TYPE_KINDS + ("fn",) and s.container is None
                 and (s.visibility == "pub" or private_sigs)):
             types_by_dir.setdefault(str(Path(s.file).parent), []).append(s)
-    methods_by_owner: dict[tuple[str, str], list[Symbol]] = {}
+    # owner keys carry lang so same-named types from different languages in one
+    # dir (Pricer in go + rust) don't merge their method lists
+    methods_by_owner: dict[tuple[str, str, str], list[Symbol]] = {}
     for s in prod:
         if (s.container and s.kind == "method"
                 and (s.visibility == "pub" or private_sigs)):
-            methods_by_owner.setdefault((str(Path(s.file).parent), s.container), []).append(s)
+            methods_by_owner.setdefault(
+                (str(Path(s.file).parent), s.container, s.lang), []).append(s)
     # names-only private inventory (used when private_sigs is off)
-    priv_methods_by_owner: dict[tuple[str, str], list[str]] = {}
+    priv_methods_by_owner: dict[tuple[str, str, str], list[str]] = {}
     priv_top_by_file: dict[tuple[str, str], list[str]] = {}
     if not private_sigs:
         for s in prod:
             if s.visibility != "priv":
                 continue
             if s.container and s.kind == "method":
-                key = (str(Path(s.file).parent), s.container)
+                key = (str(Path(s.file).parent), s.container, s.lang)
                 priv_methods_by_owner.setdefault(key, []).append(s.name)
             elif s.container is None and s.kind in TYPE_KINDS + ("fn",):
-                key = (str(Path(s.file).parent), Path(s.file).stem)
+                key = (str(Path(s.file).parent), Path(s.file).name)
                 priv_top_by_file.setdefault(key, []).append(s.name)
 
     defined = {s.name for s in symbols}
@@ -1074,10 +1949,10 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             sig = _norm(sig, own)
         return f"{sig} > {','.join(kept)}" if kept else sig
 
-    ctors_by_owner: dict[tuple[str, str], list[str]] = {}
+    ctors_by_owner: dict[tuple[str, str, str], list[str]] = {}
     for s in prod:
         if s.kind == "ctor" or (s.kind == "method" and s.name == "__init__"):
-            key = (str(Path(s.file).parent), s.container)
+            key = (str(Path(s.file).parent), s.container, s.lang)
             if len(s.params) > len(ctors_by_owner.get(key, [])):
                 ctors_by_owner[key] = s.params
 
@@ -1089,7 +1964,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             if t.kind == "fn":
                 payload.append(_sig_line(t, t.name, False))
                 continue
-            components = t.params or ctors_by_owner.get((d, t.name), [])
+            components = t.params or ctors_by_owner.get((d, t.name, t.lang), [])
             key = (t.kind, t.visibility, tuple(components), tuple(t.supers), tuple(t.permits))
             groups.setdefault(key, []).append(t)
         for (kind, vis, components, supers, permits), members in groups.items():
@@ -1108,37 +1983,37 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             payload.append(f"{names}({inner}){rel_suffix}{hot_suffix}")
             # Methods shared by every member print once (⟨X⟩-normalized); each
             # member's remaining methods print on its own `Name: …` line.
-            member_methods = {m.name: methods_by_owner.get((d, m.name), [])
+            member_methods = {id(m): methods_by_owner.get((d, m.name, m.lang), [])
                               for m in members}
             head = members[0]
-            def _priv_line(owner: str, prefix: str = "") -> str | None:
-                names_only = priv_methods_by_owner.get((d, owner))
+            def _priv_line(m: Symbol, prefix: str = "") -> str | None:
+                names_only = priv_methods_by_owner.get((d, m.name, m.lang))
                 if not names_only:
                     return None
                 return f" {prefix}- {','.join(dict.fromkeys(names_only))}"
 
             if len(members) == 1:
-                for ms in member_methods[head.name]:
+                for ms in member_methods[id(head)]:
                     payload.append(" " + _sig_line(ms, head.name, False))
-                if (pl := _priv_line(head.name)) is not None:
+                if (pl := _priv_line(head)) is not None:
                     payload.append(pl)
                 continue
-            normed = {m.name: [_sig_line(ms, m.name, True)
-                               for ms in member_methods[m.name]] for m in members}
+            normed = {id(m): [_sig_line(ms, m.name, True)
+                              for ms in member_methods[id(m)]] for m in members}
             shared = set.intersection(*(set(v) for v in normed.values()))
             emitted: set[str] = set()
-            for line in normed[head.name]:
+            for line in normed[id(head)]:
                 if line in shared and line not in emitted:
                     payload.append(" " + line)
                     emitted.add(line)
             for m in members:
-                extras = [ms for ms, ln in zip(member_methods[m.name], normed[m.name])
+                extras = [ms for ms, ln in zip(member_methods[id(m)], normed[id(m)])
                           if ln not in shared]
                 if extras:
                     payload.append(f" {m.name}: "
                                    + "; ".join(_sig_line(ms, m.name, False)
                                                for ms in extras))
-                if (pl := _priv_line(m.name, f"{m.name} ")) is not None:
+                if (pl := _priv_line(m, f"{m.name} ")) is not None:
                     payload.append(pl)
 
     for (d, stem), names_only in sorted(priv_top_by_file.items()):

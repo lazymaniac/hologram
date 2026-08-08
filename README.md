@@ -5,8 +5,18 @@ instant whole-project context — structure, signatures, call flows — without 
 re-grepping the repo every session.
 
 Deterministic (no LLM in generation), project-agnostic, zero maintenance after `init`.
-Extraction is AST-based everywhere: **tree-sitter** for Java and TypeScript/JavaScript,
-stdlib `ast` for Python.
+Extraction is AST-based everywhere: **tree-sitter** grammars for compiled/frontend
+languages, stdlib `ast` for Python.
+
+| Language | Depth |
+|---|---|
+| Java, C#, TypeScript/JS, TSX/JSX | types, signatures, relations, resolved call chains, ctor deps, privates |
+| Python (stdlib `ast`, zero deps) | same |
+| Go, Rust, C, C++ | types/traits/structs, signatures, calls, receiver bindings, visibility |
+| Vue, Svelte | component symbol + everything in `<script>` blocks |
+| Lua | functions/methods with call chains (params by name — untyped) |
+| HTML | element ids + custom-element tags, names only |
+| Helm | `{{ define }}` names, `values.yaml` keys, chart name (regex, chart-layout-gated) |
 
 ## Install / use
 
@@ -182,8 +192,10 @@ What the digest actually does about that — and what it can't:
 
 **Where it falls short**
 
-- Three languages. Java, Python, TypeScript/JavaScript — no Go, Rust, Kotlin, C#, C++.
-  The grammar table makes adding one cheap, but each needs its own extractor mapping.
+- Language depth is uneven. Java/C#/TS/Python get full treatment; Go/Rust/C/C++ are
+  solid but skip idioms like Go `const`/`iota` enums and C++ templates (flattened);
+  Lua is untyped so params are names, not types; Helm is regex over templates, not a
+  parser. Kotlin has no reliable pip grammar yet and is absent.
 - TS extraction covers classes, interfaces, enums, `function` declarations, and arrow/
   function-expression assignments (top-level and class fields) — but not standalone
   `type` aliases, object-literal APIs, or re-exports.

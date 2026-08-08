@@ -356,7 +356,7 @@ class PrivateMembersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), self._syms(), [], "regen")
         self.assertIn("- _evict,_rebalance", out)      # class privates, names only
-        self.assertIn("- util: _helper", out)          # module-level privates per file
+        self.assertIn("- util.py: _helper", out)       # module-level privates per file
         self.assertNotIn("_evict(int)", out)           # no signatures by default
 
     def test_private_signatures_with_flag(self):
