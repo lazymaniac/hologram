@@ -14,6 +14,22 @@ The name: like a hologram, every fragment of the output carries the shape of the
 To give a sense of scale: a real 77,000-line Java project with 727 files compresses to
 about 20,000 tokens — small enough to hand an agent whole.
 
+What it's useful for:
+
+- **Feature planning** — plan against the real surface of the code: what already
+  exists, which module the new thing belongs in, which family of types it should
+  extend. Plans written this way survive contact with the codebase.
+- **Implementation** — the agent (or you) finds the existing helper before writing a
+  second one, follows the house conventions, and places code where it belongs.
+- **Code review** — `hologram diff` shows a PR's API drift on one screen, including
+  the near-duplicate helpers that sneak in quietly.
+- **Refactoring** — `×N` fan-in markers show a symbol's blast radius, and the deps
+  lines show which modules are coupled before you start pulling threads.
+- **Debugging** — call chains and private-name lists point at the right file before
+  you open a single one.
+- **Onboarding** — a new teammate (human or agent) reads one file and knows the
+  territory: the modules, the vocabulary, the patterns.
+
 ## What the output looks like
 
 Here's the digest of a small Java fixture:
