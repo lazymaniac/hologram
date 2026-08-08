@@ -80,5 +80,46 @@ class TranscriptMetricsTest(unittest.TestCase):
                              "turns": 0, "tokens_in": 0, "tokens_out": 0})
 
 
+BEFORE_DIGEST = """# corpus @x 2026-08-08 · 100 LOC · state aaa · regen: x
+· legend: …
+src
+ math
+  MathOps(C)
+   add(Rational,Rational):Rational
+   normalize(List<Rational>):List<Rational> > add
+"""
+
+AFTER_REUSED = BEFORE_DIGEST + """\
+  Averages(C)
+   weightedAverage(List<Rational>):Rational > MathOps.add,normalize
+"""
+
+AFTER_DUPLICATED = BEFORE_DIGEST + """\
+  Averages(C)
+   normalizeWeights(List<Rational>):List<Rational>
+   weightedAverage(List<Rational>):Rational > normalizeWeights
+"""
+
+
+class DuplicationDetectorTest(unittest.TestCase):
+    def test_reuse_detected(self):
+        v = bench.judge_reuse(BEFORE_DIGEST, AFTER_REUSED, ["normalize", "add"])
+        self.assertEqual(sorted(v["reused"]), ["add", "normalize"])
+        self.assertEqual(v["duplicated"], [])
+
+    def test_duplicate_detected(self):
+        v = bench.judge_reuse(BEFORE_DIGEST, AFTER_DUPLICATED, ["normalize"])
+        self.assertEqual(v["reused"], [])
+        self.assertEqual(v["duplicated"], ["normalizeWeights"])
+
+    def test_new_lines_listed(self):
+        v = bench.judge_reuse(BEFORE_DIGEST, AFTER_REUSED, [])
+        self.assertTrue(any("weightedAverage" in ln for ln in v["new_lines"]))
+
+    def test_no_change_is_clean(self):
+        v = bench.judge_reuse(BEFORE_DIGEST, BEFORE_DIGEST, ["normalize"])
+        self.assertEqual(v, {"new_lines": [], "reused": [], "duplicated": []})
+
+
 if __name__ == "__main__":
     unittest.main()

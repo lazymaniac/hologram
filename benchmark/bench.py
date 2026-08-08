@@ -88,5 +88,50 @@ def parse_transcript(text: str) -> dict:
     return m
 
 
+def _sig_lines(digest: str) -> list[str]:
+    out = []
+    for ln in digest.splitlines():
+        s = ln.strip()
+        if s and not s.startswith(("#", "·", "-", "»", "?")) and "(" in s:
+            out.append(s)
+    return out
+
+
+def _fn_name(sig_line: str) -> str:
+    return sig_line.split("(", 1)[0].strip().lstrip("-").split(",")[-1]
+
+
+def _chain(sig_line: str) -> list[str]:
+    if " > " not in sig_line:
+        return []
+    return [c.strip() for c in sig_line.split(" > ", 1)[1].split(",")]
+
+
+def judge_reuse(before: str, after: str, expect_reuse: list[str]) -> dict:
+    """Compare digests around a run. reused = expected symbols named in a new
+    line's call chain. duplicated = new functions name-similar to an expected
+    symbol that do NOT call it."""
+    old = set(_sig_lines(before))
+    new_lines = [ln for ln in _sig_lines(after) if ln not in old]
+    reused: list[str] = []
+    duplicated: list[str] = []
+    for target in expect_reuse:
+        tshort = target.rsplit(".", 1)[-1].lower()
+        hit = any(tshort in (c.rsplit(".", 1)[-1].lower() for c in _chain(ln))
+                  for ln in new_lines)
+        if hit:
+            reused.append(target)
+            continue
+        for ln in new_lines:
+            name = _fn_name(ln)
+            sim = difflib.SequenceMatcher(None, name.lower(), tshort).ratio()
+            if sim >= 0.6 and name.lower() != tshort:
+                duplicated.append(name)
+                break
+    return {"new_lines": new_lines,
+            "reused": sorted(set(reused)),
+            "duplicated": sorted(set(duplicated))}
+
+
 if __name__ == "__main__":
     raise SystemExit(0)
