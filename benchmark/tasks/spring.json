@@ -1,0 +1,41 @@
+{
+  "corpus": "/private/tmp/claude-501/-Users-sebastian-workspace-hologram/b2aa35ac-99fa-4144-9924-f3fd8ac1d2ce/scratchpad/corpora/spring-framework",
+  "model": "sonnet",
+  "max_turns": 40,
+  "tasks": [
+    {"id": "trim-to-null", "kind": "reuse",
+     "prompt": "In spring-core, add a small utility method that returns the given string trimmed, or null when the string contains no visible text. Put it where such helpers belong and follow existing conventions.",
+     "accept_cmd": "git -C {ws} diff --stat | grep -q .",
+     "expect_reuse": ["StringUtils.hasText"]},
+
+    {"id": "instantiate-by-name", "kind": "reuse",
+     "prompt": "In spring-core or spring-beans, add a helper that takes a fully-qualified class name and returns a new instance created via the default constructor, with sensible exceptions. Follow existing conventions.",
+     "accept_cmd": "git -C {ws} diff --stat | grep -q .",
+     "expect_reuse": ["ClassUtils.forName", "BeanUtils.instantiateClass"]},
+
+    {"id": "meta-annotation-check", "kind": "reuse",
+     "prompt": "In spring-core, add a helper that reports whether a given method or its declaring class carries a given annotation, including meta-annotations. Follow existing conventions.",
+     "accept_cmd": "git -C {ws} diff --stat | grep -q .",
+     "expect_reuse": ["AnnotationUtils.findAnnotation"]},
+
+    {"id": "first-generic-arg", "kind": "reuse",
+     "prompt": "In spring-core, add a helper that resolves the class of the first generic type argument of a given field, or null if it cannot be resolved. Follow existing conventions.",
+     "accept_cmd": "git -C {ws} diff --stat | grep -q .",
+     "expect_reuse": ["ResolvableType.forField", "ResolvableType.forClass"]},
+
+    {"id": "find-getbean-flow", "kind": "navigate",
+     "prompt": "In one paragraph: trace what happens from ApplicationContext.getBean(String) down to the instantiation of a singleton bean — name the key classes in order. Do not modify any files.",
+     "accept_cmd": "true",
+     "expect_reuse": []},
+
+    {"id": "find-profile-eval", "kind": "navigate",
+     "prompt": "In one paragraph: where are @Profile conditions evaluated during bean definition registration, and which types are involved? Do not modify any files.",
+     "accept_cmd": "true",
+     "expect_reuse": []},
+
+    {"id": "find-converter-choice", "kind": "navigate",
+     "prompt": "In one paragraph: how does Spring MVC decide which HttpMessageConverter serializes a @ResponseBody return value? Name the key classes. Do not modify any files.",
+     "accept_cmd": "true",
+     "expect_reuse": []}
+  ]
+}
