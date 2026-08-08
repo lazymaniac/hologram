@@ -1,12 +1,69 @@
 # hologram
 
-Compresses any codebase into **one markdown file** you can attach to any LLM session for
-instant whole-project context — structure, signatures, call flows — without the model
-re-grepping the repo every session.
+Compresses a codebase into **one token-tight markdown file** — every type, signature,
+relation, and call chain — that an LLM agent can read for instant whole-project context
+instead of re-grepping the repo every session. A 77k-LOC / 727-file Java codebase
+digests to ~20k tokens.
 
-Deterministic (no LLM in generation), project-agnostic, zero maintenance after `init`.
-Extraction is AST-based everywhere: **tree-sitter** grammars for compiled/frontend
-languages, stdlib `ast` for Python.
+Deterministic (no LLM in generation), single-file, self-sufficient: it installs its own
+parser grammars on first contact with a language and keeps itself fresh through git
+hooks. Named hologram because each fragment of the output carries the shape of the
+whole system.
+
+## What the output looks like
+
+Real output for a small Java fixture — signatures only, no prose; the LLM reads
+semantics from names:
+
+```
+# javamini @30ab133 2026-08-08 · 200 LOC · state ca50854aec7c · regen: …/hologram.py build
+· legend: (C)lass (R)ecord (I)nterface (E)num (F)n (T)ype-alias · (R: …)=components · …
+· deps .→ids | engine→ids
+src
+ App(C)
+  main(String[]) > PricingEngine,PricingEngine.evaluate,OrderId.of,ItemId.of
+ delta
+  AddOp,RemoveOp(R: String) : DeltaOp
+   weight():int
+  DeltaOp(I sealed: AddOp|RemoveOp)
+ engine
+  OrderStatus(E: NEW,PAID,SHIPPED)
+   isTerminal():boolean
+  PricingEngine(C: Map<ItemId,Long>) : PricePort
+   quoteFor(OrderId):Quote > evaluate
+   evaluate(OrderId,List<ItemId>):Quote !UnknownItem > UnknownItemException,Quote
+ ids
+  ItemId,OrderId,UserId(R: String)
+   of(String):⟨X⟩ > ⟨X⟩
+```
+
+How to read it (the one-line legend at the top of every digest teaches this to any LLM):
+
+- **Tree** — a path-compressed package trie; walk it to reconstruct any file's directory.
+- **Types** — `PricingEngine(C: Map<ItemId,Long>) : PricePort` = a class whose
+  constructor takes that map, implementing PricePort. `(R: …)` record components,
+  `(E: …)` enum values, `(T: string)` type alias, `(I sealed: A|B)` permitted subtypes.
+- **Same-shape grouping** — `ItemId,OrderId,UserId(R: String)` collapses a family into
+  one entry; shared methods print once with `⟨X⟩` standing for each member's own name;
+  a member's divergent methods print on its own `Name: …` line.
+- **Call chains** — after `>`: what the function calls, in first-call order. Receivers
+  are **type-resolved** from declared params/fields/locals (`engine.evaluate` renders as
+  `PricingEngine.evaluate`; calls through platform-typed variables are dropped, so no
+  `bigint.signum` noise). Chains are **transitively reduced** (an entry reachable through
+  a sibling is omitted; SCC-safe) and filtered to project-defined names minus
+  project-wide ubiquitous helpers.
+- **Markers** — `!UnknownItem` = throws (`Exception` suffix implied) · no `:Ret` = void ·
+  `×N` = referenced from N other files (shown at ≥10) · `✓` = name appears in test
+  files · `⋮N` = body is N lines (shown at ≥40, where implementation weight hides) ·
+  `» index.ts: A,B` = barrel re-exports.
+- **Private members** — packed name lists by default (`- evict,rebalance` under a class,
+  `- util.py: _parse,_walk` per file): names alone say a lot about internals at ~⅓ the
+  cost of signatures. `--private` upgrades them to full `-`-prefixed signatures.
+- **`· deps a→b`** — module `a`'s code references types defined in `b`: the import
+  architecture without reading imports.
+- **`state`** — a content hash of the scanned sources; the freshness mechanism below.
+
+## Languages
 
 | Language | Depth |
 |---|---|
@@ -21,28 +78,38 @@ languages, stdlib `ast` for Python.
 
 ## Install / use
 
-Standalone, self-sufficient tool — clone anywhere (e.g. `~/workspace/hologram`) and point
-it at any repo:
+Standalone — clone anywhere and point it at any repo. No setup: on first contact with a
+language it offers to create a `.venv` next to `hologram.py` and pip-install the needed
+tree-sitter grammar (one `y`), then transparently re-execs into that venv on every later
+run. Non-interactive contexts get the exact install command instead. Python-only repos
+need no dependencies at all.
 
 ```bash
-python3 ~/workspace/hologram/hologram.py init --root /path/to/repo   # once per repo: git hooks + .gitignore + first build
-python3 ~/workspace/hologram/hologram.py build --root /path/to/repo  # manual rebuild (hooks do this automatically)
-python3 ~/workspace/hologram/hologram.py build --root . --lang java --out DIGEST.md
-python3 ~/workspace/hologram/hologram.py check --root .        # exit 0 fresh / 1 stale — for agent harnesses
-python3 ~/workspace/hologram/hologram.py build --root . --if-stale   # rebuild only when sources changed
-python3 ~/workspace/hologram/hologram.py diff HEAD~3 --root .  # API drift between revisions, as a digest diff
-python3 ~/workspace/hologram/hologram.py build --root . --behaviors  # opt-in: test names as behavior specs
+python3 ~/workspace/hologram/hologram.py init --root /path/to/repo    # once per repo: git hooks + .gitignore + first build
+python3 ~/workspace/hologram/hologram.py build --root /path/to/repo   # manual rebuild (hooks do this automatically)
 ```
 
-The first time it meets a Java or TS/JS repo it offers to install its own dependencies
-(creates a `.venv` next to `hologram.py`, pip-installs the tree-sitter grammars, and
-re-launches itself — one `y` and it just runs). Once that venv exists, every later run
-re-execs into it automatically, so plain `python3 hologram.py …` always works. In
-non-interactive contexts it prints the exact install command instead. Python-only repos
-need no dependencies at all (stdlib `ast`). Installed git hooks auto-prefer the venv.
+Output: `PROJECT_DIGEST.md` at the repo root, gitignored. After `init`,
+post-commit/merge/checkout hooks keep it fresh.
 
-Output: `PROJECT_DIGEST.md` at the repo root (gitignored). Attach it to any LLM chat or
-agent session. After `init`, post-commit/merge/checkout hooks keep it fresh.
+More:
+
+```bash
+hologram.py build --root . --lang java,kotlin --out DIGEST.md  # restrict languages, custom output
+hologram.py build --root . --private     # full signatures for private members
+hologram.py build --root . --behaviors   # append test names as behavior specs (can be large)
+hologram.py build --root . --if-stale    # rebuild only when sources changed (instant when fresh)
+hologram.py check --root .               # exit 0 fresh / 1 stale — for agent harnesses and CI
+hologram.py diff HEAD~3 --root .         # API drift between revisions, as a digest diff
+```
+
+## Freshness
+
+The header's `state` stamp is a hash of the scanned sources. `check` recomputes it in
+milliseconds without parsing anything and exits 0/1; `build --if-stale` uses the same
+probe to make "rebuild when unsure" free. `diff <rev>` builds the digest for another
+revision in a temporary git worktree and prints the body diff — a PR's API drift in one
+screen, including near-duplicate helpers quietly appearing.
 
 ## Telling your agent about it
 
@@ -79,156 +146,65 @@ Rules:
   appended (instant when fresh), or `check` to just test freshness.
 ```
 
-## Output
-
-Signatures only — no docs, no prose. The LLM reads semantics from names:
-
-```
-src/main/java/com/private-corpus
-  kernel
-    arithmetic
-      MathOps(C)
-        add(Rational,Rational):Rational > Rational.of,multiply
-      Rational(R: BigInteger,BigInteger)
-        of(BigInteger,BigInteger):Rational > divide,negate,Rational
-    domainkind
-      ForceKind(E: ASSERTED,ENTAILED,SUPPORTED,KIND_D,HYPOTHETICAL)
-```
-
-Format is deliberately tight — `name(params):Ret`, no space after commas — measured with a real
-tokenizer (o200k) to be ~5% cheaper than the pretty variant with zero information loss.
-
-- Package paths render as a path-compressed tree of real path segments (walk the tree to
-  reconstruct any file's directory): shared prefixes stated once.
-- Types with identical shape collapse into one entry
-  (`AggregateId, ArtifactId, …(R: UUID)` with shared methods shown once as `⟨X⟩`).
-- After `>`: the functions it calls, first-call order. Receivers are **type-resolved**
-  from declared params/fields/locals: a call through a project-typed variable renders as
-  `Type.method`; calls through platform-typed variables are dropped entirely (no
-  `bigint.signum` noise even when a project method shares the name). Project-wide
-  ubiquitous helpers (logging/guards) are dropped too.
-- Call lists are **transitively reduced**: an entry already reachable through a sibling
-  entry is omitted (SCC-safe, so cycles never disappear). Reachability is preserved
-  exactly; follow the chain.
-- Types with the same shape group even when their method sets diverge: shared methods
-  print once as `⟨X⟩`, each member's extra methods print on its own `Name: …` line.
-- Class components show constructor dependencies (`Service(C: Registry, Clock)`); interface
-  methods (bodyless) and enum constants are listed. Test code excluded.
-- Relations: `: X` = extends/implements; `(I sealed: A | B)` = permitted subtypes.
-- `!E` after a signature = declared throws / raised exceptions, `Exception` suffix implied
-  (`!UnknownItem` = `UnknownItemException`). No `:Ret` = returns void/None.
-- `×N` on a type = referenced from N other files (only shown when N ≥ 10).
-- `✓` = the symbol's name appears in test files; `⋮N` = body is N lines long
-  (shown only at ≥40 — where the implementation weight hides).
-- `» index.ts: A,B` = barrel re-exports; `(T: string)` = type alias and its target.
-- `· deps a→b,c` lines under the legend: module a's code references types defined
-  in b and c — the import architecture without reading imports.
-- Private members appear as packed name lists (`- evict,rebalance` under their class,
-  `- util: _parse,_walk` per file for module-level helpers) — names alone say a lot about
-  internals at ~⅓ the cost of signatures. `--private` upgrades them to full `-`-prefixed
-  signatures.
-- A one-line legend at the top of every digest explains the notation to any LLM.
-
-## Architecture
-
-Single file, one pipeline: scan (git-tracked files only when in a repo) → extract → render.
-Language-specific code is confined to per-language extractors that all produce the same
-`Symbol` records; everything downstream — resolution, reduction, grouping, rendering —
-is language-neutral.
-
 ## Working with coding agents: an honest assessment
 
 This tool exists because of a specific failure mode: an LLM agent lands in a repo with
 no map, greps its way to a partial picture, and starts writing code that already exists.
-What the digest actually does about that — and what it can't:
 
 **Where it genuinely helps**
 
 - **Session economics.** An agent re-derives project structure every session: dozens of
   grep/read round-trips, easily 50–100k tokens of file content on a mid-sized repo, most
-  of it discarded. The digest front-loads that map for ~19k tokens, once, and the agent's
-  searches become targeted lookups instead of exploration.
+  of it discarded. The digest front-loads that map for ~20k tokens, read on demand, and
+  the agent's searches become targeted lookups instead of exploration.
 - **Duplication has a real counterweight.** The classic agent failure — writing a second
   `normalize()` because it never saw the first one — happens because existence of code is
   invisible until you grep the exact right word. A complete signature inventory with call
-  chains makes "does this already exist?" answerable by reading, not searching. The `×N`
-  fan-in marker points at the canonical utilities specifically.
+  chains makes "does this already exist?" answerable by reading. `×N` fan-in points at
+  the canonical utilities; `hologram diff` shows a reviewer the near-duplicate helpers a
+  PR quietly adds.
 - **Convention transmission dampens bloat.** Generated code bloats worst when the model
-  invents its own patterns. The digest shows the house grammar — all IDs are one-component
-  records, services take their deps by constructor, errors are sealed hierarchies — and a
-  model shown a family extends it rather than inventing a parallel one. Grouped shapes
-  (`AId,BId,…(R: UUID)`) make those families impossible to miss.
-- **Private names orient debugging.** `- rebalance,evict,writeThrough` under a cache class
-  tells an agent where behavior lives before it opens the file, so the file-reads it does
-  spend go to the right places.
-- **The digest diff is a review signal.** Because output is deterministic, a PR that
-  quietly adds three near-duplicate helpers shows up as exactly that in the digest diff.
+  invents its own patterns. The digest shows the house grammar — all IDs are
+  one-component records, services take deps by constructor, errors are sealed
+  hierarchies — and a model shown a family extends it rather than inventing a parallel
+  one.
+- **Private names orient debugging.** `- rebalance,evict,writeThrough` under a cache
+  class says where behavior lives before any file is opened; `⋮N` says where the
+  implementation weight hides.
+- **Freshness is machine-checkable.** `check` / `--if-stale` cost milliseconds, so an
+  agent harness can gate on digest freshness mechanically instead of trusting prose.
 
 **Where honesty is due**
 
 - **It prevents nothing by itself.** The digest competes for the model's attention like
-  any other context. An agent can and sometimes will ignore 19k tokens of inventory and
-  reimplement a helper anyway. It shifts probabilities; it is not a guardrail.
-- **Body-level bloat is visible only at its edge.** `⋮N` marks bodies ≥40 lines, and a
-  method growing 20→200 lines shows up in `hologram diff` — but the digest still can't
-  say whether those lines are earned. It fights *architectural* duplication; verbose
-  implementation it can only flag by weight.
-- **Stale is worse than absent — now checkable.** Refresh is commit-grained, but the
-  header carries a content-state stamp: `hologram check` exits 0/1 in milliseconds and
-  `build --if-stale` makes "rebuild when unsure" free. The residual risk is the agent
-  that never checks.
+  any other context; an agent can ignore the inventory and reimplement a helper anyway.
+  It shifts probabilities. It is not a guardrail.
+- **Bodies stay invisible.** `⋮N` flags weight and `✓` flags test exercise, but a
+  500-line algorithm and a one-liner still expose the same signature. It tells an LLM
+  *what exists*, not *how it works* — and verbose implementation inside bodies is only
+  flagged, never fought.
+- **Existence ≠ correctness.** `✓` is evidence of exercise, not proof; an unmarked
+  function is a warning, a marked one can still be wrong. `--behaviors` adds test names
+  as specs, but on a test-heavy repo that can double the digest — hence opt-in.
 - **It amplifies naming, including bad naming.** `doStuff2(Object):Object` compresses to
-  exactly the nothing it says. On codebases with misleading names the digest transmits
-  the misdirection more efficiently than reading the code would.
-- **Existence ≠ correctness, partially signaled.** `✓` marks symbols referenced from
-  test files — evidence of exercise, not proof of correctness. An unmarked function is
-  a warning; a marked one can still be wrong. `--behaviors` adds test names as specs,
-  but measured honestly: on a test-heavy repo that can double the digest, so it is
-  opt-in.
-- **Cost discipline is on the agent.** The recommended pattern is read-on-demand — the
-  digest sits on disk and costs nothing until a task needs the map. Inlining ~20k tokens
-  into every prompt is the anti-pattern; the shipped agent instructions say so, but
-  nothing enforces it.
-- **The core claim is still unbenchmarked.** No rigorous eval yet shows agents with the
-  digest duplicate less or navigate faster. The design is argued from failure modes
-  observed in practice, not measured against a control.
+  exactly the nothing it says. On misleadingly-named codebases the digest transmits the
+  misdirection more efficiently than reading the code would.
+- **The residual staleness risk is the agent that never checks.** The stamp makes
+  freshness checkable, not checked.
+- **Language depth is uneven.** Java/C#/TS/Python get full treatment; Go/Rust/C/C++ skip
+  idioms like Go `const`/`iota` enums and flatten C++ templates; Lua is untyped so
+  params are names; Helm is regex, not a parser; Kotlin rests on a community grammar.
+- **The core claim is unbenchmarked.** No rigorous eval yet shows agents with the digest
+  duplicate less or navigate faster. The design is argued from observed failure modes,
+  not measured against a control. This is the largest open item.
 
-## Honest trade-offs
+## Architecture
 
-**Where it earns its keep**
-
-- Real compression on real code: a 77k-LOC / 727-file Java codebase digests to ~17k
-  tokens — whole-project context that fits comfortably alongside an actual task.
-- Deterministic and diffable: no LLM in the loop, same input → same output, so the
-  digest can live in code review and its changes mean something.
-- AST-grade everywhere: tree-sitter (Java, TS/JS) and stdlib `ast` (Python). No regex
-  parsing of source, so exotic formatting doesn't break extraction.
-- Call chains are semantically filtered: receivers resolve through declared types, so
-  a platform call that happens to share a project method's name doesn't pollute the graph.
-- Fast enough to forget about: ~0.8s for 77k LOC on a laptop, run from git hooks.
-- Zero infrastructure: one file, self-installs its grammars, no config, no server.
-
-**Where it falls short**
-
-- Language depth is uneven. Java/C#/TS/Python get full treatment; Go/Rust/C/C++ are
-  solid but skip idioms like Go `const`/`iota` enums and C++ templates (flattened);
-  Lua is untyped so params are names, not types; Helm is regex over templates, not a
-  parser; Kotlin rests on a community grammar.
-- Function bodies are invisible. Private members appear by name (signatures with
-  `--private`), which says what a class is made of — but a 500-line algorithm and a
-  one-liner still look the same. The digest tells an LLM *what exists*, not *how it works*.
-- Name quality is load-bearing. No docs or comments survive; if the code calls things
-  `Manager2` and `doStuff`, the digest faithfully compresses that emptiness.
-- Call chains are capped (12 per function), transitively reduced (direct-vs-indirect
-  is deliberately blurred), and fall back to name matching when a receiver's type can't
-  be resolved — so the graph is honest but not complete.
-- No token budget. Output grows with the codebase; a millions-LOC monorepo will produce
-  a digest too large for small context windows, and nothing trims it.
-- Tests are excluded, so behavioral specs living in test names don't appear.
-- Freshness is commit-grained: hooks fire on commit/merge/checkout, so uncommitted
-  changes aren't reflected until the next trigger (or a manual build).
-- The core claim — that LLMs navigate a repo better with this digest attached — is
-  plausible and motivated the format, but hasn't been benchmarked rigorously.
+Single file, one pipeline: scan (git-tracked files only when in a repo) → extract →
+render. Language-specific code is confined to per-language extractors that all produce
+the same `Symbol` records; everything downstream — receiver resolution, transitive
+reduction, shape grouping, rendering — is language-neutral. Format choices are measured
+with a real tokenizer (o200k), not guessed.
 
 ## Tests
 
@@ -236,7 +212,8 @@ What the digest actually does about that — and what it can't:
 .venv/bin/python -m unittest discover -s tests
 ```
 
-(Runs under plain `python3` too; Java/TS tests skip when the tree-sitter grammars are absent.)
+(Runs under plain `python3` too; grammar-dependent tests skip when tree-sitter grammars
+are absent.)
 
 ## License
 
