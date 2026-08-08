@@ -2376,6 +2376,70 @@ def build_digest(root: Path, regen_cmd: str = "hologram build",
 
 
 # ---------------------------------------------------------------------------
+# Embed: put the digest INSIDE CLAUDE.md so every agent session starts with
+# the whole map in context — push, not pull; no retrieval decision to lose.
+# ---------------------------------------------------------------------------
+
+_EMBED_START = "<!-- hologram:start — generated, do not edit; refreshed by git hooks -->"
+_EMBED_END = "<!-- hologram:end -->"
+
+_EMBED_PREFACE = """## Project map (generated — the whole codebase at a glance)
+
+The block below is the complete symbol map of this repository: every type,
+signature, relation, and resolved call chain. You already have the holistic
+view — use it directly for planning, placement, and reuse decisions instead of
+exploring first. Before writing any new function, find the existing one here.
+Grep the source only for implementation bodies.
+"""
+
+
+def _reduce_for_embed(digest: str, max_tokens: int) -> tuple[str, str]:
+    """Graded degradation to fit the embed budget, holism-first:
+    full → drop call chains → drop private/re-export/method lines (types keep
+    the shape) → hard truncate. Returns (body, tier-name)."""
+    if estimate_tokens(digest) <= max_tokens:
+        return digest, "full"
+    lines = digest.splitlines()
+    no_chains = [ln.split(" > ")[0] if " > " in ln else ln for ln in lines]
+    body = "\n".join(no_chains) + "\n"
+    if estimate_tokens(body) <= max_tokens:
+        return body, "no-chains"
+    types_only = [ln for ln in no_chains
+                  if not ln.strip().startswith(("-", "»", "?"))
+                  and not ("(" in ln and ln.strip()[:1].islower())]
+    body = "\n".join(types_only) + "\n"
+    if estimate_tokens(body) <= max_tokens:
+        return body, "types-only"
+    keep, used = [], 0
+    for ln in types_only:
+        used += len(ln) // 4 + 1
+        if used > max_tokens:
+            keep.append("… (truncated to fit embed budget — full map in PROJECT_DIGEST.md)")
+            break
+        keep.append(ln)
+    return "\n".join(keep) + "\n", "truncated"
+
+
+def embed_digest(claude_path: Path, digest: str, max_tokens: int = 30000) -> str:
+    """Insert or refresh the digest block in CLAUDE.md. Degrades gracefully to
+    fit the budget; returns the tier used ('full', 'no-chains', 'types-only',
+    'truncated')."""
+    body, tier = _reduce_for_embed(digest, max_tokens)
+    block = (f"{_EMBED_START}\n{_EMBED_PREFACE}\n```\n{body.rstrip()}\n```\n"
+             f"{_EMBED_END}")
+    existing = claude_path.read_text() if claude_path.exists() else ""
+    if _EMBED_START in existing and _EMBED_END in existing:
+        pre = existing.split(_EMBED_START, 1)[0]
+        post = existing.split(_EMBED_END, 1)[1]
+        updated = pre + block + post
+    else:
+        sep = "\n\n" if existing.strip() else ""
+        updated = existing.rstrip("\n") + sep + block + "\n"
+    claude_path.write_text(updated)
+    return tier
+
+
+# ---------------------------------------------------------------------------
 # Self-bootstrap: get tree-sitter grammars without manual setup
 # ---------------------------------------------------------------------------
 
@@ -2444,11 +2508,13 @@ def _hook_python() -> str:
     return str(venv_py) if venv_py.exists() else "python3"
 
 
-def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None) -> None:
+def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None,
+                   embed: bool = False) -> None:
     script = Path(__file__).resolve()
     lang_args = "".join(f' --lang {l}' for l in sorted(langs)) if langs else ""
+    embed_arg = " --embed" if embed else ""
     hook_line = (f'{_hook_python()} "{script}" build --root "{repo.resolve()}"'
-                 f'{lang_args} --quiet || true\n')
+                 f'{lang_args}{embed_arg} --quiet || true\n')
     hooks_dir = repo / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     for name in HOOK_NAMES:
@@ -2482,6 +2548,12 @@ def run_cli(argv: list[str] | None = None) -> int:
     common.add_argument("--behaviors", action="store_true",
                         help="append test-method names as behavior specs "
                              "(costly on test-heavy repos)")
+    common.add_argument("--embed", action="store_true",
+                        help="also inject the digest into CLAUDE.md so every "
+                             "agent session starts with the whole map in context")
+    common.add_argument("--embed-max-tokens", type=int, default=30000,
+                        help="embed budget; larger digests degrade gracefully "
+                             "(chains, then methods, then truncation)")
     common.add_argument("--out", type=Path, default=None)
     common.add_argument("--quiet", action="store_true")
 
@@ -2548,7 +2620,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "init":
-        _install_hooks(root, args.quiet, langs)
+        _install_hooks(root, args.quiet, langs, embed=args.embed)
     digest = build_digest(root,
                           regen_cmd=f'{_hook_python()} "{Path(__file__).resolve()}" build',
                           langs=langs, private_sigs=args.private,
@@ -2556,6 +2628,10 @@ def run_cli(argv: list[str] | None = None) -> int:
     out_path.write_text(digest)
     if not args.quiet:
         print(f"{out_path} written: {estimate_tokens(digest)} tokens")
+    if args.embed:
+        tier = embed_digest(root / "CLAUDE.md", digest, args.embed_max_tokens)
+        if not args.quiet:
+            print(f"CLAUDE.md: digest embedded ({tier})")
     return 0
 
 

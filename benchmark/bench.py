@@ -176,10 +176,11 @@ Complete the requested task directly. Keep changes minimal and idiomatic.
 
 def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
     """Detached git worktree of the corpus, prepared for one condition.
-    A = digest + agent instructions; B = control. The corpus's own CLAUDE.md is
-    preserved (appended to, identically in both conditions except the snippet),
-    and the setup is committed in the detached worktree so that any later
-    `git diff` shows exactly what the agent changed."""
+    A = digest on disk + query instructions (pull model); B = control;
+    C = digest embedded directly into CLAUDE.md (push model — the whole map is
+    in context from turn zero, the tool's actual thesis). The corpus's own
+    CLAUDE.md is preserved, and the setup is committed in the detached worktree
+    so that any later `git diff` shows exactly what the agent changed."""
     subprocess.run(["git", "-C", str(corpus), "worktree", "add", "--detach",
                     "-f", str(ws), "HEAD"], check=True, capture_output=True)
     claude_path = ws / "CLAUDE.md"
@@ -190,6 +191,9 @@ def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
                         "--root", str(ws), "--quiet"], check=True)
         claude_md += "\n" + _AGENT_SNIPPET
     claude_path.write_text(claude_md)
+    if condition == "C":
+        subprocess.run([sys.executable, str(HOLOGRAM), "build",
+                        "--root", str(ws), "--embed", "--quiet"], check=True)
     subprocess.run(["git", "-C", str(ws), "add", "-A"],
                    check=True, capture_output=True)
     subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",

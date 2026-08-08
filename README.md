@@ -136,14 +136,31 @@ is confidently wrong. Three commands make freshness a non-issue:
   looked at an older revision and prints the difference — a pull request's API drift
   on one screen.
 
-## Telling your agent how to use it
+## Putting it in front of your agent
 
-The benchmark taught us something here: agents given the digest instinctively
-**grep it rather than read it** — and that's correct, but only pays off with the
-right query patterns, which they don't invent on their own. So the digest now
-carries a query-recipes line in its own header, and the snippet below teaches the
-patterns explicitly. Copy it into your project's `CLAUDE.md` or `AGENTS.md`
-(adjust the filename if you changed `--out`):
+There are two delivery modes, and the difference matters more than anything else
+about this tool.
+
+**Embed it (recommended) — the holistic view, always in context:**
+
+```bash
+hologram.py init --root /path/to/repo --embed
+```
+
+This injects the digest directly into `CLAUDE.md` between managed markers, and
+the git hooks keep the block fresh. Every agent session now *starts* with the
+complete map in its context window — no retrieval decision, no "should I look at
+the file", no attention gamble. That is the point of hologram: the model sees
+the whole system at once, so placement, reuse, and planning decisions are made
+against the full picture rather than whatever grep happened to surface. Repos
+whose digest exceeds the embed budget (`--embed-max-tokens`, default 30k)
+degrade gracefully: call chains drop first, then method lines, keeping the
+system's shape.
+
+**Or keep it on disk** — the digest stays a file the agent queries when it
+chooses to. Weaker (the benchmark below showed agents mostly don't choose to),
+but free of context cost. If you use this mode, teach the query patterns — copy
+this into `CLAUDE.md` / `AGENTS.md`:
 
 ```markdown
 ## Project index: PROJECT_DIGEST.md
@@ -213,13 +230,15 @@ Control agents found the right existing APIs in 2–3 greps; the map couldn't be
 three greps. The duplication failure mode this tool was designed against did not
 reproduce in 18 scored bait sessions.
 
-Honest implication: **for agents with full search tools on codebases of this scale,
-the digest does not pay for itself.** Plausible remaining niches — untested — are
-chat contexts without filesystem search (attach-to-chat as the only map), much
-larger private monorepos, weaker models, and multi-session amortization. The
-benchmark harness in [benchmark/](benchmark/) is ready to test those; until then,
-treat the pitch above as hypothesis for those niches and measured-false for this
-one.
+One correction matters to reading that result: both runs tested the **pull
+model** — digest on disk, agent instructed to consult it. It mostly didn't, and
+when it did, it paid retrieval costs. The **push model** — `--embed`, the whole
+map in context from turn zero, which is the actual thesis of this tool — was not
+one of the tested conditions. The harness now has it (condition C) and that is
+the decisive unrun experiment. Until it runs: the pull model is measured-false
+at these scales, the push model is unmeasured, and other untested niches remain
+(chat contexts without search tools, much larger monorepos, weaker models,
+multi-session amortization).
 
 ## How it works
 

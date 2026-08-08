@@ -121,6 +121,58 @@ class DepsMapTest(unittest.TestCase):
         self.assertTrue(any("app→core" in ln for ln in lines))
 
 
+class EmbedTest(unittest.TestCase):
+    DIGEST = ("# proj @x 2026-08-08 · 10 LOC · state ab · regen: x\n"
+              "· legend: …\n"
+              "src\n"
+              " Svc(C)\n"
+              "  run():int ✓ > _step\n"
+              "  - _step\n")
+
+    def test_embed_creates_block_and_preserves_existing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cm = Path(tmp) / "CLAUDE.md"
+            cm.write_text("# My rules\nUse tabs.\n")
+            tier = hologram.embed_digest(cm, self.DIGEST)
+            text = cm.read_text()
+        self.assertEqual(tier, "full")
+        self.assertIn("My rules", text)                     # user content kept
+        self.assertIn("hologram:start", text)
+        self.assertIn("run():int ✓ > _step", text)
+        self.assertIn("whole codebase at a glance", text)
+
+    def test_embed_is_idempotent_and_refreshes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cm = Path(tmp) / "CLAUDE.md"
+            cm.write_text("before\n")
+            hologram.embed_digest(cm, self.DIGEST)
+            hologram.embed_digest(cm, self.DIGEST.replace("run()", "go()"))
+            text = cm.read_text()
+        self.assertEqual(text.count("hologram:start"), 1)   # one block, replaced
+        self.assertIn("go():int", text)
+        self.assertNotIn("run():int", text)
+        self.assertTrue(text.startswith("before"))
+
+    def test_degradation_tiers(self):
+        big = self.DIGEST + "\n".join(
+            f"  method{i}(int):int > callee{i},other{i}" for i in range(400))
+        body, tier = hologram._reduce_for_embed(big, max_tokens=2000)
+        self.assertEqual(tier, "types-only")
+        self.assertNotIn("> callee1,", body)                # chains gone
+        self.assertNotIn("method1(int)", body)              # methods gone
+        self.assertIn("Svc(C)", body)                       # shape kept
+
+    def test_cli_build_embed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            out = Path(tmp) / "d.md"
+            run_cli(["build", "--root", str(root), "--out", str(out),
+                     "--embed", "--quiet"])
+            text = (root / "CLAUDE.md").read_text()
+        self.assertIn("hologram:start", text)
+        self.assertIn("Svc(C)", text)
+
+
 class DiffCommandTest(unittest.TestCase):
     def test_diff_shows_added_symbol(self):
         with tempfile.TemporaryDirectory() as tmp:
