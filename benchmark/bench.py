@@ -54,5 +54,39 @@ def load_tasks(path: Path) -> Config:
         raise SystemExit(f"task file {path}: missing field {e}")
 
 
+_READ_TOOLS = {"Read"}
+_SEARCH_TOOLS = {"Grep", "Glob"}
+_EDIT_TOOLS = {"Edit", "Write", "NotebookEdit"}
+
+
+def parse_transcript(text: str) -> dict:
+    """Tool-call counts and usage from a claude stream-json transcript.
+    Tolerant of non-JSON noise lines."""
+    m = {"reads": 0, "searches": 0, "edits": 0,
+         "turns": 0, "tokens_in": 0, "tokens_out": 0}
+    for line in text.splitlines():
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("type") == "assistant":
+            for block in (ev.get("message") or {}).get("content", []):
+                if block.get("type") != "tool_use":
+                    continue
+                name = block.get("name", "")
+                if name in _READ_TOOLS:
+                    m["reads"] += 1
+                elif name in _SEARCH_TOOLS:
+                    m["searches"] += 1
+                elif name in _EDIT_TOOLS:
+                    m["edits"] += 1
+        elif ev.get("type") == "result":
+            usage = ev.get("usage") or {}
+            m["turns"] = int(ev.get("num_turns", 0))
+            m["tokens_in"] = int(usage.get("input_tokens", 0))
+            m["tokens_out"] = int(usage.get("output_tokens", 0))
+    return m
+
+
 if __name__ == "__main__":
     raise SystemExit(0)

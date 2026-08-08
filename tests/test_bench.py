@@ -47,5 +47,38 @@ class TaskLoaderTest(unittest.TestCase):
                 bench.load_tasks(p)
 
 
+TRANSCRIPT = "\n".join([
+    json.dumps({"type": "system", "subtype": "init"}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": "a.java"}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "text", "text": "thinking..."},
+        {"type": "tool_use", "name": "Grep", "input": {"pattern": "normalize"}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Edit", "input": {}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Write", "input": {}}]}}),
+    json.dumps({"type": "result", "num_turns": 7,
+                "usage": {"input_tokens": 91000, "output_tokens": 4200}}),
+    "not-json-noise",
+])
+
+
+class TranscriptMetricsTest(unittest.TestCase):
+    def test_counts_and_usage(self):
+        m = bench.parse_transcript(TRANSCRIPT)
+        self.assertEqual(m["reads"], 1)
+        self.assertEqual(m["searches"], 1)
+        self.assertEqual(m["edits"], 2)          # Edit + Write
+        self.assertEqual(m["turns"], 7)
+        self.assertEqual(m["tokens_in"], 91000)
+        self.assertEqual(m["tokens_out"], 4200)
+
+    def test_empty_transcript_gives_zeroes(self):
+        m = bench.parse_transcript("")
+        self.assertEqual(m, {"reads": 0, "searches": 0, "edits": 0,
+                             "turns": 0, "tokens_in": 0, "tokens_out": 0})
+
+
 if __name__ == "__main__":
     unittest.main()
