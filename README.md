@@ -132,8 +132,9 @@ tokenizer (o200k) to be ~5% cheaper than the pretty variant with zero informatio
 ## Architecture
 
 Single file, one pipeline: scan (git-tracked files only when in a repo) → extract → render.
-Language-specific code is confined to three extractors that all produce the same `Symbol`
-records; everything downstream is language-neutral.
+Language-specific code is confined to per-language extractors that all produce the same
+`Symbol` records; everything downstream — resolution, reduction, grouping, rendering —
+is language-neutral.
 
 ## Working with coding agents: an honest assessment
 
