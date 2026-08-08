@@ -240,6 +240,9 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
         (results_dir / f"{task.id}-{condition}-{rep}.jsonl").write_text(transcript)
         after = _digest_of(ws)
         verdict = judge_reuse(before, after, task.expect_reuse)
+        # intent-to-add so brand-new files show up in `git diff`-based acceptance
+        subprocess.run(["git", "-C", str(ws), "add", "-N", "."],
+                       capture_output=True)
         accepted = subprocess.run(
             task.accept_cmd.format(ws=ws), shell=True,
             capture_output=True).returncode == 0

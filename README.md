@@ -230,15 +230,22 @@ Control agents found the right existing APIs in 2–3 greps; the map couldn't be
 three greps. The duplication failure mode this tool was designed against did not
 reproduce in 18 scored bait sessions.
 
-One correction matters to reading that result: both runs tested the **pull
-model** — digest on disk, agent instructed to consult it. It mostly didn't, and
-when it did, it paid retrieval costs. The **push model** — `--embed`, the whole
-map in context from turn zero, which is the actual thesis of this tool — was not
-one of the tested conditions. The harness now has it (condition C) and that is
-the decisive unrun experiment. Until it runs: the pull model is measured-false
-at these scales, the push model is unmeasured, and other untested niches remain
-(chat contexts without search tools, much larger monorepos, weaker models,
-multi-session amortization).
+Those two runs tested the **pull model** — digest on disk, agent instructed to
+consult it. It mostly didn't, and when it did, it paid retrieval costs. The pull
+model is measured-false at these scales.
+
+The **push model** — `--embed`, the whole map in context from turn zero — was
+then run as its own condition on the private corpus (10 sessions vs the same
+baselines, transcript-reviewed): **outcomes stayed equal while effort dropped
+~36% in turns and ~55% in searches, with navigation tasks 40% faster — one
+answered in 4 turns with zero file reads, straight from the embedded map. Total
+tokens came out level: the embed's per-turn cost was fully offset by fewer
+turns.** That is the holistic thesis doing what it was supposed to do — the map
+in context replaces exploration — and it's why `--embed` is the recommended
+delivery. Caveats stay honest: n=1 per cell, one model, one corpus; duplication
+was zero in every condition, so embed's win here is orientation speed, not
+duplication prevention; and larger-repo tiers, weaker models, and chat-only
+contexts remain unmeasured.
 
 ## How it works
 

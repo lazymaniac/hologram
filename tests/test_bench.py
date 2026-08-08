@@ -230,6 +230,24 @@ class RunOneTest(unittest.TestCase):
         self.assertEqual(row["reads"], 3)   # Read ×2 + bash `sed -n` (see TRANSCRIPT)
         self.assertEqual(row["tokens_in"], 621000)
 
+    def test_new_file_counts_as_change_for_acceptance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            task = bench.Task(
+                id="newfile", kind="reuse",
+                prompt="Add a helper in a new module.",
+                accept_cmd="git -C {ws} diff --stat | grep -q .",
+                expect_reuse=[])
+
+            def fake_runner(prompt, ws, model, max_turns):
+                (ws / "helper.py").write_text("def helper() -> int:\n    return 1\n")
+                return TRANSCRIPT
+
+            row = bench.run_one(repo, task, "B", rep=0,
+                                results_dir=Path(tmp) / "results",
+                                model="sonnet", max_turns=40, runner=fake_runner)
+        self.assertTrue(row["accepted"])   # untracked new file must count
+
     def test_transcript_saved(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
