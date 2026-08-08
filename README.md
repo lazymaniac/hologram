@@ -193,10 +193,19 @@ digest tells an agent what exists, never how well it's built. `✓` means a test
 mentions the function, not that the function is correct. If your naming is misleading,
 the digest compresses and transmits the misleading names with perfect fidelity. Depth
 varies by language — the table above is honest about which ones get the full
-treatment. And the biggest caveat: the core claim, that agents with a digest duplicate
-less and navigate faster, has not been rigorously benchmarked yet. The design is
-argued from failure modes seen in practice, not measured against a control. That is
-the largest open item.
+treatment.
+
+**What's been measured so far.** A first controlled run
+([benchmark/](benchmark/results-spring-2026-08-08.md), 14 headless agent sessions,
+n=1 per cell) on spring-framework — 1.5M LOC, famous, heavily represented in
+training data — found **no benefit and a real cost**: agents with the digest
+consulted it but produced identical outcomes to controls, at +80% tokens. The
+model already knows Spring from training; the control reused the right APIs from
+memory, once answering a navigation task in a single turn with zero file reads.
+So: for large public codebases the model has memorized, skip the digest. The
+scenario hologram was actually built for — private codebases where the control has
+no memory to lean on — remains unmeasured; until that run exists, the core claim
+stands on argued failure modes, not numbers.
 
 ## How it works
 
