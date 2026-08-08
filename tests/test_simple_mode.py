@@ -58,7 +58,7 @@ class SimpleDigestTest(unittest.TestCase):
         self.assertNotIn("src/ids", self.out)
 
     def test_calls_inline_no_calls_word(self):
-        body = "\n".join(self.out.splitlines()[2:])
+        body = "\n".join(self.out.splitlines()[3:])   # skip title/legend/query lines
         self.assertNotIn("calls ", body)
 
 
@@ -239,6 +239,13 @@ class LegendTest(unittest.TestCase):
         self.assertIn("legend", second)
         self.assertIn("⟨X⟩", second)
         self.assertIn("> calls", second)
+
+    def test_query_recipes_line_present(self):
+        out = build_digest(JAVAMINI)
+        third = out.splitlines()[2]
+        self.assertIn("query this file", third)
+        self.assertIn("who calls X", third)
+        self.assertIn("grep", third)
 
 
 class ThrowsTest(unittest.TestCase):

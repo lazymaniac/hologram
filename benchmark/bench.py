@@ -151,19 +151,21 @@ def judge_reuse(before: str, after: str, expect_reuse: list[str]) -> dict:
             "duplicated": sorted(set(duplicated))}
 
 
-_AGENT_SNIPPET = """## Project map: PROJECT_DIGEST.md
+_AGENT_SNIPPET = """## Project index: PROJECT_DIGEST.md
 
-`PROJECT_DIGEST.md` at the repo root is a generated inventory of this codebase:
-every public signature, type relation, and call chain, plus private member names.
-Line 2 is the legend.
+`PROJECT_DIGEST.md` at the repo root indexes this codebase, one line per symbol.
+**Query it with grep — never read it linearly.** Each hit is a complete symbol
+line (signature, resolved callers, markers), with no comment/test noise.
 
-Consult it BEFORE:
-- writing any new function, class, or helper — search for an existing one first
-  and reuse it (`×N` marks widely-used utilities, `✓` marks test-exercised ones)
-- placing new code — the package tree, the `· deps a→b` lines, and grouped
-  families are the house structure; extend it rather than inventing a parallel one
-- exploratory grepping — look here first, then grep for the specific thing this
-  file says exists
+- Who calls X (before changing X): `grep "> .*X" PROJECT_DIGEST.md` — one line
+  per caller, receivers resolved to types; source grep cannot answer this.
+- Does something like X exist (before writing ANY new helper): grep concept
+  synonyms over it (`grep -i "trim\\|blank\\|strip" PROJECT_DIGEST.md`), reuse
+  what you find.
+- Canonical choice: prefer `✓` (tested) and `×N` (widely used) lines.
+- Placement: the tree + `· deps a→b` + grouped families show where code belongs.
+- Debugging: a class's `- name,name` line lists private internals; `⋮N` marks
+  heavy bodies. Open those files first.
 """
 
 _BASE_CLAUDE_MD = """# Working notes

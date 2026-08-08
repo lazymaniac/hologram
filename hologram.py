@@ -2349,7 +2349,11 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             "»file: re-exports · "
             + ("-sig=private" if private_sigs else "- x,y=private members, names only")
             + (" · ? Owner: test names" if behaviors else "")
-            + "\n")
+            + "\n"
+            "· query this file, don't read it: who calls X → grep '> .*X' · "
+            "find a symbol → grep -i 'name(' · only tested APIs → grep '✓' · "
+            "heavily-used types → grep '×' · a class's internals → its '- ' line · "
+            "module coupling → the 'deps' line\n")
     dep_part = ("\n".join(deps) + "\n") if deps else ""
     return head + dep_part + "\n".join(_tree_lines(payload_by_dir)) + tail + "\n"
 

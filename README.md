@@ -136,37 +136,44 @@ is confidently wrong. Three commands make freshness a non-issue:
   looked at an older revision and prints the difference — a pull request's API drift
   on one screen.
 
-## Telling your agent about it
+## Telling your agent how to use it
 
-The digest only helps if the agent knows when to look at it. Copy this into your
-project's `CLAUDE.md` or `AGENTS.md` (adjust the filename if you changed `--out`):
+The benchmark taught us something here: agents given the digest instinctively
+**grep it rather than read it** — and that's correct, but only pays off with the
+right query patterns, which they don't invent on their own. So the digest now
+carries a query-recipes line in its own header, and the snippet below teaches the
+patterns explicitly. Copy it into your project's `CLAUDE.md` or `AGENTS.md`
+(adjust the filename if you changed `--out`):
 
 ```markdown
-## Project map: PROJECT_DIGEST.md
+## Project index: PROJECT_DIGEST.md
 
-`PROJECT_DIGEST.md` at the repo root is a generated inventory of this codebase:
-every public signature, type relation, and call chain, plus private member names.
-Line 2 is the legend. Git hooks rebuild it on every commit; the `state` stamp in
-its header makes freshness checkable.
+`PROJECT_DIGEST.md` at the repo root indexes this codebase: every signature,
+type relation, and resolved call chain, one line per symbol. Line 2 is the
+legend. **Query it with grep — never read it linearly.** Unlike grepping
+source, each hit is a complete symbol line (signature, resolved callers,
+markers) with no comment or test noise.
 
-Consult it BEFORE:
-- writing any new function, class, or helper — search for an existing one first
-  and reuse it (`×N` marks widely-used utilities, `✓` marks test-exercised ones)
-- placing new code — the package tree, the `· deps a→b` lines, and grouped
-  families (`AId,BId(R: UUID)`) are the house structure; extend it rather than
-  inventing a parallel one
-- exploratory grepping — look here first, then grep for the specific thing this
-  file says exists
-- opening files while debugging — `- name,name` private lists and `⋮N` body-size
-  marks say where behavior and weight live
+The queries and when to run them:
+- **Who calls X** (before changing or removing X):
+  `grep "> .*X" PROJECT_DIGEST.md` — one line per caller, receivers resolved
+  to types. Source grep cannot answer this.
+- **Does something like this already exist** (before writing ANY new helper):
+  grep concept synonyms over the inventory, e.g.
+  `grep -i "trim\|blank\|strip" PROJECT_DIGEST.md` — then reuse what you find.
+- **Which candidate is canonical**: prefer lines marked `✓` (referenced from
+  tests) and `×N` (used from N files).
+- **Where does new code belong**: the tree shows packages, `· deps a→b` shows
+  module coupling, grouped families (`AId,BId(R: UUID)`) are the house
+  conventions — extend a family, don't invent a parallel one.
+- **Where does behavior live** (debugging): a class's `- name,name` line lists
+  its private internals and `⋮N` marks heavy bodies — open those files first.
 
 Rules:
-- Read on demand; do not paste this file into every prompt. It pays off on
-  unfamiliar territory, not on surgical fixes in files you already know.
-- It says what exists, not what works. `✓` means a test references the symbol,
-  nothing more. Read the source before wiring anything critical.
-- Verify freshness first: rerun the regen command from the header with
-  `--if-stale` (instant when fresh), or run `check` for a yes/no.
+- It says what exists, not what works — read the source before wiring anything
+  critical. `✓` means a test names the symbol, nothing more.
+- Freshness: rerun the header's regen command with `--if-stale` (instant when
+  fresh), or `check` for exit 0/1.
 ```
 
 ## Does it actually help? An honest take
