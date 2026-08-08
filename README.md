@@ -195,17 +195,24 @@ the digest compresses and transmits the misleading names with perfect fidelity. 
 varies by language — the table above is honest about which ones get the full
 treatment.
 
-**What's been measured so far.** A first controlled run
-([benchmark/](benchmark/results-spring-2026-08-08.md), 14 headless agent sessions,
-n=1 per cell) on spring-framework — 1.5M LOC, famous, heavily represented in
-training data — found **no benefit and a real cost**: agents with the digest
-consulted it but produced identical outcomes to controls, at +80% tokens. The
-model already knows Spring from training; the control reused the right APIs from
-memory, once answering a navigation task in a single turn with zero file reads.
-So: for large public codebases the model has memorized, skip the digest. The
-scenario hologram was actually built for — private codebases where the control has
-no memory to lean on — remains unmeasured; until that run exists, the core claim
-stands on argued failure modes, not numbers.
+**What's been measured — and it's a negative.** Two controlled runs
+(34 headless agent sessions, n=1 per cell, sonnet + Claude Code tooling):
+[spring-framework](benchmark/results-spring-2026-08-08.md) — 1.5M LOC, memorized
+from training — showed identical outcomes at **+80% token cost** for the digest
+condition. The decisive run, a [private 133k-LOC codebase](benchmark/results-private-corpus-2026-08-08.md)
+the model had never seen, showed **A ≈ B on every metric**: same reuse (3/4 tasks
+both conditions), zero duplicated helpers anywhere, identical navigation turns.
+Control agents found the right existing APIs in 2–3 greps; the map couldn't beat
+three greps. The duplication failure mode this tool was designed against did not
+reproduce in 18 scored bait sessions.
+
+Honest implication: **for agents with full search tools on codebases of this scale,
+the digest does not pay for itself.** Plausible remaining niches — untested — are
+chat contexts without filesystem search (attach-to-chat as the only map), much
+larger private monorepos, weaker models, and multi-session amortization. The
+benchmark harness in [benchmark/](benchmark/) is ready to test those; until then,
+treat the pitch above as hypothesis for those niches and measured-false for this
+one.
 
 ## How it works
 
