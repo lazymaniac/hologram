@@ -235,5 +235,32 @@ class ReportTest(unittest.TestCase):
         self.assertIn("no runs", bench.report([]))
 
 
+class CliTest(unittest.TestCase):
+    def test_run_writes_jsonl_and_report_reads_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            taskfile = Path(tmp) / "tasks.json"
+            taskfile.write_text(json.dumps({
+                "corpus": str(repo),
+                "tasks": [{"id": "noop", "kind": "navigate",
+                           "prompt": "count files",
+                           "accept_cmd": "true", "expect_reuse": []}],
+            }))
+            results = Path(tmp) / "results"
+            code = bench.main(["run", str(taskfile),
+                               "--results", str(results),
+                               "--conditions", "A", "--reps", "1",
+                               "--dry-run"])
+            self.assertEqual(code, 0)
+            rows = [json.loads(l) for l in
+                    (results / "runs.jsonl").read_text().splitlines()]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["condition"], "A")
+
+            code = bench.main(["report", "--results", str(results)])
+            self.assertEqual(code, 0)
+            self.assertTrue((results / "report.md").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

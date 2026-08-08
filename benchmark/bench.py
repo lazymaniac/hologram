@@ -249,5 +249,58 @@ def report(rows: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _dry_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
+    """Zero-cost runner for harness testing: touches nothing, returns a
+    minimal valid transcript."""
+    return json.dumps({"type": "result", "num_turns": 0,
+                       "usage": {"input_tokens": 0, "output_tokens": 0}})
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="bench")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p_run = sub.add_parser("run")
+    p_run.add_argument("taskfile", type=Path)
+    p_run.add_argument("--results", type=Path,
+                       default=Path(__file__).parent / "results")
+    p_run.add_argument("--conditions", nargs="+", default=["A", "B"])
+    p_run.add_argument("--reps", type=int, default=1)
+    p_run.add_argument("--only", nargs="*", default=None,
+                       help="task ids to run (default: all)")
+    p_run.add_argument("--dry-run", action="store_true",
+                       help="exercise the harness without calling claude")
+    p_rep = sub.add_parser("report")
+    p_rep.add_argument("--results", type=Path,
+                       default=Path(__file__).parent / "results")
+    args = parser.parse_args(argv)
+
+    if args.cmd == "report":
+        runs = args.results / "runs.jsonl"
+        rows = [json.loads(l) for l in runs.read_text().splitlines()] \
+            if runs.exists() else []
+        out = args.results / "report.md"
+        out.write_text(report(rows))
+        print(out.read_text())
+        return 0
+
+    cfg = load_tasks(args.taskfile)
+    runner = _dry_runner if args.dry_run else claude_runner
+    runs_path = args.results / "runs.jsonl"
+    args.results.mkdir(parents=True, exist_ok=True)
+    tasks = [t for t in cfg.tasks if args.only is None or t.id in args.only]
+    total = len(tasks) * len(args.conditions) * args.reps
+    done = 0
+    for task in tasks:
+        for cond in args.conditions:
+            for rep in range(args.reps):
+                done += 1
+                print(f"[{done}/{total}] {task.id} {cond} rep{rep}", flush=True)
+                row = run_one(cfg.corpus, task, cond, rep, args.results,
+                              cfg.model, cfg.max_turns, runner=runner)
+                with runs_path.open("a") as fh:
+                    fh.write(json.dumps(row) + "\n")
+    return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(0)
+    raise SystemExit(main())
