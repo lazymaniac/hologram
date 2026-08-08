@@ -13,7 +13,7 @@ class TaskLoaderTest(unittest.TestCase):
     def _taskfile(self, tmp: Path) -> Path:
         p = tmp / "tasks.json"
         p.write_text(json.dumps({
-            "corpus": "~/workspace/private-corpus",
+            "corpus": "~/workspace/some-private-repo",
             "model": "sonnet",
             "max_turns": 40,
             "tasks": [
@@ -22,7 +22,7 @@ class TaskLoaderTest(unittest.TestCase):
                  "accept_cmd": "grep -rq weightedAverage {ws}/src",
                  "expect_reuse": ["normalize", "add"]},
                 {"id": "find-lifecycle", "kind": "navigate",
-                 "prompt": "Where is claim lifecycle handled?",
+                 "prompt": "Where is record lifecycle handled?",
                  "accept_cmd": "true",
                  "expect_reuse": []},
             ],
@@ -101,19 +101,19 @@ BEFORE_DIGEST = """# corpus @x 2026-08-08 · 100 LOC · state aaa · regen: x
 src
  math
   MathOps(C)
-   add(Rational,Rational):Rational
-   normalize(List<Rational>):List<Rational> > add
+   add(Fraction,Fraction):Fraction
+   normalize(List<Fraction>):List<Fraction> > add
 """
 
 AFTER_REUSED = BEFORE_DIGEST + """\
   Averages(C)
-   weightedAverage(List<Rational>):Rational > MathOps.add,normalize
+   weightedAverage(List<Fraction>):Fraction > MathOps.add,normalize
 """
 
 AFTER_DUPLICATED = BEFORE_DIGEST + """\
   Averages(C)
-   normalizeWeights(List<Rational>):List<Rational>
-   weightedAverage(List<Rational>):Rational > normalizeWeights
+   normalizeWeights(List<Fraction>):List<Fraction>
+   weightedAverage(List<Fraction>):Fraction > normalizeWeights
 """
 
 

@@ -199,8 +199,8 @@ treatment.
 (34 headless agent sessions, n=1 per cell, sonnet + Claude Code tooling):
 [spring-framework](benchmark/results-spring-2026-08-08.md) — 1.5M LOC, memorized
 from training — showed identical outcomes at **+80% token cost** for the digest
-condition. The decisive run, a [private 133k-LOC codebase](benchmark/results-private-corpus-2026-08-08.md)
-the model had never seen, showed **A ≈ B on every metric**: same reuse (3/4 tasks
+condition. The decisive run, a private 133k-LOC codebase
+the model had never seen (results withheld — private corpus), showed **A ≈ B on every metric**: same reuse (3/4 tasks
 both conditions), zero duplicated helpers anywhere, identical navigation turns.
 Control agents found the right existing APIs in 2–3 greps; the map couldn't beat
 three greps. The duplication failure mode this tool was designed against did not

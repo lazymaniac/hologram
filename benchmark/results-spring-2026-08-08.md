@@ -46,7 +46,7 @@ digest.
 3. The duplication failure mode did not reproduce on Spring at all (n=4 tasks) —
    against a memorized, conventions-rich codebase, sonnet reuses existing APIs
    unprompted.
-4. The decisive experiment is the same matrix on a private corpus (e.g. private-corpus) where
+4. The decisive experiment is the same matrix on a private codebase where
    training-data memory can't answer for the control. That remains unrun.
 
 ## Caveats

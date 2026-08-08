@@ -7,8 +7,8 @@ command, and a digest-diff duplication check.
 
 ## Smoke run (do this first — ~4 sessions)
 
-    .venv/bin/python benchmark/bench.py run benchmark/tasks/private-corpus.json \
-        --only weighted-avg find-lifecycle --reps 1
+    .venv/bin/python benchmark/bench.py run benchmark/tasks/spring.json \
+        --only trim-to-null find-getbean-flow --reps 1
     .venv/bin/python benchmark/bench.py report
 
 Read the two transcripts in `benchmark/results/` end to end once. Check that the
@@ -17,7 +17,7 @@ and that the acceptance commands measured what you meant.
 
 ## Full matrix (~60 sessions — this costs real money)
 
-    .venv/bin/python benchmark/bench.py run benchmark/tasks/private-corpus.json --reps 3
+    .venv/bin/python benchmark/bench.py run benchmark/tasks/spring.json --reps 3
     .venv/bin/python benchmark/bench.py report
 
 ## Reading the report

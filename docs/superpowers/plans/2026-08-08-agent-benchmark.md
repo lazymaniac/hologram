@@ -18,7 +18,7 @@
 benchmark/
   bench.py              # the whole harness: task loading, workspace setup, run, metrics, report
   tasks/
-    private-corpus.json           # task definitions for the private-corpus corpus (drafts in Task 8; verify before running)
+    <corpus>.json           # task definitions for the private corpus (drafts in Task 8; verify before running)
   results/              # gitignored; runs.jsonl + per-run transcripts land here
   README.md             # runbook: smoke run, full matrix, reading the report
 tests/
@@ -58,7 +58,7 @@ class TaskLoaderTest(unittest.TestCase):
     def _taskfile(self, tmp: Path) -> Path:
         p = tmp / "tasks.json"
         p.write_text(json.dumps({
-            "corpus": "~/workspace/private-corpus",
+            "corpus": "~/workspace/<private-corpus>",
             "model": "sonnet",
             "max_turns": 40,
             "tasks": [
@@ -309,19 +309,19 @@ BEFORE_DIGEST = """# corpus @x 2026-08-08 · 100 LOC · state aaa · regen: x
 src
  math
   MathOps(C)
-   add(Rational,Rational):Rational
-   normalize(List<Rational>):List<Rational> > add
+   add(Fraction,Fraction):Fraction
+   normalize(List<Fraction>):List<Fraction> > add
 """
 
 AFTER_REUSED = BEFORE_DIGEST + """\
   Averages(C)
-   weightedAverage(List<Rational>):Rational > MathOps.add,normalize
+   weightedAverage(List<Fraction>):Fraction > MathOps.add,normalize
 """
 
 AFTER_DUPLICATED = BEFORE_DIGEST + """\
   Averages(C)
-   normalizeWeights(List<Rational>):List<Rational>
-   weightedAverage(List<Rational>):Rational > normalizeWeights
+   normalizeWeights(List<Fraction>):List<Fraction>
+   weightedAverage(List<Fraction>):Fraction > normalizeWeights
 """
 
 
@@ -880,10 +880,10 @@ git commit -m "feat(bench): CLI with dry-run mode"
 
 ### Task 8: Author the private-corpus task file
 
-Ten tasks: five reuse-bait (a helper exists; the bait is reimplementing it), five navigation. The symbol names below come from the private-corpus digest as of 2026-08-08; **step 1 verifies each against the current digest before the file is committed** — replace any symbol that no longer exists with a neighbor from the same package.
+Ten tasks: five reuse-bait (a helper exists; the bait is reimplementing it), five navigation. The symbol names below come from the corpus digest as of 2026-08-08; **step 1 verifies each against the current digest before the file is committed** — replace any symbol that no longer exists with a neighbor from the same package.
 
 **Files:**
-- Create: `benchmark/tasks/private-corpus.json`
+- Create: `benchmark/tasks/<corpus>.json`
 - Delete: `benchmark/tasks/.gitkeep`
 
 - [ ] **Step 1: Verify the referenced symbols exist**
@@ -891,10 +891,10 @@ Ten tasks: five reuse-bait (a helper exists; the bait is reimplementing it), fiv
 Run:
 
 ```bash
-python3 ~/workspace/hologram/hologram.py build --root ~/workspace/private-corpus --quiet
-for s in MathOps normalize Rational ChangeSeq then Claim Warrant \
-         Adjudication TopoGraph canonicalHash VarBindings Substitution; do
-  grep -q "$s" ~/workspace/private-corpus/PROJECT_DIGEST.md && echo "ok  $s" || echo "MISS $s"
+python3 ~/workspace/hologram/hologram.py build --root ~/workspace/<private-corpus> --quiet
+for s in MathOps normalize Fraction ChangeSeq then Entry Voucher \
+         Ruling TopoGraph canonicalHash VarBindings Unifier; do
+  grep -q "$s" ~/workspace/<private-corpus>/PROJECT_DIGEST.md && echo "ok  $s" || echo "MISS $s"
 done
 ```
 
@@ -905,12 +905,12 @@ equivalent symbol from the same package, and substitute it consistently in step 
 
 ```json
 {
-  "corpus": "~/workspace/private-corpus",
+  "corpus": "~/workspace/<private-corpus>",
   "model": "sonnet",
   "max_turns": 40,
   "tasks": [
     {"id": "weighted-avg", "kind": "reuse",
-     "prompt": "Add a method to compute the weighted average of a list of Rational values with Rational weights, in the arithmetic package. Follow existing conventions.",
+     "prompt": "Add a method to compute the weighted average of a list of Fraction values with Fraction weights, in the arithmetic package. Follow existing conventions.",
      "accept_cmd": "git -C {ws} diff --name-only | grep -qi arithmetic",
      "expect_reuse": ["MathOps.add", "MathOps.multiply", "normalize"]},
 
@@ -920,7 +920,7 @@ equivalent symbol from the same package, and substitute it consistently in step 
      "expect_reuse": ["ChangeSeq.then", "ChangeSeq.empty"]},
 
     {"id": "rational-compare", "kind": "reuse",
-     "prompt": "Add a helper that returns the largest Rational in a non-empty list.",
+     "prompt": "Add a helper that returns the largest Fraction in a non-empty list.",
      "accept_cmd": "git -C {ws} diff --stat | grep -q .",
      "expect_reuse": ["MathOps.compare"]},
 
@@ -932,7 +932,7 @@ equivalent symbol from the same package, and substitute it consistently in step 
     {"id": "binding-merge", "kind": "reuse",
      "prompt": "Add an operation that checks whether two binding sets are compatible and merges them if so.",
      "accept_cmd": "git -C {ws} diff --stat | grep -q .",
-     "expect_reuse": ["Substitution.check", "VarBindings.of"]},
+     "expect_reuse": ["Unifier.check", "VarBindings.of"]},
 
     {"id": "find-lifecycle", "kind": "navigate",
      "prompt": "In one paragraph: where is a claim's lifecycle state stored and which types are involved when a claim is superseded? Do not modify any files.",
@@ -955,7 +955,7 @@ equivalent symbol from the same package, and substitute it consistently in step 
      "expect_reuse": []},
 
     {"id": "find-warrant-shape", "kind": "navigate",
-     "prompt": "Describe the Warrant type: its components and how it relates to claims and evidence. Do not modify any files.",
+     "prompt": "Describe the Voucher type: its components and how it relates to claims and evidence. Do not modify any files.",
      "accept_cmd": "true",
      "expect_reuse": []}
   ]
@@ -964,14 +964,14 @@ equivalent symbol from the same package, and substitute it consistently in step 
 
 - [ ] **Step 3: Validate the file loads**
 
-Run: `.venv/bin/python -c "import sys; sys.path.insert(0,'benchmark'); import bench; from pathlib import Path; c = bench.load_tasks(Path('benchmark/tasks/private-corpus.json')); print(len(c.tasks), 'tasks, corpus', c.corpus)"`
-Expected: `10 tasks, corpus /Users/sebastian/workspace/private-corpus`
+Run: `.venv/bin/python -c "import sys; sys.path.insert(0,'benchmark'); import bench; from pathlib import Path; c = bench.load_tasks(Path('benchmark/tasks/<corpus>.json')); print(len(c.tasks), 'tasks, corpus', c.corpus)"`
+Expected: `10 tasks, corpus /Users/sebastian/workspace/the private corpus`
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git rm -q benchmark/tasks/.gitkeep
-git add benchmark/tasks/private-corpus.json
+git add benchmark/tasks/<corpus>.json
 git commit -m "feat(bench): private-corpus task set — 5 reuse-bait, 5 navigation"
 ```
 
@@ -994,7 +994,7 @@ command, and a digest-diff duplication check.
 
 ## Smoke run (do this first — ~4 sessions)
 
-    .venv/bin/python benchmark/bench.py run benchmark/tasks/private-corpus.json \
+    .venv/bin/python benchmark/bench.py run benchmark/tasks/<corpus>.json \
         --only weighted-avg find-lifecycle --reps 1
     .venv/bin/python benchmark/bench.py report
 
@@ -1004,7 +1004,7 @@ and that the acceptance commands measured what you meant.
 
 ## Full matrix (~60 sessions — this costs real money)
 
-    .venv/bin/python benchmark/bench.py run benchmark/tasks/private-corpus.json --reps 3
+    .venv/bin/python benchmark/bench.py run benchmark/tasks/<corpus>.json --reps 3
     .venv/bin/python benchmark/bench.py report
 
 ## Reading the report
@@ -1031,7 +1031,7 @@ and that the acceptance commands measured what you meant.
 
 - [ ] **Step 2: Dry-run the whole matrix to prove the harness end-to-end (zero tokens)**
 
-Run: `.venv/bin/python benchmark/bench.py run benchmark/tasks/private-corpus.json --reps 1 --dry-run && .venv/bin/python benchmark/bench.py report`
+Run: `.venv/bin/python benchmark/bench.py run benchmark/tasks/<corpus>.json --reps 1 --dry-run && .venv/bin/python benchmark/bench.py report`
 Expected: 20 `[n/20] …` progress lines, then a report table with conditions A and B, all zeros. Delete `benchmark/results/` afterwards so dry-run rows never mix with real ones: `rm -rf benchmark/results`.
 
 - [ ] **Step 3: Commit**
