@@ -55,11 +55,25 @@ TRANSCRIPT = "\n".join([
         {"type": "text", "text": "thinking..."},
         {"type": "tool_use", "name": "Grep", "input": {"pattern": "normalize"}}]}}),
     json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash",
+         "input": {"command": "grep -rn hasText spring-core/src"}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash",
+         "input": {"command": "sed -n '1,40p' StringUtils.java"}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash",
+         "input": {"command": "grep -n trimToNull PROJECT_DIGEST.md"}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read",
+         "input": {"file_path": "/ws/PROJECT_DIGEST.md"}}]}}),
+    json.dumps({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Edit", "input": {}}]}}),
     json.dumps({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Write", "input": {}}]}}),
     json.dumps({"type": "result", "num_turns": 7,
-                "usage": {"input_tokens": 91000, "output_tokens": 4200}}),
+                "usage": {"input_tokens": 91000, "output_tokens": 4200,
+                          "cache_creation_input_tokens": 30000,
+                          "cache_read_input_tokens": 500000}}),
     "not-json-noise",
 ])
 
@@ -67,17 +81,19 @@ TRANSCRIPT = "\n".join([
 class TranscriptMetricsTest(unittest.TestCase):
     def test_counts_and_usage(self):
         m = bench.parse_transcript(TRANSCRIPT)
-        self.assertEqual(m["reads"], 1)
-        self.assertEqual(m["searches"], 1)
-        self.assertEqual(m["edits"], 2)          # Edit + Write
+        self.assertEqual(m["reads"], 3)      # Read ×2 + bash sed -n
+        self.assertEqual(m["searches"], 3)   # Grep + bash grep ×2
+        self.assertEqual(m["edits"], 2)      # Edit + Write
+        self.assertEqual(m["digest_hits"], 2)  # bash grep on digest + Read digest
         self.assertEqual(m["turns"], 7)
-        self.assertEqual(m["tokens_in"], 91000)
+        self.assertEqual(m["tokens_in"], 91000 + 30000 + 500000)
         self.assertEqual(m["tokens_out"], 4200)
 
     def test_empty_transcript_gives_zeroes(self):
         m = bench.parse_transcript("")
         self.assertEqual(m, {"reads": 0, "searches": 0, "edits": 0,
-                             "turns": 0, "tokens_in": 0, "tokens_out": 0})
+                             "digest_hits": 0, "turns": 0,
+                             "tokens_in": 0, "tokens_out": 0})
 
 
 BEFORE_DIGEST = """# corpus @x 2026-08-08 · 100 LOC · state aaa · regen: x
@@ -211,8 +227,8 @@ class RunOneTest(unittest.TestCase):
         self.assertTrue(row["accepted"])
         self.assertEqual(row["reused"], ["normalize"])
         self.assertEqual(row["duplicated"], [])
-        self.assertEqual(row["reads"], 1)
-        self.assertEqual(row["tokens_in"], 91000)
+        self.assertEqual(row["reads"], 3)   # Read ×2 + bash `sed -n` (see TRANSCRIPT)
+        self.assertEqual(row["tokens_in"], 621000)
 
     def test_transcript_saved(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -245,6 +261,7 @@ class ReportTest(unittest.TestCase):
         self.assertIn("0%", md)
         self.assertIn("100%", md)
         self.assertIn("reads", md)
+        self.assertIn("digest hits", md)
 
     def test_empty_rows(self):
         self.assertIn("no runs", bench.report([]))

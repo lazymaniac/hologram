@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import re
 import shutil
 import statistics
 import subprocess
@@ -57,12 +58,18 @@ def load_tasks(path: Path) -> Config:
 _READ_TOOLS = {"Read"}
 _SEARCH_TOOLS = {"Grep", "Glob"}
 _EDIT_TOOLS = {"Edit", "Write", "NotebookEdit"}
+_BASH_SEARCH = re.compile(r"\b(grep|rg|find|fd|ag)\b")
+_BASH_READ = re.compile(r"\b(cat|head|tail|sed -n|less|more)\b")
 
 
 def parse_transcript(text: str) -> dict:
     """Tool-call counts and usage from a claude stream-json transcript.
-    Tolerant of non-JSON noise lines."""
-    m = {"reads": 0, "searches": 0, "edits": 0,
+    Agents search/read through Bash as often as through dedicated tools, so
+    Bash commands are classified too. tokens_in sums fresh input + cache
+    creation + cache reads — the actual context consumption. digest_hits
+    counts tool calls that touch PROJECT_DIGEST.md (did the agent actually
+    consult the digest?). Tolerant of non-JSON noise lines."""
+    m = {"reads": 0, "searches": 0, "edits": 0, "digest_hits": 0,
          "turns": 0, "tokens_in": 0, "tokens_out": 0}
     for line in text.splitlines():
         try:
@@ -74,16 +81,27 @@ def parse_transcript(text: str) -> dict:
                 if block.get("type") != "tool_use":
                     continue
                 name = block.get("name", "")
+                blob = json.dumps(block.get("input", {}))
+                if "PROJECT_DIGEST" in blob:
+                    m["digest_hits"] += 1
                 if name in _READ_TOOLS:
                     m["reads"] += 1
                 elif name in _SEARCH_TOOLS:
                     m["searches"] += 1
                 elif name in _EDIT_TOOLS:
                     m["edits"] += 1
+                elif name == "Bash":
+                    cmd = (block.get("input") or {}).get("command", "")
+                    if _BASH_SEARCH.search(cmd):
+                        m["searches"] += 1
+                    elif _BASH_READ.search(cmd):
+                        m["reads"] += 1
         elif ev.get("type") == "result":
             usage = ev.get("usage") or {}
             m["turns"] = int(ev.get("num_turns", 0))
-            m["tokens_in"] = int(usage.get("input_tokens", 0))
+            m["tokens_in"] = (int(usage.get("input_tokens", 0))
+                              + int(usage.get("cache_creation_input_tokens", 0))
+                              + int(usage.get("cache_read_input_tokens", 0)))
             m["tokens_out"] = int(usage.get("output_tokens", 0))
     return m
 
@@ -232,8 +250,8 @@ def report(rows: list[dict]) -> str:
     if not rows:
         return "no runs recorded\n"
     lines = ["| condition | runs | accepted | duplication (reuse tasks) | "
-             "reads | searches | turns | tokens in | tokens out |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "reads | searches | digest hits | turns | tokens in | tokens out |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for cond in sorted({r["condition"] for r in rows}):
         rs = [r for r in rows if r["condition"] == cond]
         reuse = [r for r in rs if r["kind"] == "reuse"]
@@ -244,9 +262,10 @@ def report(rows: list[dict]) -> str:
         def mean(key):
             return statistics.fmean(r[key] for r in rs)
 
+        dh = statistics.fmean(r.get("digest_hits", 0) for r in rs)
         lines.append(
             f"| {cond} | {len(rs)} | {acc:.0f}% | {dup_rate:.0f}% | "
-            f"{mean('reads'):.1f} | {mean('searches'):.1f} | "
+            f"{mean('reads'):.1f} | {mean('searches'):.1f} | {dh:.1f} | "
             f"{mean('turns'):.1f} | {mean('tokens_in'):,.0f} | "
             f"{mean('tokens_out'):,.0f} |")
     lines.append("")
