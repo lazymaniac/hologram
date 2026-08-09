@@ -44,6 +44,7 @@ from .model import (
     SymbolKind,
     Visibility,
 )
+from .scan import ScanEntry, ScanResult, ScanStatus, detect_language, scan_project
 
 __all__ = [
     "CONFIG_NAME",
@@ -62,6 +63,11 @@ __all__ = [
     "render_simple",
     "run_cli",
     "scan_files",
+    "ScanEntry",
+    "ScanResult",
+    "ScanStatus",
+    "detect_language",
+    "scan_project",
     "Binding",
     "BodyEvent",
     "BodyEventKind",

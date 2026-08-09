@@ -14,7 +14,6 @@ import argparse
 import ast
 import difflib
 import hashlib
-import os
 import re
 import shlex
 import subprocess
@@ -24,48 +23,13 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+from . import scan
 from .config import (
     ProjectConfig,
     create_default_manifest,
     default_config,
     load_config,
 )
-
-LANG_EXTENSIONS = {
-    ".java": "java",
-    ".py": "python",
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    ".js": "javascript",
-    ".jsx": "tsx",
-    ".mjs": "javascript",
-    ".go": "go",
-    ".rs": "rust",
-    ".cs": "csharp",
-    ".kt": "kotlin",
-    ".kts": "kotlin",
-    ".c": "c",
-    ".h": "c",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".cxx": "cpp",
-    ".hpp": "cpp",
-    ".hh": "cpp",
-    ".lua": "lua",
-    ".html": "html",
-    ".htm": "html",
-    ".vue": "vue",
-    ".svelte": "svelte",
-    ".yaml": "helm",
-    ".yml": "helm",
-    ".tpl": "helm",
-}
-
-DENYLIST_DIRS = {
-    ".git", "node_modules", "target", "build", "dist", "out", "bin", "obj",
-    "vendor", "generated", "__pycache__", ".venv", "venv", ".idea", ".vscode",
-    "fixtures", "testdata", "resources",
-}
 
 TYPE_KINDS = ("class", "interface", "record", "enum", "type")
 
@@ -91,40 +55,17 @@ class Symbol:
 
 
 def detect_language(path: Path) -> str | None:
-    return LANG_EXTENSIONS.get(path.suffix)
+    language = scan.detect_language(path)
+    return language.value if language is not None else None
 
 
 def scan_files(root: Path, config: ProjectConfig | None = None) -> list[Path]:
-    """Source files under root: git-tracked only when root is a git repo (so .gitignore
-    excludes vendored/data trees), else a pruned filesystem walk. Deterministic order."""
-    del config  # The v2 scanner consumes this manifest in the next foundation step.
-    if (root / ".git").exists():
-        try:
-            out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
-                                 capture_output=True, text=True, timeout=60)
-            if out.returncode == 0:
-                results = []
-                for rel in out.stdout.split("\0"):
-                    if not rel or detect_language(Path(rel)) is None:
-                        continue
-                    if any(part in DENYLIST_DIRS or part.startswith(".")
-                           for part in Path(rel).parts[:-1]):
-                        continue
-                    p = root / rel
-                    if p.is_file():
-                        results.append(p)
-                return sorted(results)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    results = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames
-                             if d not in DENYLIST_DIRS and not d.startswith("."))
-        for fn in filenames:
-            p = Path(dirpath) / fn
-            if detect_language(p) is not None:
-                results.append(p)
-    return sorted(results)
+    """Return v1 paths backed by the complete v2 source-candidate ledger."""
+    result = scan.scan_project(root.resolve(), config or default_config())
+    if not result.complete:
+        detail = "; ".join(diagnostic.message for diagnostic in result.diagnostics)
+        raise SystemExit(detail or "source scan incomplete")
+    return [source.path for source in result.sources]
 
 
 # ---------------------------------------------------------------------------
@@ -1846,6 +1787,7 @@ def _gather(
 ):
     """Extract symbols, identifier-token sets per file, and the corpus state hash.
     `langs` restricts to those languages (e.g. {"java"}); None means all."""
+    root = root.resolve()
     config = config or default_config()
     if langs is None and config.languages:
         langs = {language.value for language in config.languages}
@@ -1873,6 +1815,7 @@ def _state_hash(
 ) -> str:
     """The corpus hash `_gather` would produce, without parsing anything — cheap
     freshness probe for `check` / `--if-stale`."""
+    root = root.resolve()
     config = config or default_config()
     if langs is None and config.languages:
         langs = {language.value for language in config.languages}
