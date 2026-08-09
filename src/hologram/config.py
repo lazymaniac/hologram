@@ -316,6 +316,14 @@ def create_default_manifest(root: Path) -> bool:
             if written <= 0:
                 raise OSError(f"failed to write configuration manifest {path}")
             remaining = remaining[written:]
-    finally:
+    except BaseException as error:
+        try:
+            os.close(fd)
+        except BaseException as close_error:
+            error.add_note(
+                f"closing configuration manifest failed: {close_error!r}"
+            )
+        raise
+    else:
         os.close(fd)
     return True

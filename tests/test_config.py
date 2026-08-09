@@ -366,6 +366,35 @@ output = "digest.md"
             with self.assertRaises(OSError):
                 os.fstat(captured_fd[0])
 
+    def test_atomic_default_manifest_preserves_primary_write_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            primary = OSError("write-primary")
+            secondary = OSError("close-secondary")
+            with (
+                mock.patch.object(
+                    config_module.os,
+                    "write",
+                    side_effect=primary,
+                ),
+                mock.patch.object(
+                    config_module.os,
+                    "close",
+                    side_effect=secondary,
+                ) as close,
+            ):
+                with self.assertRaises(OSError) as caught:
+                    config_module.create_default_manifest(root)
+
+            close.assert_called_once()
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(str(caught.exception), "write-primary")
+            notes = getattr(caught.exception, "__notes__", ())
+            self.assertTrue(
+                any("close-secondary" in note for note in notes)
+                or caught.exception.__context__ is secondary
+            )
+
     def test_atomic_default_manifest_never_unlinks_raced_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
