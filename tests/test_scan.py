@@ -293,6 +293,27 @@ class GitDiscoveryTest(unittest.TestCase):
             self.assertEqual(["fallback.py"], [source.file for source in result.sources])
             self.assertTrue(result.complete)
 
+    def test_false_worktree_probe_uses_filesystem_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "fallback.py").write_text("FALLBACK = True\n")
+            not_worktree = subprocess.CompletedProcess(
+                ["git", "rev-parse"],
+                0,
+                stdout=b"false\n",
+                stderr=b"",
+            )
+
+            with mock.patch(
+                "hologram.scan.subprocess.run",
+                return_value=not_worktree,
+            ) as run:
+                result = scan_project(root, _config(exclude=()))
+
+            run.assert_called_once()
+            self.assertEqual(["fallback.py"], [source.file for source in result.sources])
+            self.assertTrue(result.complete)
+
 
 class FilesystemDiscoveryTest(unittest.TestCase):
     def test_non_git_fallback_and_relative_posix_sorting(self) -> None:
@@ -678,6 +699,57 @@ class SnapshotFailureTest(unittest.TestCase):
             self.assertFalse(result.complete)
             self.assertEqual(ScanStatus.FAILED, result.entries[0].status)
             self.assertIsNone(result.entries[0].source)
+            self.assertNotIn(outside_raw, [source.raw for source in result.sources])
+
+    def test_root_ancestor_swap_never_acquires_outside_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            ancestor = base / "authority-parent"
+            root = ancestor / "project"
+            root.mkdir(parents=True)
+            (root / "svc.py").write_bytes(b"SAFE = True\n")
+
+            outside_ancestor = base / "outside-parent"
+            outside_root = outside_ancestor / "project"
+            outside_root.mkdir(parents=True)
+            outside_raw = b"SECRET_OUTSIDE = True\n"
+            (outside_root / "svc.py").write_bytes(outside_raw)
+            moved_ancestor = base / "authority-parent-original"
+            real_open = os.open
+            swapped = False
+
+            def racing_root_open(
+                candidate,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal swapped
+                absolute_boundary = dir_fd is None and Path(candidate) == root
+                component_boundary = (
+                    dir_fd is not None and candidate == ancestor.name
+                )
+                if not swapped and (absolute_boundary or component_boundary):
+                    ancestor.rename(moved_ancestor)
+                    ancestor.symlink_to(outside_ancestor, target_is_directory=True)
+                    swapped = True
+                    try:
+                        return real_open(candidate, flags, mode, dir_fd=dir_fd)
+                    finally:
+                        ancestor.unlink()
+                        moved_ancestor.rename(ancestor)
+                return real_open(candidate, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch(
+                "hologram.scan.os.open",
+                side_effect=racing_root_open,
+            ):
+                result = scan_project(root, _config(exclude=()))
+
+            self.assertTrue(swapped)
+            self.assertFalse(result.complete)
+            self.assertFalse(result.sources)
             self.assertNotIn(outside_raw, [source.raw for source in result.sources])
 
 
