@@ -2475,21 +2475,55 @@ def _hologram_build_command(*args: str) -> str:
     return shlex.join([_hook_python(), "-m", "hologram", "build", *args])
 
 
-def _is_generated_hologram_hook_line(line: str) -> bool:
-    """Whether `line` is a Hologram-owned legacy or module hook command."""
-    command, separator, fallback = line.strip().rpartition("||")
-    if separator != "||" or fallback.strip() != "true":
+def _hook_options_match_repo(options: list[str], repo: Path) -> bool:
+    """Validate the exact option grammar emitted by `_install_hooks`."""
+    if len(options) < 3 or options[:1] != ["--root"]:
         return False
+    root_arg = Path(options[1])
+    if not root_arg.is_absolute() or root_arg.resolve() != repo.resolve():
+        return False
+    tail = options[2:]
+    langs = []
+    while tail[:1] == ["--lang"]:
+        if len(tail) < 2 or not tail[1] or tail[1].startswith("-"):
+            return False
+        langs.append(tail[1])
+        tail = tail[2:]
+    if langs != sorted(set(langs)):
+        return False
+    if tail[:1] == ["--embed"]:
+        tail = tail[1:]
+    return tail == ["--quiet"]
+
+
+def _legacy_hook_script() -> Path | None:
+    """Prior root-level script path when running from this repository's src layout."""
+    source = Path(__file__).resolve()
+    src_dir = source.parent.parent
+    if src_dir.name != "src":
+        return None
+    return src_dir.parent / "hologram.py"
+
+
+def _is_generated_hologram_hook_line(line: str, repo: Path) -> bool:
+    """Whether `line` is an exact Hologram-owned command for `repo`."""
+    text = line.removesuffix("\n").removesuffix("\r")
+    if text != text.strip() or not text.endswith(" || true"):
+        return False
+    command = text.removesuffix(" || true")
     try:
         argv = shlex.split(command)
     except ValueError:
         return False
-    if not argv or argv[-1] != "--quiet" or "--root" not in argv:
-        return False
     if argv[1:4] == ["-m", "hologram", "build"]:
-        return True
-    return (len(argv) >= 3 and Path(argv[1]).name == "hologram.py"
-            and argv[2] == "build")
+        return _hook_options_match_repo(argv[4:], repo)
+    legacy_script = _legacy_hook_script()
+    return (legacy_script is not None
+            and len(argv) >= 3
+            and Path(argv[1]).is_absolute()
+            and Path(argv[1]).resolve() == legacy_script.resolve()
+            and argv[2] == "build"
+            and _hook_options_match_repo(argv[3:], repo))
 
 
 def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None,
@@ -2506,11 +2540,19 @@ def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None,
     for name in HOOK_NAMES:
         hook = hooks_dir / name
         if hook.exists():
-            content = hook.read_text()
-            kept = [line for line in content.splitlines()
-                    if not _is_generated_hologram_hook_line(line)]
-            preserved = "\n".join(kept).rstrip("\n")
-            hook.write_text(preserved + ("\n" if preserved else "") + hook_line)
+            content = hook.read_bytes()
+            kept = []
+            for line in content.splitlines(keepends=True):
+                try:
+                    owned = _is_generated_hologram_hook_line(line.decode(), repo)
+                except UnicodeDecodeError:
+                    owned = False
+                if not owned:
+                    kept.append(line)
+            preserved = b"".join(kept)
+            if preserved and not preserved.endswith((b"\n", b"\r")):
+                preserved += b"\n"
+            hook.write_bytes(preserved + hook_line.encode())
         else:
             hook.write_text("#!/bin/sh\n" + hook_line)
         hook.chmod(0o755)
@@ -2521,6 +2563,25 @@ def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None,
                              + "PROJECT_DIGEST.md\n")
     if not quiet:
         print(f"hooks installed: {', '.join(HOOK_NAMES)}; PROJECT_DIGEST.md gitignored")
+
+
+def _digest_regen_command(root: Path, out_path: Path,
+                          langs: set[str] | None, private_sigs: bool,
+                          behaviors: bool, embed: bool,
+                          embed_max_tokens: int) -> str:
+    """Reproduce the active content-affecting build configuration."""
+    regen_args = ["--root", str(root.resolve()),
+                  "--out", str(out_path.resolve())]
+    for lang in sorted(langs or set()):
+        regen_args.extend(["--lang", lang])
+    if private_sigs:
+        regen_args.append("--private")
+    if behaviors:
+        regen_args.append("--behaviors")
+    if embed:
+        regen_args.extend(["--embed", "--embed-max-tokens",
+                           str(embed_max_tokens)])
+    return _hologram_build_command(*regen_args)
 
 
 def run_cli(argv: list[str] | None = None) -> int:
@@ -2564,7 +2625,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     langs = None
     if getattr(args, "lang", None):
         langs = {l.strip() for arg in args.lang for l in arg.split(",") if l.strip()}
-    out_path = args.out or root / "PROJECT_DIGEST.md"
+    out_path = (args.out or root / "PROJECT_DIGEST.md").resolve()
 
     if args.cmd == "check":
         fresh = _digest_state(out_path) == _state_hash(root, langs)
@@ -2609,7 +2670,11 @@ def run_cli(argv: list[str] | None = None) -> int:
     if args.cmd == "init":
         _install_hooks(root, args.quiet, langs, embed=args.embed)
     digest = build_digest(root,
-                          regen_cmd=_hologram_build_command(),
+                          regen_cmd=_digest_regen_command(
+                              root, out_path, langs, args.private,
+                              args.behaviors, args.embed,
+                              args.embed_max_tokens,
+                          ),
                           langs=langs, private_sigs=args.private,
                           behaviors=args.behaviors)
     out_path.write_text(digest)

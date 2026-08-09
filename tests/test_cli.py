@@ -1,3 +1,4 @@
+import contextlib
 import shlex
 import shutil
 import subprocess
@@ -6,7 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 import hologram  # noqa: E402
 from hologram import run_cli  # noqa: E402
@@ -62,7 +64,47 @@ class CliBuildTest(unittest.TestCase):
             self.assertNotIn("legacy.py", regen)
             self.assertEqual(
                 shlex.split(regen),
-                [sys.executable, "-m", "hologram", "build"],
+                [sys.executable, "-m", "hologram", "build",
+                 "--root", str(JAVAMINI.resolve()),
+                 "--out", str(out.resolve())],
+            )
+
+    def test_digest_regen_command_reproduces_non_default_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = _make_repo(tmp_path)
+            (tmp_path / "artifacts").mkdir()
+            relative_out = Path("artifacts") / "custom digest.md"
+
+            with contextlib.chdir(tmp_path):
+                run_cli([
+                    "build",
+                    "--root", str(repo),
+                    "--out", str(relative_out),
+                    "--lang", "python,java",
+                    "--private",
+                    "--behaviors",
+                    "--embed",
+                    "--embed-max-tokens", "1234",
+                    "--if-stale",
+                    "--quiet",
+                ])
+
+            out = tmp_path / relative_out
+            header = out.read_text().splitlines()[0]
+            regen = header.split(" · regen: ", 1)[1]
+            self.assertNotIn("legacy.py", regen)
+            self.assertEqual(
+                shlex.split(regen),
+                [sys.executable, "-m", "hologram", "build",
+                 "--root", str(repo.resolve()),
+                 "--out", str(out.resolve()),
+                 "--lang", "java",
+                 "--lang", "python",
+                 "--private",
+                 "--behaviors",
+                 "--embed",
+                 "--embed-max-tokens", "1234"],
             )
 
 
@@ -101,12 +143,17 @@ class InitHooksTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp))
             hook = repo / ".git" / "hooks" / "post-commit"
+            legacy_script = ROOT / "hologram.py"
             hook.write_text(
                 "#!/bin/sh\n"
                 "echo before\n"
-                f'{sys.executable} "/opt/hologram/hologram.py" build '
-                f'--root "{repo.resolve()}" --lang java --quiet || true\n'
-                "echo after\n"
+                + shlex.join([
+                    sys.executable, str(legacy_script), "build",
+                    "--root", str(repo.resolve()),
+                    "--lang", "java", "--quiet",
+                ])
+                + " || true\n"
+                + "echo after\n"
             )
 
             run_cli(["init", "--root", str(repo), "--quiet"])
@@ -116,6 +163,51 @@ class InitHooksTest(unittest.TestCase):
             self.assertNotIn("hologram.py", content)
             self.assertIn("echo before", content)
             self.assertIn("echo after", content)
+
+    def test_init_preserves_non_owned_hologram_commands_byte_for_byte(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = _make_repo(tmp_path)
+            other_root = tmp_path / "different repo"
+            other_root.mkdir()
+            unrelated_script = tmp_path / "unrelated" / "hologram.py"
+            other_repo_line = (
+                shlex.join([
+                    sys.executable, "-m", "hologram", "build",
+                    "--root", str(other_root.resolve()), "--quiet",
+                ])
+                + " || true\n"
+            )
+            unrelated_script_line = (
+                shlex.join([
+                    sys.executable, str(unrelated_script), "build",
+                    "--root", str(repo.resolve()), "--quiet",
+                ])
+                + " || true\n"
+            )
+            unknown_option_line = (
+                shlex.join([
+                    sys.executable, "-m", "hologram", "build",
+                    "--root", str(repo.resolve()), "--private", "--quiet",
+                ])
+                + " || true\n"
+            )
+            hook = repo / ".git" / "hooks" / "post-commit"
+            hook.write_bytes(
+                ("#!/bin/sh\n"
+                 + other_repo_line
+                 + unrelated_script_line
+                 + unknown_option_line
+                 + "echo untouched\n").encode()
+            )
+
+            run_cli(["init", "--root", str(repo), "--quiet"])
+
+            updated = hook.read_bytes()
+            self.assertIn(other_repo_line.encode(), updated)
+            self.assertIn(unrelated_script_line.encode(), updated)
+            self.assertIn(unknown_option_line.encode(), updated)
+            self.assertIn(b"echo untouched\n", updated)
 
     def test_generated_hook_quotes_interpreter_and_root_path(self):
         with tempfile.TemporaryDirectory(prefix="hook $HOME path; ") as tmp:
