@@ -72,7 +72,7 @@ def compute_state(
     _feed(hasher, "ir-schema", str(IR_SCHEMA_VERSION).encode("ascii"))
     _feed(hasher, "config", canonical_config_bytes(config))
 
-    included = sorted(
+    language_entries = sorted(
         (
             entry
             for entry in scan_result.entries
@@ -81,7 +81,9 @@ def compute_state(
         ),
         key=lambda entry: entry.file,
     )
-    active_languages = {entry.language.value for entry in included}
+    active_languages = {
+        entry.language.value for entry in language_entries
+    }
     _feed(
         hasher,
         "extractors",
@@ -93,20 +95,19 @@ def compute_state(
         _version_bytes(parser_versions, active_languages),
     )
 
-    for entry in included:
-        _feed(hasher, f"entry-status:{entry.file}", _status_bytes(entry))
-
-    git_sentinels = sorted(
+    included = sorted(
         (
             entry
             for entry in scan_result.entries
-            if entry.file == "<git>"
-            and entry.language is None
-            and entry.status is ScanStatus.FAILED
+            if entry.status is ScanStatus.FAILED
+            or (
+                entry.status is ScanStatus.INDEXED
+                and entry.language is not None
+            )
         ),
         key=lambda entry: entry.file,
     )
-    for entry in git_sentinels:
+    for entry in included:
         _feed(hasher, f"entry-status:{entry.file}", _status_bytes(entry))
 
     for entry in included:

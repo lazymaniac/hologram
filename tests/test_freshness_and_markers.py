@@ -126,6 +126,85 @@ class StateAndCheckTest(unittest.TestCase):
         self.assertEqual(scan_calls, 1)
         self.assertIn("Svc", digest)
 
+    def test_incomplete_scan_never_compares_as_fresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "proj"
+            root.mkdir()
+            config = write_manifest(root)
+            diagnostics = (
+                hologram.Diagnostic(
+                    "scan-root-open-failed",
+                    hologram.DiagnosticSeverity.ERROR,
+                    "first failure",
+                ),
+                hologram.Diagnostic(
+                    "scan-walk-error",
+                    hologram.DiagnosticSeverity.ERROR,
+                    "second failure",
+                ),
+            )
+            scan_result = hologram.ScanResult(
+                (
+                    hologram.ScanEntry(
+                        root / "<filesystem>",
+                        "<filesystem>",
+                        None,
+                        hologram.ScanStatus.FAILED,
+                        "root-open-failed",
+                        None,
+                    ),
+                    hologram.ScanEntry(
+                        root / "blocked/private",
+                        "blocked/private",
+                        None,
+                        hologram.ScanStatus.FAILED,
+                        "walk-error",
+                        None,
+                    ),
+                ),
+                diagnostics,
+                False,
+            )
+            state = hologram.compute_state(
+                root,
+                config,
+                scan_result,
+                extractor_versions=hologram.legacy.LEGACY_EXTRACTOR_VERSIONS,
+                parser_versions=hologram.legacy.LEGACY_PARSER_VERSIONS,
+            )
+            out = Path(tmp) / "digest.md"
+            out.write_text(
+                f"# proj · state={state.value} · regen: hologram build\n",
+                encoding="utf-8",
+            )
+
+            actions = (
+                lambda: hologram._state_hash(root, config),
+                lambda: run_cli(
+                    [
+                        "check",
+                        "--root",
+                        str(root),
+                        "--out",
+                        str(out),
+                        "--quiet",
+                    ]
+                ),
+            )
+            for action in actions:
+                with self.subTest(action=action):
+                    with mock.patch.object(
+                        hologram.legacy.scan,
+                        "scan_project",
+                        return_value=scan_result,
+                    ):
+                        with self.assertRaises(SystemExit) as caught:
+                            action()
+                    self.assertEqual(
+                        str(caught.exception),
+                        "first failure; second failure",
+                    )
+
 
 class TestedMarkerTest(unittest.TestCase):
     def test_symbol_named_in_tests_gets_check(self):

@@ -1859,6 +1859,11 @@ def _state_hash(
         extractor_versions=LEGACY_EXTRACTOR_VERSIONS,
         parser_versions=LEGACY_PARSER_VERSIONS,
     )
+    if not state.complete:
+        detail = "; ".join(
+            diagnostic.message for diagnostic in state.diagnostics
+        )
+        raise SystemExit(detail or "source scan incomplete")
     return state.value
 
 

@@ -348,6 +348,91 @@ class StateTest(unittest.TestCase):
             self.compute(scan_result=changed_reason).value,
         )
 
+    def test_every_language_none_failure_changes_state(self) -> None:
+        empty = self.compute(scan_result=ScanResult((), (), True)).value
+
+        def state_for(
+            file: str,
+            status: ScanStatus,
+            reason: str,
+        ) -> str:
+            return self.compute(
+                scan_result=ScanResult(
+                    (
+                        ScanEntry(
+                            self.root / file,
+                            file,
+                            None,
+                            status,
+                            reason,
+                            None,
+                        ),
+                    ),
+                    (),
+                    False,
+                )
+            ).value
+
+        root_failure = state_for(
+            "<filesystem>",
+            ScanStatus.FAILED,
+            "root-open-failed",
+        )
+        walk_failure = state_for(
+            "blocked/private",
+            ScanStatus.FAILED,
+            "walk-error",
+        )
+        changed_path = state_for(
+            "blocked/other",
+            ScanStatus.FAILED,
+            "walk-error",
+        )
+        changed_reason = state_for(
+            "blocked/private",
+            ScanStatus.FAILED,
+            "directory-stat-error",
+        )
+        excluded = state_for(
+            "blocked/private",
+            ScanStatus.EXCLUDED,
+            "walk-error",
+        )
+
+        self.assertNotEqual(empty, root_failure)
+        self.assertNotEqual(empty, walk_failure)
+        self.assertNotEqual(walk_failure, changed_path)
+        self.assertNotEqual(walk_failure, changed_reason)
+        self.assertNotEqual(walk_failure, excluded)
+        self.assertEqual(empty, excluded)
+
+    def test_language_none_failure_does_not_activate_tool_versions(self) -> None:
+        failure = ScanResult(
+            (
+                ScanEntry(
+                    self.root / "blocked/private",
+                    "blocked/private",
+                    None,
+                    ScanStatus.FAILED,
+                    "walk-error",
+                    None,
+                ),
+            ),
+            (),
+            False,
+        )
+        first = self.compute(
+            scan_result=failure,
+            extractor_versions={"java": "one"},
+            parser_versions={"java": "one"},
+        )
+        second = self.compute(
+            scan_result=failure,
+            extractor_versions={"java": "two"},
+            parser_versions={"java": "two"},
+        )
+        self.assertEqual(first.value, second.value)
+
     def test_indexed_helm_source_bytes_change_state(self) -> None:
         first = self.compute(
             scan_result=self.scan_with_source("chart/templates/app.yaml", b"one\n"),
