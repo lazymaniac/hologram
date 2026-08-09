@@ -25,11 +25,10 @@ from datetime import date
 from pathlib import Path
 
 from .config import (
-    CONFIG_NAME,
     ProjectConfig,
+    create_default_manifest,
     default_config,
     load_config,
-    render_config,
 )
 
 LANG_EXTENSIONS = {
@@ -2647,12 +2646,8 @@ def run_cli(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
-    manifest_path = root / CONFIG_NAME
-    if args.cmd == "init" and not os.path.lexists(manifest_path):
-        manifest_path.write_text(
-            render_config(default_config()),
-            encoding="utf-8",
-        )
+    if args.cmd == "init":
+        create_default_manifest(root)
     config = load_config(root)
     langs = None
     if getattr(args, "lang", None):

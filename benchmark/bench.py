@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
-import os
 import re
 import shutil
 import statistics
@@ -21,18 +20,11 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hologram import CONFIG_NAME, default_config, render_config
+from hologram.config import create_default_manifest
 
 
 def _hologram_command(*args: str) -> list[str]:
     return [sys.executable, "-m", "hologram", *args]
-
-
-def _ensure_hologram_manifest(workspace: Path) -> Path:
-    manifest = workspace / CONFIG_NAME
-    if not os.path.lexists(manifest):
-        manifest.write_text(render_config(default_config()), encoding="utf-8")
-    return manifest
 
 
 @dataclass
@@ -195,7 +187,7 @@ def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
     so that any later `git diff` shows exactly what the agent changed."""
     subprocess.run(["git", "-C", str(corpus), "worktree", "add", "--detach",
                     "-f", str(ws), "HEAD"], check=True, capture_output=True)
-    _ensure_hologram_manifest(ws)
+    create_default_manifest(ws)
     claude_path = ws / "CLAUDE.md"
     existing = claude_path.read_text() if claude_path.exists() else ""
     claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD

@@ -1,14 +1,17 @@
 import dataclasses
 import json
+import os
 import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hologram  # noqa: E402
+import hologram.config as config_module  # noqa: E402
 from hologram.config import (  # noqa: E402
     ALLOWED_AGENTS,
     CONFIG_NAME,
@@ -198,6 +201,20 @@ output = "digest.md"
             with self.subTest(field=field, text=text), tempfile.TemporaryDirectory() as tmp:
                 self._assert_error(Path(tmp), text, field)
 
+    def test_wraps_toml_integer_conversion_value_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._write(
+                root,
+                "schema_version = " + ("9" * 5001) + "\n",
+            )
+
+            with self.assertRaises(ConfigError) as caught:
+                load_config(root)
+
+        self.assertIn(str(path), str(caught.exception))
+        self.assertIn("TOML", str(caught.exception))
+
     def test_rejects_empty_include_and_non_normalized_patterns(self):
         cases = [
             ('include = []', "include"),
@@ -205,9 +222,11 @@ output = "digest.md"
             ('include = ["src\\\\**"]', "include"),
             ('include = ["src/../tests/**"]', "include"),
             ('include = ["src/./**"]', "include"),
+            ('include = ["D:escape/**"]', "include"),
             ('exclude = [""]', "exclude"),
             ('exclude = ["build\\\\**"]', "exclude"),
             ('exclude = ["build/../dist/**"]', "exclude"),
+            ('exclude = ["D:generated/**"]', "exclude"),
         ]
         for assignment, field in cases:
             with self.subTest(assignment=assignment), tempfile.TemporaryDirectory() as tmp:
@@ -234,11 +253,165 @@ output = "digest.md"
             "nested/../digest.md",
             "nested\\digest.md",
             "nested/./digest.md",
+            "D:escape.md",
+            "claude.md",
+            "Agents.MD",
+            ".HOLOGRAM.TOML",
         ]
         for output in invalid:
             with self.subTest(output=output), tempfile.TemporaryDirectory() as tmp:
                 text = f"schema_version = 2\noutput = {json.dumps(output)}\n"
                 self._assert_error(Path(tmp), text, "output")
+
+    def test_preserves_case_for_nonreserved_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write(
+                root,
+                'schema_version = 2\noutput = "Reports/ProjectDigest.md"\n',
+            )
+            self.assertEqual(
+                load_config(root).output,
+                "Reports/ProjectDigest.md",
+            )
+
+    def test_atomic_default_manifest_creation_is_exact_and_non_overwriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real_open = os.open
+            with mock.patch.object(
+                config_module.os,
+                "open",
+                wraps=real_open,
+            ) as opened:
+                self.assertTrue(config_module.create_default_manifest(root))
+
+            manifest = root / CONFIG_NAME
+            self.assertEqual(
+                manifest.read_bytes(),
+                canonical_config_bytes(default_config()),
+            )
+            path, flags, mode = opened.call_args.args
+            self.assertEqual(Path(path), manifest)
+            self.assertTrue(flags & os.O_WRONLY)
+            self.assertTrue(flags & os.O_CREAT)
+            self.assertTrue(flags & os.O_EXCL)
+            if hasattr(os, "O_NOFOLLOW"):
+                self.assertTrue(flags & os.O_NOFOLLOW)
+            self.assertEqual(mode, 0o644)
+
+            manifest.write_bytes(b"caller-owned")
+            self.assertFalse(config_module.create_default_manifest(root))
+            self.assertEqual(manifest.read_bytes(), b"caller-owned")
+
+    def test_atomic_default_manifest_creation_loses_file_and_symlink_races(self):
+        for raced_kind in ("file", "symlink"):
+            with self.subTest(raced_kind=raced_kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                manifest = root / CONFIG_NAME
+                target = root / "target.toml"
+                target.write_bytes(b"target-owned")
+                real_open = os.open
+
+                def racing_open(path, flags, mode):
+                    self.assertEqual(Path(path), manifest)
+                    self.assertTrue(flags & os.O_CREAT)
+                    self.assertTrue(flags & os.O_EXCL)
+                    self.assertEqual(mode, 0o644)
+                    if raced_kind == "file":
+                        manifest.write_bytes(b"raced-file")
+                    else:
+                        manifest.symlink_to(target.name)
+                    return real_open(path, flags, mode)
+
+                with mock.patch.object(
+                    config_module.os,
+                    "open",
+                    side_effect=racing_open,
+                ):
+                    self.assertFalse(config_module.create_default_manifest(root))
+
+                if raced_kind == "file":
+                    self.assertEqual(manifest.read_bytes(), b"raced-file")
+                else:
+                    self.assertTrue(manifest.is_symlink())
+                    self.assertEqual(manifest.readlink(), Path(target.name))
+                self.assertEqual(target.read_bytes(), b"target-owned")
+
+    def test_atomic_default_manifest_removes_partial_file_and_closes_fd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / CONFIG_NAME
+            real_write = os.write
+            captured_fd: list[int] = []
+
+            def failing_write(fd, data):
+                captured_fd.append(fd)
+                if len(captured_fd) == 1:
+                    return real_write(fd, bytes(data[:5]))
+                raise OSError("injected write failure")
+
+            with mock.patch.object(
+                config_module.os,
+                "write",
+                side_effect=failing_write,
+            ):
+                with self.assertRaisesRegex(OSError, "injected write failure"):
+                    config_module.create_default_manifest(root)
+
+            self.assertFalse(manifest.exists())
+            with self.assertRaises(OSError):
+                os.fstat(captured_fd[0])
+
+    def test_project_config_owns_caller_lists(self):
+        agents = ["claude"]
+        languages = [Language.PYTHON]
+        include = ["src/**"]
+        exclude = ["dist/**"]
+        config = ProjectConfig(
+            schema_version=2,
+            agents=agents,
+            languages=languages,
+            include=include,
+            exclude=exclude,
+            hot_threshold=10,
+            output="digest.md",
+        )
+
+        agents.append("codex")
+        languages.append(Language.JAVA)
+        include.append("tests/**")
+        exclude.clear()
+
+        self.assertEqual(config.agents, ("claude",))
+        self.assertEqual(config.languages, (Language.PYTHON,))
+        self.assertEqual(config.include, ("src/**",))
+        self.assertEqual(config.exclude, ("dist/**",))
+
+    def test_project_config_rejects_ambiguous_sequence_containers(self):
+        base = {
+            "schema_version": 2,
+            "agents": ("claude",),
+            "languages": (Language.PYTHON,),
+            "include": ("src/**",),
+            "exclude": (),
+            "hot_threshold": 10,
+            "output": "digest.md",
+        }
+        factories = (
+            lambda: "not-a-sequence-container",
+            lambda: {"value"},
+            lambda: frozenset({"value"}),
+            lambda: {"key": "value"},
+            lambda: iter(("value",)),
+        )
+        for field in ("agents", "languages", "include", "exclude"):
+            for factory in factories:
+                with self.subTest(field=field, container=type(factory()).__name__):
+                    values = dict(base)
+                    values[field] = factory()
+                    with self.assertRaisesRegex(TypeError, field):
+                        ProjectConfig(**values)
 
     def test_render_escapes_toml_strings_deterministically(self):
         config = ProjectConfig(

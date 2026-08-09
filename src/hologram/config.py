@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import TypeVar
 
 from .model import Language
 
@@ -43,11 +45,25 @@ _KNOWN_KEYS = frozenset(
 _RESERVED_OUTPUTS = frozenset(
     {CONFIG_NAME, "CLAUDE.md", "AGENTS.md", "GEMINI.md"}
 )
-_WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:/")
+_RESERVED_OUTPUT_CASEFOLDS = frozenset(
+    output.casefold() for output in _RESERVED_OUTPUTS
+)
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+
+_T = TypeVar("_T")
 
 
 class ConfigError(ValueError):
     """A selected Hologram manifest is missing or invalid."""
+
+
+def _own_tuple(
+    value: tuple[_T, ...] | list[_T],
+    field: str,
+) -> tuple[_T, ...]:
+    if not isinstance(value, (tuple, list)):
+        raise TypeError(f"{field} must be a tuple or list")
+    return tuple(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +75,10 @@ class ProjectConfig:
     exclude: tuple[str, ...]
     hot_threshold: int
     output: str | None
+
+    def __post_init__(self) -> None:
+        for field in ("agents", "languages", "include", "exclude"):
+            object.__setattr__(self, field, _own_tuple(getattr(self, field), field))
 
 
 def default_config() -> ProjectConfig:
@@ -99,7 +119,7 @@ def _validate_pattern(pattern: str, field: str, path: Path) -> None:
         not pattern
         or not pure.parts
         or pure.is_absolute()
-        or _WINDOWS_ABSOLUTE_RE.match(pattern)
+        or _WINDOWS_DRIVE_RE.match(pattern)
         or "\\" in pattern
         or ".." in pure.parts
         or pattern != pure.as_posix()
@@ -138,12 +158,12 @@ def _output(data: dict[str, object], path: Path) -> str | None:
         not output
         or not pure.parts
         or pure.is_absolute()
-        or _WINDOWS_ABSOLUTE_RE.match(output)
+        or _WINDOWS_DRIVE_RE.match(output)
         or "\\" in output
         or ".." in pure.parts
         or output != pure.as_posix()
         or pure.suffix != ".md"
-        or output in _RESERVED_OUTPUTS
+        or output.casefold() in _RESERVED_OUTPUT_CASEFOLDS
         or any(character in output for character in "*?[]")
     ):
         raise _invalid(
@@ -165,7 +185,7 @@ def load_config(root: Path, path: Path | None = None) -> ProjectConfig:
 
     try:
         data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+    except ValueError as error:
         raise _invalid(selected, "TOML", str(error)) from error
 
     unknown = sorted(set(data) - _KNOWN_KEYS)
@@ -276,3 +296,44 @@ def render_config(config: ProjectConfig) -> str:
 
 def canonical_config_bytes(config: ProjectConfig) -> bytes:
     return render_config(config).encode("utf-8")
+
+
+def create_default_manifest(root: Path) -> bool:
+    """Exclusively create the canonical default manifest without replacing entries."""
+    path = Path(root) / CONFIG_NAME
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o644)
+    except FileExistsError:
+        return False
+
+    created = None
+    try:
+        created = os.fstat(fd)
+        remaining = memoryview(canonical_config_bytes(default_config()))
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError(f"failed to write configuration manifest {path}")
+            remaining = remaining[written:]
+    except BaseException:
+        try:
+            current = path.lstat()
+        except OSError:
+            current = None
+        if (
+            created is not None
+            and current is not None
+            and current.st_dev == created.st_dev
+            and current.st_ino == created.st_ino
+        ):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise
+    finally:
+        os.close(fd)
+    return True
