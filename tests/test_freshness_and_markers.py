@@ -44,6 +44,13 @@ def _proj(tmp: Path) -> Path:
     return root
 
 
+def rendered_state(digest: str) -> str:
+    match = hologram.state.STATE_HEADER_RE.search(digest.split("\n", 1)[0])
+    if match is None:
+        raise AssertionError("digest is missing a canonical state header")
+    return match.group(1)
+
+
 class StateAndCheckTest(unittest.TestCase):
     def test_state_stamp_matches_state_hash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -57,6 +64,112 @@ class StateAndCheckTest(unittest.TestCase):
                 out.read_text(encoding="utf-8").splitlines()[0],
                 r"(?:^|[ ·])state=[0-9a-f]{64}(?=$|[ ·])",
             )
+
+    def test_render_modes_have_distinct_library_states(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            config = default_config()
+            modes = (
+                (False, False),
+                (True, False),
+                (False, True),
+                (True, True),
+            )
+            states = []
+            for private_sigs, behaviors in modes:
+                digest = build_digest(
+                    root,
+                    private_sigs=private_sigs,
+                    behaviors=behaviors,
+                    config=config,
+                )
+                state = rendered_state(digest)
+                states.append(state)
+                self.assertEqual(
+                    state,
+                    hologram._state_hash(
+                        root,
+                        config,
+                        private_sigs=private_sigs,
+                        behaviors=behaviors,
+                    ),
+                )
+        self.assertEqual(len(set(states)), len(modes))
+
+    def test_cli_freshness_rejects_different_render_modes(self):
+        for option in ("--private", "--behaviors"):
+            with self.subTest(option=option):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = _proj(Path(tmp))
+                    write_manifest(root)
+                    out = Path(tmp) / "digest.md"
+                    flagged = [
+                        "build",
+                        "--root",
+                        str(root),
+                        "--out",
+                        str(out),
+                        option,
+                        "--quiet",
+                    ]
+                    run_cli(flagged)
+                    flagged_state = rendered_state(out.read_text(encoding="utf-8"))
+                    self.assertEqual(
+                        run_cli(
+                            [
+                                "check",
+                                "--root",
+                                str(root),
+                                "--out",
+                                str(out),
+                                option,
+                                "--quiet",
+                            ]
+                        ),
+                        0,
+                    )
+                    self.assertEqual(
+                        run_cli(
+                            [
+                                "check",
+                                "--root",
+                                str(root),
+                                "--out",
+                                str(out),
+                                "--quiet",
+                            ]
+                        ),
+                        1,
+                    )
+                    run_cli(
+                        [
+                            "build",
+                            "--root",
+                            str(root),
+                            "--out",
+                            str(out),
+                            "--if-stale",
+                            "--quiet",
+                        ]
+                    )
+                    public_state = rendered_state(
+                        out.read_text(encoding="utf-8")
+                    )
+                    self.assertNotEqual(flagged_state, public_state)
+                    self.assertEqual(
+                        run_cli(
+                            [
+                                "check",
+                                "--root",
+                                str(root),
+                                "--out",
+                                str(out),
+                                option,
+                                "--quiet",
+                            ]
+                        ),
+                        1,
+                    )
 
     def test_check_fresh_then_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,6 +197,71 @@ class StateAndCheckTest(unittest.TestCase):
             run_cli(["build", "--root", str(root), "--out", str(out),
                      "--if-stale", "--quiet"])
             self.assertNotEqual(out.stat().st_mtime_ns, mtime)
+
+    def test_stale_if_stale_reuses_one_snapshot_for_rendering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            write_manifest(root)
+            out = Path(tmp) / "digest.md"
+            out.write_text(
+                f"# proj · state={'0' * 64} · regen: old\n",
+                encoding="utf-8",
+            )
+            real_scan = hologram.legacy.scan.scan_project
+            real_compute = hologram.legacy.compute_state
+            snapshots = []
+            compute_snapshots = []
+
+            def scan_then_mutate(*args, **kwargs):
+                snapshot = real_scan(*args, **kwargs)
+                snapshots.append(snapshot)
+                (root / "svc.py").write_text(
+                    "def disk_only() -> int:\n    return 2\n",
+                    encoding="utf-8",
+                )
+                return snapshot
+
+            def record_compute(root_arg, config_arg, scan_result, **kwargs):
+                compute_snapshots.append(scan_result)
+                return real_compute(
+                    root_arg,
+                    config_arg,
+                    scan_result,
+                    **kwargs,
+                )
+
+            with (
+                mock.patch.object(
+                    hologram.legacy.scan,
+                    "scan_project",
+                    side_effect=scan_then_mutate,
+                ),
+                mock.patch.object(
+                    hologram.legacy,
+                    "compute_state",
+                    side_effect=record_compute,
+                ),
+            ):
+                run_cli(
+                    [
+                        "build",
+                        "--root",
+                        str(root),
+                        "--out",
+                        str(out),
+                        "--if-stale",
+                        "--quiet",
+                    ]
+                )
+
+            digest = out.read_text(encoding="utf-8")
+        self.assertEqual(len(snapshots), 1)
+        self.assertGreaterEqual(len(compute_snapshots), 2)
+        self.assertTrue(
+            all(snapshot is snapshots[0] for snapshot in compute_snapshots)
+        )
+        self.assertIn("Svc", digest)
+        self.assertNotIn("disk_only", digest)
 
     def test_build_scans_once_and_never_rereads_snapshot_paths(self):
         with tempfile.TemporaryDirectory() as tmp:

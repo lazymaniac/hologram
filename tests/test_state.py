@@ -8,6 +8,7 @@ from typing import cast
 from unittest import mock
 
 import hologram
+import hologram.state as state_module
 from hologram import (
     Diagnostic,
     DiagnosticSeverity,
@@ -160,10 +161,10 @@ class StateTest(unittest.TestCase):
         return self.compute(**overrides).value
 
     def test_state_format_and_framing_are_stable(self) -> None:
-        self.assertEqual(STATE_FORMAT_VERSION, "hologram-state-v2")
+        self.assertEqual(STATE_FORMAT_VERSION, "hologram-state-v3")
         self.assertEqual(
             self.state(),
-            "b8671be56f77c43a87a7343f6e6897e7d610dc2bbf6f4e1320d97a5bd3348d9c",
+            "c01c54545272bf6719742975c85d69300e19ab86b323a2cea3a8f8c78471517b",
         )
 
     def test_state_api_is_exported_from_package(self) -> None:
@@ -269,6 +270,74 @@ class StateTest(unittest.TestCase):
         self.assertEqual(baseline, irrelevant)
         self.assertNotEqual(baseline, active_extractor)
         self.assertNotEqual(baseline, active_parser)
+
+    def test_active_tool_versions_are_required_nonempty_strings(self) -> None:
+        scan_result = self.scan_with_source("main.py", b"x = 1\n")
+        cases = (
+            ("extractor_versions", {}, ValueError, "missing active language 'python'"),
+            ("parser_versions", {}, ValueError, "missing active language 'python'"),
+            (
+                "extractor_versions",
+                {"python": 1},
+                TypeError,
+                "version for active language 'python' must be a string",
+            ),
+            (
+                "parser_versions",
+                {"python": 1},
+                TypeError,
+                "version for active language 'python' must be a string",
+            ),
+            (
+                "extractor_versions",
+                {"python": ""},
+                ValueError,
+                "version for active language 'python' must not be empty",
+            ),
+            (
+                "parser_versions",
+                {"python": ""},
+                ValueError,
+                "version for active language 'python' must not be empty",
+            ),
+        )
+        for field, invalid, error_type, message in cases:
+            with self.subTest(field=field, invalid=invalid):
+                versions: dict[str, object] = {
+                    "extractor_versions": {"python": "2"},
+                    "parser_versions": {"python": "stdlib-ast-3.11"},
+                }
+                versions[field] = invalid
+                with self.assertRaisesRegex(error_type, message):
+                    compute_state(
+                        self.root,
+                        self.config,
+                        scan_result,
+                        extractor_versions=cast(
+                            Mapping[str, str],
+                            versions["extractor_versions"],
+                        ),
+                        parser_versions=cast(
+                            Mapping[str, str],
+                            versions["parser_versions"],
+                        ),
+                    )
+
+    def test_invalid_inactive_tool_versions_are_ignored(self) -> None:
+        scan_result = self.scan_with_source("main.py", b"x = 1\n")
+        baseline = self.compute(scan_result=scan_result)
+        with_invalid_extras = self.compute(
+            scan_result=scan_result,
+            extractor_versions=cast(
+                Mapping[str, str],
+                {"python": "2", "java": ""},
+            ),
+            parser_versions=cast(
+                Mapping[str, str],
+                {"python": "stdlib-ast-3.11", "java": 1},
+            ),
+        )
+        self.assertEqual(baseline.value, with_invalid_extras.value)
 
     def test_failed_language_entry_status_and_reason_change_state(self) -> None:
         snapshot = self.source("bad.py", b"x = 1\n")
@@ -433,6 +502,90 @@ class StateTest(unittest.TestCase):
         )
         self.assertEqual(first.value, second.value)
 
+    def test_entry_language_assignment_is_hashed_per_path(self) -> None:
+        def entry(file: str, language: Language) -> ScanEntry:
+            raw = b"same source\n"
+            snapshot = SourceFile(
+                self.root / file,
+                file,
+                language,
+                SourceRole.PRODUCTION,
+                raw,
+                hashlib.sha256(raw).hexdigest(),
+            )
+            return ScanEntry(
+                snapshot.path,
+                snapshot.file,
+                language,
+                ScanStatus.INDEXED,
+                None,
+                snapshot,
+            )
+
+        left = ScanResult(
+            (
+                entry("first.code", Language.PYTHON),
+                entry("second.code", Language.JAVA),
+            ),
+            (),
+            True,
+        )
+        right = ScanResult(
+            (
+                entry("first.code", Language.JAVA),
+                entry("second.code", Language.PYTHON),
+            ),
+            (),
+            True,
+        )
+        versions = {"java": "legacy", "python": "legacy"}
+        first = self.compute(
+            scan_result=left,
+            extractor_versions=versions,
+            parser_versions=versions,
+        )
+        second = self.compute(
+            scan_result=right,
+            extractor_versions=versions,
+            parser_versions=versions,
+        )
+        self.assertNotEqual(first.value, second.value)
+
+    def test_source_role_is_hashed(self) -> None:
+        baseline = self.scan_with_source("main.py", b"x = 1\n")
+        states = set()
+        for role in SourceRole:
+            source = dataclasses.replace(baseline.sources[0], role=role)
+            scan_result = dataclasses.replace(
+                baseline,
+                entries=(
+                    dataclasses.replace(
+                        baseline.entries[0],
+                        source=source,
+                    ),
+                ),
+            )
+            states.add(self.compute(scan_result=scan_result).value)
+        self.assertEqual(len(states), len(SourceRole))
+
+    def test_duplicate_entry_files_are_rejected_before_hashing(self) -> None:
+        indexed = self.scan_with_source("duplicate.py", b"first\n").entries[0]
+        excluded = ScanEntry(
+            self.root / "duplicate.py",
+            "duplicate.py",
+            Language.PYTHON,
+            ScanStatus.EXCLUDED,
+            "exclude-pattern",
+            None,
+        )
+        for entries in ((indexed, excluded), (excluded, indexed)):
+            with self.subTest(order=tuple(entry.status for entry in entries)):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"duplicate ScanEntry\.file 'duplicate\.py'",
+                ):
+                    self.compute(scan_result=ScanResult(entries, (), True))
+
     def test_indexed_helm_source_bytes_change_state(self) -> None:
         first = self.compute(
             scan_result=self.scan_with_source("chart/templates/app.yaml", b"one\n"),
@@ -551,7 +704,7 @@ class ReadDigestStateTest(unittest.TestCase):
             with self.subTest(error=type(error).__name__):
                 with mock.patch.object(
                     Path,
-                    "read_text",
+                    "open",
                     side_effect=error,
                 ):
                     with self.assertRaises(type(error)):
@@ -559,6 +712,44 @@ class ReadDigestStateTest(unittest.TestCase):
 
     def test_invalid_utf8_is_treated_as_missing_state(self) -> None:
         self.path.write_bytes(b"\xff")
+        self.assertIsNone(read_digest_state(self.path))
+
+    def test_invalid_or_huge_body_is_not_read_or_decoded(self) -> None:
+        header = f"# project · state={self.digest} · regen: x\n".encode("utf-8")
+        self.path.write_bytes(header + b"\xff" * (1024 * 1024))
+        self.assertEqual(read_digest_state(self.path), self.digest)
+
+    def test_header_read_is_binary_and_bounded(self) -> None:
+        sizes: list[int] = []
+        header = f"state={self.digest}\n".encode("ascii")
+
+        class Artifact:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def readline(self, size: int) -> bytes:
+                sizes.append(size)
+                return header
+
+            def read(self, *args):
+                raise AssertionError("artifact body must not be read")
+
+        with mock.patch.object(Path, "open", return_value=Artifact()) as opened:
+            self.assertEqual(read_digest_state(self.path), self.digest)
+        opened.assert_called_once_with("rb")
+        self.assertEqual(
+            sizes,
+            [state_module._STATE_HEADER_MAX_BYTES + 1],
+        )
+
+    def test_overlong_header_is_rejected(self) -> None:
+        cap = state_module._STATE_HEADER_MAX_BYTES
+        self.path.write_bytes(
+            f"state={self.digest} ".encode("ascii") + b"x" * cap + b"\n"
+        )
         self.assertIsNone(read_digest_state(self.path))
 
 

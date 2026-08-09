@@ -14,6 +14,8 @@ import argparse
 import ast
 import dataclasses
 import difflib
+import hashlib
+import json
 import re
 import shlex
 import subprocess
@@ -40,6 +42,7 @@ LEGACY_EXTRACTOR_VERSIONS = {
 LEGACY_PARSER_VERSIONS = {
     language.value: "legacy" for language in Language
 }
+_LEGACY_STATE_FORMAT_VERSION = "hologram-legacy-render-state-v1"
 
 
 @dataclass
@@ -1802,16 +1805,49 @@ def _effective_config(
     )
 
 
+def _legacy_state(
+    base_state: str,
+    *,
+    private_sigs: bool,
+    behaviors: bool,
+) -> str:
+    modes = json.dumps(
+        {
+            "behaviors": behaviors,
+            "private_sigs": private_sigs,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    hasher = hashlib.sha256()
+    for label, value in (
+        ("format", _LEGACY_STATE_FORMAT_VERSION.encode("utf-8")),
+        ("base-state", base_state.encode("ascii")),
+        ("render-modes", modes),
+    ):
+        label_bytes = label.encode("utf-8")
+        hasher.update(len(label_bytes).to_bytes(4, "big"))
+        hasher.update(label_bytes)
+        hasher.update(len(value).to_bytes(8, "big"))
+        hasher.update(value)
+    return hasher.hexdigest()
+
+
 def _gather(
     root: Path,
     langs: set[str] | None,
     config: ProjectConfig,
+    private_sigs: bool = False,
+    behaviors: bool = False,
+    *,
+    scan_result: scan.ScanResult | None = None,
 ):
     """Extract symbols, identifier-token sets per file, and the corpus state hash.
     `langs` restricts to those languages (e.g. {"java"}); None means all."""
     root = root.resolve()
     effective_config = _effective_config(config, langs)
-    scan_result = scan.scan_project(root, effective_config)
+    if scan_result is None:
+        scan_result = scan.scan_project(root, effective_config)
     if not scan_result.complete:
         detail = "; ".join(
             diagnostic.message for diagnostic in scan_result.diagnostics
@@ -1840,18 +1876,28 @@ def _gather(
         extractor_versions=LEGACY_EXTRACTOR_VERSIONS,
         parser_versions=LEGACY_PARSER_VERSIONS,
     )
-    return files, symbols, file_tokens, state.value, loc
+    rendered_state = _legacy_state(
+        state.value,
+        private_sigs=private_sigs,
+        behaviors=behaviors,
+    )
+    return files, symbols, file_tokens, rendered_state, loc
 
 
 def _state_hash(
     root: Path,
     config: ProjectConfig,
     langs: set[str] | None = None,
+    private_sigs: bool = False,
+    behaviors: bool = False,
+    *,
+    scan_result: scan.ScanResult | None = None,
 ) -> str:
     """Compute the versioned state over one immutable scanner snapshot."""
     root = root.resolve()
     effective_config = _effective_config(config, langs)
-    scan_result = scan.scan_project(root, effective_config)
+    if scan_result is None:
+        scan_result = scan.scan_project(root, effective_config)
     state = compute_state(
         root,
         effective_config,
@@ -1864,7 +1910,11 @@ def _state_hash(
             diagnostic.message for diagnostic in state.diagnostics
         )
         raise SystemExit(detail or "source scan incomplete")
-    return state.value
+    return _legacy_state(
+        state.value,
+        private_sigs=private_sigs,
+        behaviors=behaviors,
+    )
 
 
 def _digest_state(out_path: Path) -> str | None:
@@ -2355,13 +2405,24 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     return head + dep_part + "\n".join(_tree_lines(payload_by_dir)) + tail + "\n"
 
 
-def build_digest(root: Path, regen_cmd: str = "hologram build",
-                 langs: set[str] | None = None, private_sigs: bool = False,
-                 behaviors: bool = False,
-                 config: ProjectConfig | None = None) -> str:
-    if config is None:
-        config = default_config()
-    files, symbols, file_tokens, state, loc = _gather(root, langs, config)
+def _build_digest(
+    root: Path,
+    regen_cmd: str,
+    langs: set[str] | None,
+    private_sigs: bool,
+    behaviors: bool,
+    config: ProjectConfig,
+    *,
+    scan_result: scan.ScanResult | None = None,
+) -> str:
+    files, symbols, file_tokens, state, loc = _gather(
+        root,
+        langs,
+        config,
+        private_sigs,
+        behaviors,
+        scan_result=scan_result,
+    )
     scores = _fan_in_from_tokens(symbols, file_tokens)
     test_tokens: set[str] = set()
     for rel, toks in file_tokens.items():
@@ -2374,6 +2435,22 @@ def build_digest(root: Path, regen_cmd: str = "hologram build",
     return render_simple(root, symbols, files, regen_cmd, scores, private_sigs,
                          tested=tested, behaviors=behaviors, state=state,
                          deps=deps, loc=loc)
+
+
+def build_digest(root: Path, regen_cmd: str = "hologram build",
+                 langs: set[str] | None = None, private_sigs: bool = False,
+                 behaviors: bool = False,
+                 config: ProjectConfig | None = None) -> str:
+    if config is None:
+        config = default_config()
+    return _build_digest(
+        root,
+        regen_cmd,
+        langs,
+        private_sigs,
+        behaviors,
+        config,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2632,13 +2709,28 @@ def run_cli(argv: list[str] | None = None) -> int:
         langs = {language.value for language in config.languages}
     out_path = (args.out or root / "PROJECT_DIGEST.md").resolve()
 
+    freshness_scan: scan.ScanResult | None = None
+    fresh = False
+    if args.cmd == "check" or (
+        args.cmd == "build" and args.if_stale
+    ):
+        effective_config = _effective_config(config, langs)
+        freshness_scan = scan.scan_project(root, effective_config)
+        current_state = _state_hash(
+            root,
+            config,
+            langs,
+            private_sigs=args.private,
+            behaviors=args.behaviors,
+            scan_result=freshness_scan,
+        )
+        fresh = _digest_state(out_path) == current_state
+
     if args.cmd == "check":
-        fresh = _digest_state(out_path) == _state_hash(root, config, langs)
         if not args.quiet:
             print(f"{out_path}: {'fresh' if fresh else 'stale or missing'}")
         return 0 if fresh else 1
-    if args.cmd == "build" and args.if_stale \
-            and _digest_state(out_path) == _state_hash(root, config, langs):
+    if args.cmd == "build" and args.if_stale and fresh:
         if not args.quiet:
             print(f"{out_path}: fresh, skipping rebuild")
         return 0
@@ -2657,12 +2749,14 @@ def run_cli(argv: list[str] | None = None) -> int:
                     wt,
                     langs=langs,
                     private_sigs=args.private,
+                    behaviors=args.behaviors,
                     config=config,
                 )
                 new = build_digest(
                     root,
                     langs=langs,
                     private_sigs=args.private,
+                    behaviors=args.behaviors,
                     config=config,
                 )
             finally:
@@ -2677,14 +2771,35 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if args.cmd == "init":
         _install_hooks(root, args.quiet, langs, embed=args.embed)
-    digest = build_digest(root,
-                          regen_cmd=_digest_regen_command(
-                              root, out_path, langs, args.private,
-                              args.behaviors, args.embed,
-                              args.embed_max_tokens,
-                          ),
-                          langs=langs, private_sigs=args.private,
-                          behaviors=args.behaviors, config=config)
+    regen_cmd = _digest_regen_command(
+        root,
+        out_path,
+        langs,
+        args.private,
+        args.behaviors,
+        args.embed,
+        args.embed_max_tokens,
+    )
+    if args.cmd == "build" and args.if_stale:
+        assert freshness_scan is not None
+        digest = _build_digest(
+            root,
+            regen_cmd,
+            langs,
+            args.private,
+            args.behaviors,
+            config,
+            scan_result=freshness_scan,
+        )
+    else:
+        digest = build_digest(
+            root,
+            regen_cmd=regen_cmd,
+            langs=langs,
+            private_sigs=args.private,
+            behaviors=args.behaviors,
+            config=config,
+        )
     out_path.write_text(digest)
     if not args.quiet:
         print(f"{out_path} written: {estimate_tokens(digest)} tokens")
