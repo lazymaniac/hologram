@@ -27,6 +27,11 @@ from hologram.model import (
 
 
 class ModelTests(unittest.TestCase):
+    def test_source_span_rejects_non_normalized_file_paths(self) -> None:
+        for file in ("./a.py", "a//b.py", "a/./b.py"):
+            with self.subTest(file=file), self.assertRaises(ValueError):
+                SourceSpan(file, 1, 0, 1, 0)
+
     def test_symbol_id_is_line_independent(self) -> None:
         symbol_id = SymbolId(
             Language.JAVA,
@@ -64,6 +69,20 @@ class ModelTests(unittest.TestCase):
         self.assertEqual("price = 10\n", source.text)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             source.raw = b"price = 20\n"
+
+    def test_source_snapshot_text_strictly_decodes_utf8(self) -> None:
+        raw = b"\xff"
+        source = SourceFile(
+            Path("/repo/f.py"),
+            "f.py",
+            Language.PYTHON,
+            SourceRole.PRODUCTION,
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+        )
+
+        with self.assertRaises(UnicodeDecodeError):
+            _ = source.text
 
     def test_body_span_retains_source_for_later_analysis(self) -> None:
         owner = SymbolId(
@@ -120,9 +139,20 @@ class ModelTests(unittest.TestCase):
             )
             for line in range(1, 15)
         )
+        raw = b""
+        source = SourceFile(
+            Path("/repo/f.py"),
+            "f.py",
+            Language.PYTHON,
+            SourceRole.PRODUCTION,
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+        )
+        file_ir = FileIR(source, calls=calls)
 
-        self.assertEqual(14, len(calls))
-        self.assertEqual("call_14", calls[-1].name)
+        self.assertEqual(calls, file_ir.calls)
+        self.assertEqual(14, len(file_ir.calls))
+        self.assertEqual("call_14", file_ir.calls[-1].name)
 
     def test_dynamic_reference_keeps_context_and_confidence(self) -> None:
         owner = SymbolId(

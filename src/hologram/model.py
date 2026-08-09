@@ -107,6 +107,7 @@ def _validate_relative_file(file: str) -> None:
         or path.is_absolute()
         or ".." in path.parts
         or "\\" in file
+        or file != path.as_posix()
     ):
         raise ValueError("file must be a normalized relative POSIX path")
 
