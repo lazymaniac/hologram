@@ -20,7 +20,9 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-HOLOGRAM = Path(__file__).resolve().parents[1] / "hologram.py"
+
+def _hologram_command(*args: str) -> list[str]:
+    return [sys.executable, "-m", "hologram", *args]
 
 
 @dataclass
@@ -187,13 +189,13 @@ def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
     existing = claude_path.read_text() if claude_path.exists() else ""
     claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
     if condition == "A":
-        subprocess.run([sys.executable, str(HOLOGRAM), "build",
-                        "--root", str(ws), "--quiet"], check=True)
+        subprocess.run(_hologram_command("build")
+                       + ["--root", str(ws), "--quiet"], check=True)
         claude_md += "\n" + _AGENT_SNIPPET
     claude_path.write_text(claude_md)
     if condition == "C":
-        subprocess.run([sys.executable, str(HOLOGRAM), "build",
-                        "--root", str(ws), "--embed", "--quiet"], check=True)
+        subprocess.run(_hologram_command("build")
+                       + ["--root", str(ws), "--embed", "--quiet"], check=True)
     subprocess.run(["git", "-C", str(ws), "add", "-A"],
                    check=True, capture_output=True)
     subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",
@@ -221,8 +223,8 @@ def claude_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
 
 def _digest_of(ws: Path) -> str:
     out = ws / ".bench-digest.md"
-    subprocess.run([sys.executable, str(HOLOGRAM), "build", "--root", str(ws),
-                    "--out", str(out), "--quiet"], check=True)
+    subprocess.run(_hologram_command("build")
+                   + ["--root", str(ws), "--out", str(out), "--quiet"], check=True)
     text = out.read_text()
     out.unlink()
     return text

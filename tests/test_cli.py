@@ -54,7 +54,8 @@ class InitHooksTest(unittest.TestCase):
             hook = repo / ".git" / "hooks" / "post-commit"
             self.assertTrue(hook.exists())
             content = hook.read_text()
-            self.assertEqual(content.count("hologram.py"), 1)
+            self.assertEqual(content.count("-m hologram"), 1)
+            self.assertNotIn("hologram.py", content)
             gitignore = (repo / ".gitignore").read_text()
             self.assertEqual(gitignore.count("PROJECT_DIGEST.md"), 1)
 
@@ -109,12 +110,10 @@ class BootstrapTest(unittest.TestCase):
 
 
 class HookPythonSelectionTest(unittest.TestCase):
-    def test_hook_uses_tool_venv_python_when_present(self):
+    def test_hook_uses_current_python(self):
         from hologram import _hook_python
-        tool_dir = Path(__file__).resolve().parents[1]
-        venv_py = tool_dir / ".venv" / "bin" / "python"
-        expected = str(venv_py) if venv_py.exists() else "python3"
-        self.assertEqual(_hook_python(), expected)
+
+        self.assertEqual(_hook_python(), sys.executable)
 
 
 if __name__ == "__main__":

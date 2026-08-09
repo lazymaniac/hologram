@@ -5,10 +5,9 @@ it: every type, every signature, every relationship, and who calls what. Give th
 file to an LLM agent and it knows the shape of your project without grepping through
 it first.
 
-It's a single Python file. It installs its own parsers the first time it needs them,
-and git hooks keep the output up to date after every commit. Generation is fully
-deterministic — no LLM involved — so the same code always produces the same digest,
-and a digest diff always means the code changed.
+It's an installable Python package, and git hooks keep the output up to date after
+every commit. Generation is fully deterministic — no LLM involved — so the same code
+always produces the same digest, and a digest diff always means the code changed.
 
 The name: like a hologram, every fragment of the output carries the shape of the
 whole. For scale: a real 77,000-line Java project with 727 files compresses to about
@@ -35,7 +34,7 @@ whole. For scale: a real 77,000-line Java project with 727 files compresses to a
 The digest of a small Java fixture:
 
 ```
-# javamini @30ab133 2026-08-08 · 200 LOC · state ca50854aec7c · regen: …/hologram.py build
+# javamini @30ab133 2026-08-08 · 200 LOC · state ca50854aec7c · regen: hologram build
 · legend: (C)lass (R)ecord (I)nterface (E)num (F)n (T)ype-alias · (R: …)=components · …
 · deps .→ids | engine→ids
 src
@@ -95,32 +94,30 @@ any LLM:
 
 ## Getting started
 
-Clone it anywhere and point it at a repo:
+Clone it anywhere, install it with the optional parsers, and point it at a repo:
 
 ```bash
-python3 ~/workspace/hologram/hologram.py init --root /path/to/repo
+python3 -m pip install -e '.[parsers]'
+hologram init --root /path/to/repo
 ```
 
 That installs git hooks, adds a `.gitignore` entry, and writes the first
 `PROJECT_DIGEST.md` at the repo root. From then on the hooks rebuild it after every
 commit, merge, and checkout. You never touch it again.
 
-The first time it meets a language it has no parser for, it offers to set one up: it
-creates a `.venv` next to itself and pip-installs the right tree-sitter grammar. You
-type `y` once. Every later run finds that venv on its own, so plain
-`python3 hologram.py …` always works. Python-only repos skip all of this — the
-standard library is enough.
+The `parsers` extra installs every supported tree-sitter grammar. Python-only repos
+can omit it because the standard library is enough.
 
 Everything it can do:
 
 ```bash
-hologram.py build --root .                                 # manual rebuild
-hologram.py build --root . --lang java --out DIGEST.md     # limit languages, pick the filename
-hologram.py build --root . --private                       # full signatures for private members
-hologram.py build --root . --behaviors                     # include test names as behavior specs
-hologram.py build --root . --if-stale                      # rebuild only if the code changed
-hologram.py check --root .                                 # is the digest current? exit 0 yes / 1 no
-hologram.py diff HEAD~3 --root .                           # how did the API change since then?
+hologram build --root .                                 # manual rebuild
+hologram build --root . --lang java --out DIGEST.md     # limit languages, pick the filename
+hologram build --root . --private                       # full signatures for private members
+hologram build --root . --behaviors                     # include test names as behavior specs
+hologram build --root . --if-stale                      # rebuild only if the code changed
+hologram check --root .                                 # is the digest current? exit 0 yes / 1 no
+hologram diff HEAD~3 --root .                           # how did the API change since then?
 ```
 
 ## Staying fresh
@@ -144,7 +141,7 @@ about this tool.
 **Embed it (recommended) — the holistic view, always in context:**
 
 ```bash
-hologram.py init --root /path/to/repo --embed
+hologram init --root /path/to/repo --embed
 ```
 
 This injects the digest directly into `CLAUDE.md` between managed markers, and

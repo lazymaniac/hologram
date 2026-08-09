@@ -2439,60 +2439,22 @@ def embed_digest(claude_path: Path, digest: str, max_tokens: int = 30000) -> str
     return tier
 
 
-# ---------------------------------------------------------------------------
-# Self-bootstrap: get tree-sitter grammars without manual setup
-# ---------------------------------------------------------------------------
-
-def _venv_python() -> Path:
-    return Path(__file__).resolve().parent / ".venv" / "bin" / "python"
-
-
 def _missing_parser_langs(files: list[Path]) -> set[str]:
     """Languages present in `files` that need a tree-sitter parser we don't have."""
     return {l for l in {detect_language(f) for f in files}
             if l in _GRAMMAR_MODULES and not has_parser(l)}
 
 
-def _venv_has_grammars(venv_py: Path, langs: set[str]) -> bool:
-    mods = sorted({_GRAMMAR_MODULES[l][0] for l in langs})
-    r = subprocess.run([str(venv_py), "-c", "import " + ",".join(mods)],
-                       capture_output=True)
-    return r.returncode == 0
-
-
 def _bootstrap_or_die(missing: set[str], argv: list[str]) -> None:
-    """Make parsers for `missing` available: re-exec into the tool's venv when it has
-    the grammars, else offer to create the venv and pip-install them (interactive only).
-    On success the process is replaced; otherwise exits with manual instructions."""
-    venv_py = _venv_python()
-    venv_dir = venv_py.parent.parent
-    script = str(Path(__file__).resolve())
-    pkgs = _grammar_pkgs(missing)
-    manual = (f"missing tree-sitter parser for: {', '.join(sorted(missing))}\n"
-              f"install with: python3 -m venv {venv_dir} && "
-              f"{venv_py} -m pip install {' '.join(pkgs)}")
-
-    def _reexec() -> None:
-        os.environ["HOLOGRAM_BOOTSTRAPPED"] = "1"
-        os.execv(str(venv_py), [str(venv_py), script, *argv])
-
-    if os.environ.get("HOLOGRAM_BOOTSTRAPPED"):
-        raise SystemExit(manual)  # second attempt failed too; don't exec-loop
-    # NB: compare unresolved paths — the venv python is a symlink to the base
-    # interpreter, but only invoking it via the venv path selects the venv's packages.
-    if (venv_py.exists() and Path(sys.executable) != venv_py
-            and _venv_has_grammars(venv_py, missing)):
-        _reexec()
-    if not (sys.stdin.isatty() and sys.stderr.isatty()):
-        raise SystemExit(manual)
-    reply = input(f"hologram: no parser for {', '.join(sorted(missing))}; "
-                  f"install {' '.join(pkgs)} into {venv_dir}? [Y/n] ")
-    if reply.strip().lower() not in ("", "y", "yes"):
-        raise SystemExit(manual)
-    if not venv_py.exists():
-        subprocess.run([sys.executable, "-m", "venv", str(venv_dir)], check=True)
-    subprocess.run([str(venv_py), "-m", "pip", "install", "--quiet", *pkgs], check=True)
-    _reexec()
+    """Exit with installation guidance when requested parsers are unavailable."""
+    del argv
+    packages = " ".join(_grammar_pkgs(missing))
+    raise SystemExit(
+        f"missing tree-sitter parser for: {', '.join(sorted(missing))}\n"
+        f"install with: {sys.executable} -m pip install "
+        "'hologram-code-map[parsers]'\n"
+        f"required packages: {packages}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2503,17 +2465,15 @@ HOOK_NAMES = ("post-commit", "post-merge", "post-checkout")
 
 
 def _hook_python() -> str:
-    """The tool's own venv python when present (tree-sitter grammars), else python3."""
-    venv_py = _venv_python()
-    return str(venv_py) if venv_py.exists() else "python3"
+    """Return the interpreter used to generate repository hooks."""
+    return sys.executable
 
 
 def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None,
                    embed: bool = False) -> None:
-    script = Path(__file__).resolve()
     lang_args = "".join(f' --lang {l}' for l in sorted(langs)) if langs else ""
     embed_arg = " --embed" if embed else ""
-    hook_line = (f'{_hook_python()} "{script}" build --root "{repo.resolve()}"'
+    hook_line = (f'{_hook_python()} -m hologram build --root "{repo.resolve()}"'
                  f'{lang_args}{embed_arg} --quiet || true\n')
     hooks_dir = repo / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -2521,7 +2481,7 @@ def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None,
         hook = hooks_dir / name
         if hook.exists():
             content = hook.read_text()
-            if str(script) in content:
+            if hook_line.rstrip("\n") in content:
                 continue
             hook.write_text(content.rstrip("\n") + "\n" + hook_line)
         else:

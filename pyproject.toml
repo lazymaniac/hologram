@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hologram-code-map"
+version = "0.2.0"
+description = "Deterministic whole-codebase symbol maps for coding agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.optional-dependencies]
+parsers = [
+    "tree-sitter==0.26.0",
+    "tree-sitter-c==0.24.2",
+    "tree-sitter-c-sharp==0.23.5",
+    "tree-sitter-cpp==0.23.4",
+    "tree-sitter-go==0.25.0",
+    "tree-sitter-html==0.23.2",
+    "tree-sitter-java==0.23.5",
+    "tree-sitter-kotlin==1.1.0",
+    "tree-sitter-lua==0.5.0",
+    "tree-sitter-rust==0.24.2",
+    "tree-sitter-typescript==0.23.2",
+]
+dev = [
+    "mypy>=1.17,<2",
+    "ruff>=0.12,<1",
+    "tree-sitter==0.26.0",
+    "tree-sitter-c==0.24.2",
+    "tree-sitter-c-sharp==0.23.5",
+    "tree-sitter-cpp==0.23.4",
+    "tree-sitter-go==0.25.0",
+    "tree-sitter-html==0.23.2",
+    "tree-sitter-java==0.23.5",
+    "tree-sitter-kotlin==1.1.0",
+    "tree-sitter-lua==0.5.0",
+    "tree-sitter-rust==0.24.2",
+    "tree-sitter-typescript==0.23.2",
+]
+
+[project.scripts]
+hologram = "hologram.legacy:run_cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
