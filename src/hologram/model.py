@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -104,6 +105,7 @@ def _validate_relative_file(file: str) -> None:
     path = PurePosixPath(file)
     if (
         not file
+        or not path.parts
         or path.is_absolute()
         or ".." in path.parts
         or "\\" in file
@@ -114,6 +116,8 @@ def _validate_relative_file(file: str) -> None:
 
 @dataclass(frozen=True, slots=True, order=True)
 class SourceSpan:
+    """One-based lines, zero-based UTF-8 byte columns, and end-exclusive endpoints."""
+
     file: str
     start_line: int
     start_column: int
@@ -147,6 +151,7 @@ class SymbolId:
     signature_key: str
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "container_path", tuple(self.container_path))
         _validate_relative_file(self.file)
         if not self.name:
             raise ValueError("symbol name must not be empty")
@@ -162,11 +167,14 @@ class SourceFile:
     sha256: str
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "raw", bytes(self.raw))
         _validate_relative_file(self.file)
         if len(self.sha256) != 64 or any(
             character not in "0123456789abcdef" for character in self.sha256
         ):
             raise ValueError("sha256 must be exactly 64 lowercase hexadecimal digits")
+        if self.sha256 != hashlib.sha256(self.raw).hexdigest():
+            raise ValueError("sha256 must match raw source bytes")
 
     @property
     def text(self) -> str:
@@ -223,6 +231,9 @@ class BodyIR:
     span: SourceSpan
     events: tuple[BodyEvent, ...]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "events", tuple(self.events))
+
 
 @dataclass(frozen=True, slots=True)
 class Symbol:
@@ -240,6 +251,16 @@ class Symbol:
     annotations: tuple[str, ...] = ()
     modifiers: tuple[str, ...] = ()
     body_lines: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "params", tuple(self.params))
+        object.__setattr__(self, "supers", tuple(self.supers))
+        object.__setattr__(self, "permits", tuple(self.permits))
+        object.__setattr__(self, "raises", tuple(self.raises))
+        object.__setattr__(self, "bindings", tuple(self.bindings))
+        object.__setattr__(self, "components", tuple(self.components))
+        object.__setattr__(self, "annotations", tuple(self.annotations))
+        object.__setattr__(self, "modifiers", tuple(self.modifiers))
 
     @property
     def name(self) -> str:
@@ -285,6 +306,14 @@ class FileIR:
     extractor_version: str = ""
     parser_version: str | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbols", tuple(self.symbols))
+        object.__setattr__(self, "calls", tuple(self.calls))
+        object.__setattr__(self, "imports", tuple(self.imports))
+        object.__setattr__(self, "references", tuple(self.references))
+        object.__setattr__(self, "bodies", tuple(self.bodies))
+        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+
 
 @dataclass(frozen=True, slots=True)
 class ProjectIR:
@@ -292,3 +321,7 @@ class ProjectIR:
     files: tuple[FileIR, ...]
     diagnostics: tuple[Diagnostic, ...]
     complete: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "files", tuple(self.files))
+        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))

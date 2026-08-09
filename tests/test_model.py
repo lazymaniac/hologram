@@ -3,13 +3,20 @@ import hashlib
 import unittest
 from pathlib import Path
 
+import hologram
+from hologram import legacy as legacy_model
+from hologram import model as canonical_model
 from hologram.model import (
+    Binding,
     BodyEvent,
     BodyEventKind,
     BodyIR,
     CallKind,
     CallRef,
+    Diagnostic,
+    DiagnosticSeverity,
     FileIR,
+    ImportRef,
     Language,
     ProjectIR,
     ReferenceConfidence,
@@ -27,10 +34,21 @@ from hologram.model import (
 
 
 class ModelTests(unittest.TestCase):
+    def test_root_exports_distinguish_legacy_and_canonical_symbols(self) -> None:
+        self.assertIs(legacy_model.Symbol, hologram.Symbol)
+        self.assertIs(canonical_model.Symbol, hologram.CanonicalSymbol)
+
     def test_source_span_rejects_non_normalized_file_paths(self) -> None:
-        for file in ("./a.py", "a//b.py", "a/./b.py"):
+        for file in (".", "./a.py", "a//b.py", "a/./b.py"):
             with self.subTest(file=file), self.assertRaises(ValueError):
                 SourceSpan(file, 1, 0, 1, 0)
+
+    def test_source_span_documents_coordinate_semantics(self) -> None:
+        self.assertEqual(
+            "One-based lines, zero-based UTF-8 byte columns, and end-exclusive "
+            "endpoints.",
+            SourceSpan.__doc__,
+        )
 
     def test_symbol_id_is_line_independent(self) -> None:
         symbol_id = SymbolId(
@@ -55,8 +73,24 @@ class ModelTests(unittest.TestCase):
 
         self.assertEqual(symbol.id, moved_symbol.id)
 
+    def test_symbol_id_owns_immutable_container_path(self) -> None:
+        container_path = ["shop"]
+        symbol_id = SymbolId(
+            Language.JAVA,
+            "src/shop/Price.java",
+            container_path,
+            SymbolKind.METHOD,
+            "quote",
+            "(OrderId)",
+        )
+
+        container_path.append("Price")
+
+        self.assertEqual(("shop",), symbol_id.container_path)
+        self.assertIsInstance(hash(symbol_id), int)
+
     def test_source_snapshot_owns_immutable_bytes(self) -> None:
-        raw = "price = 10\n".encode()
+        raw = bytearray(b"price = 10\n")
         source = SourceFile(
             Path("/repo/f.py"),
             "f.py",
@@ -66,7 +100,11 @@ class ModelTests(unittest.TestCase):
             hashlib.sha256(raw).hexdigest(),
         )
 
+        raw[:] = b"price = 20\n"
+
+        self.assertEqual(b"price = 10\n", source.raw)
         self.assertEqual("price = 10\n", source.text)
+        self.assertIsInstance(hash(source), int)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             source.raw = b"price = 20\n"
 
@@ -83,6 +121,38 @@ class ModelTests(unittest.TestCase):
 
         with self.assertRaises(UnicodeDecodeError):
             _ = source.text
+
+    def test_source_snapshot_rejects_invalid_sha256_format(self) -> None:
+        raw = b"price = 10\n"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "^sha256 must be exactly 64 lowercase hexadecimal digits$",
+        ):
+            SourceFile(
+                Path("/repo/f.py"),
+                "f.py",
+                Language.PYTHON,
+                SourceRole.PRODUCTION,
+                raw,
+                "A" * 64,
+            )
+
+    def test_source_snapshot_rejects_mismatched_sha256(self) -> None:
+        raw = b"price = 10\n"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "^sha256 must match raw source bytes$",
+        ):
+            SourceFile(
+                Path("/repo/f.py"),
+                "f.py",
+                Language.PYTHON,
+                SourceRole.PRODUCTION,
+                raw,
+                "0" * 64,
+            )
 
     def test_body_span_retains_source_for_later_analysis(self) -> None:
         owner = SymbolId(
@@ -119,6 +189,25 @@ class ModelTests(unittest.TestCase):
         self.assertIs(raw, project.files[0].source.raw)
         self.assertEqual(body.span, project.files[0].bodies[0].span)
 
+    def test_body_ir_owns_immutable_events(self) -> None:
+        owner = SymbolId(
+            Language.PYTHON,
+            "f.py",
+            (),
+            SymbolKind.FUNCTION,
+            "price",
+            "()",
+        )
+        span = SourceSpan("f.py", 1, 0, 1, 10)
+        event = BodyEvent(BodyEventKind.LITERAL, "<number>", span)
+        events = [event]
+        body = BodyIR(owner, span, events)
+
+        events.clear()
+
+        self.assertEqual((event,), body.events)
+        self.assertIsInstance(hash(body), int)
+
     def test_raw_call_is_not_capped_or_resolved_in_ir(self) -> None:
         caller = SymbolId(
             Language.PYTHON,
@@ -153,6 +242,130 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(calls, file_ir.calls)
         self.assertEqual(14, len(file_ir.calls))
         self.assertEqual("call_14", file_ir.calls[-1].name)
+
+    def test_symbol_owns_immutable_tuple_fields(self) -> None:
+        symbol_id = SymbolId(
+            Language.JAVA,
+            "src/shop/Price.java",
+            ("shop", "Price"),
+            SymbolKind.METHOD,
+            "quote",
+            "(OrderId)",
+        )
+        mutable_fields = {
+            "params": ["OrderId"],
+            "supers": ["BasePrice"],
+            "permits": ["RetailPrice"],
+            "raises": ["PricingError"],
+            "bindings": [Binding("order_id", "OrderId")],
+            "components": ["amount"],
+            "annotations": ["cached"],
+            "modifiers": ["final"],
+        }
+        expected = {
+            name: tuple(values) for name, values in mutable_fields.items()
+        }
+        symbol = Symbol(
+            symbol_id,
+            SourceSpan("src/shop/Price.java", 8, 4, 10, 5),
+            Visibility.PUBLIC,
+            "quote(OrderId)",
+            **mutable_fields,
+        )
+
+        for values in mutable_fields.values():
+            values.clear()
+
+        for name, value in expected.items():
+            with self.subTest(field=name):
+                self.assertEqual(value, getattr(symbol, name))
+        self.assertIsInstance(hash(symbol), int)
+
+    def test_file_ir_owns_immutable_tuple_fields(self) -> None:
+        raw = b"pass\n"
+        source = SourceFile(
+            Path("/repo/f.py"),
+            "f.py",
+            Language.PYTHON,
+            SourceRole.PRODUCTION,
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+        )
+        owner = SymbolId(
+            Language.PYTHON,
+            "f.py",
+            (),
+            SymbolKind.FUNCTION,
+            "run",
+            "()",
+        )
+        span = SourceSpan("f.py", 1, 0, 1, 4)
+        symbol = Symbol(owner, span, Visibility.PUBLIC, "run()")
+        call = CallRef(owner, span, "work", None, CallKind.CALL, 0)
+        imported = ImportRef(span, "work", None, None)
+        reference = ReferenceRef(
+            owner,
+            span,
+            "work",
+            None,
+            ReferenceKind.NAME,
+            ReferenceContext.CODE,
+            ReferenceConfidence.DEFINITE,
+        )
+        body = BodyIR(owner, span, ())
+        diagnostic = Diagnostic(
+            "parse-warning",
+            DiagnosticSeverity.WARNING,
+            "partial parse",
+            span,
+        )
+        mutable_fields = {
+            "symbols": [symbol],
+            "calls": [call],
+            "imports": [imported],
+            "references": [reference],
+            "bodies": [body],
+            "diagnostics": [diagnostic],
+        }
+        expected = {
+            name: tuple(values) for name, values in mutable_fields.items()
+        }
+        file_ir = FileIR(source, module="f", **mutable_fields)
+
+        for values in mutable_fields.values():
+            values.clear()
+
+        for name, value in expected.items():
+            with self.subTest(field=name):
+                self.assertEqual(value, getattr(file_ir, name))
+        self.assertIsInstance(hash(file_ir), int)
+
+    def test_project_ir_owns_immutable_tuple_fields(self) -> None:
+        raw = b"pass\n"
+        source = SourceFile(
+            Path("/repo/f.py"),
+            "f.py",
+            Language.PYTHON,
+            SourceRole.PRODUCTION,
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+        )
+        file_ir = FileIR(source)
+        diagnostic = Diagnostic(
+            "project-warning",
+            DiagnosticSeverity.WARNING,
+            "partial project",
+        )
+        files = [file_ir]
+        diagnostics = [diagnostic]
+        project = ProjectIR(Path("/repo"), files, diagnostics, False)
+
+        files.clear()
+        diagnostics.clear()
+
+        self.assertEqual((file_ir,), project.files)
+        self.assertEqual((diagnostic,), project.diagnostics)
+        self.assertIsInstance(hash(project), int)
 
     def test_dynamic_reference_keeps_context_and_confidence(self) -> None:
         owner = SymbolId(
