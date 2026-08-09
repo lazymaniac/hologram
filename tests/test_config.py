@@ -338,7 +338,7 @@ output = "digest.md"
                     self.assertEqual(manifest.readlink(), Path(target.name))
                 self.assertEqual(target.read_bytes(), b"target-owned")
 
-    def test_atomic_default_manifest_removes_partial_file_and_closes_fd(self):
+    def test_atomic_default_manifest_leaves_partial_file_and_closes_fd(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             manifest = root / CONFIG_NAME
@@ -359,9 +359,60 @@ output = "digest.md"
                 with self.assertRaisesRegex(OSError, "injected write failure"):
                     config_module.create_default_manifest(root)
 
-            self.assertFalse(manifest.exists())
+            self.assertEqual(
+                manifest.read_bytes(),
+                canonical_config_bytes(default_config())[:5],
+            )
             with self.assertRaises(OSError):
                 os.fstat(captured_fd[0])
+
+    def test_atomic_default_manifest_never_unlinks_raced_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / CONFIG_NAME
+            replacement = b"competitor-owned"
+            real_lstat = type(manifest).lstat
+            real_close = os.close
+            replacement_installed = False
+
+            def install_replacement() -> None:
+                nonlocal replacement_installed
+                manifest.unlink()
+                manifest.write_bytes(replacement)
+                replacement_installed = True
+
+            def racing_lstat(path):
+                owned_stat = real_lstat(path)
+                install_replacement()
+                return owned_stat
+
+            def racing_close(fd):
+                if not replacement_installed:
+                    install_replacement()
+                return real_close(fd)
+
+            with (
+                mock.patch.object(
+                    config_module.os,
+                    "write",
+                    side_effect=OSError("injected write failure"),
+                ),
+                mock.patch.object(
+                    type(manifest),
+                    "lstat",
+                    autospec=True,
+                    side_effect=racing_lstat,
+                ),
+                mock.patch.object(
+                    config_module.os,
+                    "close",
+                    side_effect=racing_close,
+                ),
+            ):
+                with self.assertRaisesRegex(OSError, "injected write failure"):
+                    config_module.create_default_manifest(root)
+
+            self.assertEqual(manifest.read_bytes(), replacement)
 
     def test_project_config_owns_caller_lists(self):
         agents = ["claude"]

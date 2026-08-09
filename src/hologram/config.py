@@ -309,31 +309,13 @@ def create_default_manifest(root: Path) -> bool:
     except FileExistsError:
         return False
 
-    created = None
     try:
-        created = os.fstat(fd)
         remaining = memoryview(canonical_config_bytes(default_config()))
         while remaining:
             written = os.write(fd, remaining)
             if written <= 0:
                 raise OSError(f"failed to write configuration manifest {path}")
             remaining = remaining[written:]
-    except BaseException:
-        try:
-            current = path.lstat()
-        except OSError:
-            current = None
-        if (
-            created is not None
-            and current is not None
-            and current.st_dev == created.st_dev
-            and current.st_ino == created.st_ino
-        ):
-            try:
-                path.unlink()
-            except OSError:
-                pass
-        raise
     finally:
         os.close(fd)
     return True
