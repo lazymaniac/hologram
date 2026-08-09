@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import fnmatch
 import hashlib
 import os
@@ -23,6 +24,25 @@ from .model import (
 
 
 _T = TypeVar("_T")
+
+_SAFE_DESCRIPTOR_READS = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.open in os.supports_dir_fd
+)
+_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+_FILE_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+_READ_CHUNK_SIZE = 1024 * 1024
 
 
 LANGUAGE_BY_SUFFIX: Mapping[str, Language] = MappingProxyType(
@@ -64,6 +84,12 @@ class ScanStatus(StrEnum):
     FAILED = "failed"
 
 
+class _GitProbeStatus(StrEnum):
+    WORKTREE = "worktree"
+    NON_WORKTREE = "non-worktree"
+    INDETERMINATE = "indeterminate"
+
+
 def _own_tuple(value: tuple[_T, ...] | list[_T], field: str) -> tuple[_T, ...]:
     if not isinstance(value, (tuple, list)):
         raise TypeError(f"{field} must be a tuple or list")
@@ -103,6 +129,26 @@ class ScanResult:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _GitProbeResult:
+    status: _GitProbeStatus
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _WalkFailure:
+    path: Path
+    file: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadResult:
+    raw: bytes | None
+    reason: str | None
+    detail: str | None = None
+
+
 def detect_language(path: Path) -> Language | None:
     return LANGUAGE_BY_SUFFIX.get(Path(path).suffix.lower())
 
@@ -130,16 +176,25 @@ def _output_text(output: bytes | str | None) -> str:
     return _output_bytes(output).decode("utf-8", errors="replace")
 
 
-def _is_git_worktree(root: Path) -> bool:
+def _probe_git_worktree(root: Path) -> _GitProbeResult:
+    argv = ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"]
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
+            argv,
             capture_output=True,
             timeout=60,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0 and _output_text(result.stdout).strip() == "true"
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return _GitProbeResult(_GitProbeStatus.INDETERMINATE, str(error))
+
+    stdout = _output_text(result.stdout).strip()
+    stderr = _output_text(result.stderr).strip()
+    if result.returncode == 0 and stdout == "true":
+        return _GitProbeResult(_GitProbeStatus.WORKTREE)
+    if result.returncode != 0 and "not a git repository" in stderr.casefold():
+        return _GitProbeResult(_GitProbeStatus.NON_WORKTREE)
+    detail = stderr or stdout or f"git rev-parse exited {result.returncode}"
+    return _GitProbeResult(_GitProbeStatus.INDETERMINATE, detail)
 
 
 def _git_files(root: Path) -> tuple[list[str] | None, str | None]:
@@ -170,11 +225,34 @@ def _git_files(root: Path) -> tuple[list[str] | None, str | None]:
     return sorted(files), None
 
 
-def _filesystem_files(root: Path) -> list[str]:
+def _walk_failure(root: Path, error: OSError) -> _WalkFailure:
+    filename = error.filename
+    if filename is not None:
+        try:
+            path = Path(filename)
+            if not path.is_absolute():
+                path = root / path
+            relative = path.relative_to(root)
+            file = PurePosixPath(*relative.parts).as_posix()
+            candidate, unsafe_reason = _candidate_path(root, file)
+            if file not in ("", ".") and unsafe_reason is None:
+                return _WalkFailure(candidate, file, str(error))
+        except (OSError, RuntimeError, TypeError, ValueError):
+            pass
+    return _WalkFailure(root / "<filesystem>", "<filesystem>", str(error))
+
+
+def _filesystem_files(root: Path) -> tuple[list[str], tuple[_WalkFailure, ...]]:
     files: list[str] = []
+    failures: list[_WalkFailure] = []
+
+    def onerror(error: OSError) -> None:
+        failures.append(_walk_failure(root, error))
+
     for dirpath, dirnames, filenames in os.walk(
         root,
         topdown=True,
+        onerror=onerror,
         followlinks=False,
     ):
         dirnames.sort()
@@ -190,7 +268,10 @@ def _filesystem_files(root: Path) -> list[str]:
             path = Path(dirpath) / name
             relative = path.relative_to(root)
             files.append(PurePosixPath(*relative.parts).as_posix())
-    return sorted(set(files))
+    return (
+        sorted(set(files)),
+        tuple(sorted(failures, key=lambda failure: (failure.file, failure.detail))),
+    )
 
 
 def _glob_match(file: str, pattern: str) -> bool:
@@ -289,152 +370,249 @@ def _git_failure(root: Path, detail: str | None) -> ScanResult:
     )
 
 
+def _close_fd(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        # A close failure must not hide the scan/read error already being handled.
+        pass
+
+
+def _open_root_directory(root: Path) -> tuple[int | None, str | None]:
+    if not _SAFE_DESCRIPTOR_READS:
+        return None, "safe descriptor-relative reads are unavailable"
+    try:
+        return os.open(root, _DIRECTORY_OPEN_FLAGS), None
+    except (OSError, NotImplementedError, TypeError) as error:
+        return None, str(error)
+
+
+def _read_failure(error: BaseException) -> _ReadResult:
+    if isinstance(error, OSError):
+        if error.errno == errno.ENOENT:
+            return _ReadResult(None, "missing", str(error))
+        if error.errno in {errno.ELOOP, errno.ENOTDIR}:
+            return _ReadResult(None, "unsafe-path", str(error))
+    return _ReadResult(None, "read-error", str(error))
+
+
+def _read_from_root(root_fd: int, file: str) -> _ReadResult:
+    parts = PurePosixPath(file).parts
+    directory_fds: list[int] = []
+    source_fd: int | None = None
+    current_fd = root_fd
+    try:
+        for part in parts[:-1]:
+            next_fd = os.open(
+                part,
+                _DIRECTORY_OPEN_FLAGS,
+                dir_fd=current_fd,
+            )
+            try:
+                directory_fds.append(next_fd)
+            except BaseException:
+                _close_fd(next_fd)
+                raise
+            current_fd = next_fd
+
+        source_fd = os.open(
+            parts[-1],
+            _FILE_OPEN_FLAGS,
+            dir_fd=current_fd,
+        )
+        source_stat = os.fstat(source_fd)
+        if not stat.S_ISREG(source_stat.st_mode):
+            return _ReadResult(None, "non-regular")
+
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(source_fd, _READ_CHUNK_SIZE)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return _ReadResult(b"".join(chunks), None)
+    except (OSError, NotImplementedError, TypeError) as error:
+        return _read_failure(error)
+    finally:
+        if source_fd is not None:
+            _close_fd(source_fd)
+        for directory_fd in reversed(directory_fds):
+            _close_fd(directory_fd)
+
+
 def scan_project(root: Path, config: ProjectConfig) -> ScanResult:
     root = _resolve_root(root)
-    if _is_git_worktree(root):
+    probe = _probe_git_worktree(root)
+    if probe.status is _GitProbeStatus.INDETERMINATE:
+        return _git_failure(root, probe.detail)
+    if probe.status is _GitProbeStatus.WORKTREE:
         files, detail = _git_files(root)
         if files is None:
             return _git_failure(root, detail)
+        walk_failures: tuple[_WalkFailure, ...] = ()
     else:
-        files = _filesystem_files(root)
+        files, walk_failures = _filesystem_files(root)
 
     entries: list[ScanEntry] = []
     diagnostics: list[Diagnostic] = []
     enabled_languages = frozenset(config.languages)
+    discovery_items = [
+        (file, None) for file in files
+    ] + [
+        (failure.file, failure) for failure in walk_failures
+    ]
+    root_fd: int | None = None
+    root_fd_error: str | None = None
 
-    for file in sorted(files):
-        path, unsafe_reason = _candidate_path(root, file)
-        language = detect_language(PurePosixPath(file))
-
-        if unsafe_reason is not None:
-            entry = ScanEntry(
-                path,
-                file,
-                language,
-                ScanStatus.FAILED,
-                unsafe_reason,
-                None,
-            )
-            entries.append(entry)
-            diagnostics.append(_diagnostic(file, unsafe_reason))
-            continue
-        if language is None:
-            entries.append(
-                ScanEntry(
-                    path,
-                    file,
-                    None,
-                    ScanStatus.EXCLUDED,
-                    "unsupported-language",
-                    None,
+    try:
+        root_fd, root_fd_error = _open_root_directory(root)
+        for file, walk_failure in sorted(
+            discovery_items,
+            key=lambda item: (
+                item[0],
+                "" if item[1] is None else item[1].detail,
+            ),
+        ):
+            if walk_failure is not None:
+                reason = "walk-error"
+                entries.append(
+                    ScanEntry(
+                        walk_failure.path,
+                        walk_failure.file,
+                        None,
+                        ScanStatus.FAILED,
+                        reason,
+                        None,
+                    )
                 )
-            )
-            continue
-        if enabled_languages and language not in enabled_languages:
-            entries.append(
-                ScanEntry(
-                    path,
-                    file,
-                    language,
-                    ScanStatus.EXCLUDED,
-                    "language-disabled",
-                    None,
+                diagnostics.append(
+                    _diagnostic(walk_failure.file, reason, walk_failure.detail)
                 )
-            )
-            continue
-        if not _matches_any(file, config.include):
-            entries.append(
-                ScanEntry(
-                    path,
-                    file,
-                    language,
-                    ScanStatus.EXCLUDED,
-                    "include-miss",
-                    None,
-                )
-            )
-            continue
-        if _matches_any(file, config.exclude):
-            entries.append(
-                ScanEntry(
-                    path,
-                    file,
-                    language,
-                    ScanStatus.EXCLUDED,
-                    "exclude-pattern",
-                    None,
-                )
-            )
-            continue
+                continue
 
-        try:
-            path_stat = path.stat()
-        except FileNotFoundError:
-            reason = "missing"
-            entries.append(
-                ScanEntry(path, file, language, ScanStatus.FAILED, reason, None)
-            )
-            diagnostics.append(_diagnostic(file, reason))
-            continue
-        except OSError as error:
-            reason = "read-error"
-            entries.append(
-                ScanEntry(path, file, language, ScanStatus.FAILED, reason, None)
-            )
-            diagnostics.append(_diagnostic(file, reason, str(error)))
-            continue
-        if not stat.S_ISREG(path_stat.st_mode):
-            reason = "non-regular"
-            entries.append(
-                ScanEntry(path, file, language, ScanStatus.FAILED, reason, None)
-            )
-            diagnostics.append(_diagnostic(file, reason))
-            continue
+            path, unsafe_reason = _candidate_path(root, file)
+            language = detect_language(PurePosixPath(file))
 
-        try:
-            raw = path.read_bytes()
-        except OSError as error:
-            reason = "read-error"
-            entries.append(
-                ScanEntry(path, file, language, ScanStatus.FAILED, reason, None)
-            )
-            diagnostics.append(_diagnostic(file, reason, str(error)))
-            continue
-
-        source = SourceFile(
-            path,
-            file,
-            language,
-            _source_role(file),
-            raw,
-            hashlib.sha256(raw).hexdigest(),
-        )
-        try:
-            raw.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as error:
-            reason = "invalid-utf8"
-            entries.append(
-                ScanEntry(
+            if unsafe_reason is not None:
+                entry = ScanEntry(
                     path,
                     file,
                     language,
                     ScanStatus.FAILED,
-                    reason,
-                    source,
+                    unsafe_reason,
+                    None,
                 )
-            )
-            diagnostics.append(_diagnostic(file, reason, str(error)))
-            continue
+                entries.append(entry)
+                diagnostics.append(_diagnostic(file, unsafe_reason))
+                continue
+            if language is None:
+                entries.append(
+                    ScanEntry(
+                        path,
+                        file,
+                        None,
+                        ScanStatus.EXCLUDED,
+                        "unsupported-language",
+                        None,
+                    )
+                )
+                continue
+            if enabled_languages and language not in enabled_languages:
+                entries.append(
+                    ScanEntry(
+                        path,
+                        file,
+                        language,
+                        ScanStatus.EXCLUDED,
+                        "language-disabled",
+                        None,
+                    )
+                )
+                continue
+            if not _matches_any(file, config.include):
+                entries.append(
+                    ScanEntry(
+                        path,
+                        file,
+                        language,
+                        ScanStatus.EXCLUDED,
+                        "include-miss",
+                        None,
+                    )
+                )
+                continue
+            if _matches_any(file, config.exclude):
+                entries.append(
+                    ScanEntry(
+                        path,
+                        file,
+                        language,
+                        ScanStatus.EXCLUDED,
+                        "exclude-pattern",
+                        None,
+                    )
+                )
+                continue
 
-        entries.append(
-            ScanEntry(
+            if root_fd is None:
+                read_result = _ReadResult(None, "read-error", root_fd_error)
+            else:
+                read_result = _read_from_root(root_fd, file)
+            if read_result.reason is not None:
+                entries.append(
+                    ScanEntry(
+                        path,
+                        file,
+                        language,
+                        ScanStatus.FAILED,
+                        read_result.reason,
+                        None,
+                    )
+                )
+                diagnostics.append(
+                    _diagnostic(file, read_result.reason, read_result.detail)
+                )
+                continue
+
+            raw = read_result.raw
+            assert raw is not None
+            source = SourceFile(
                 path,
                 file,
                 language,
-                ScanStatus.INDEXED,
-                None,
-                source,
+                _source_role(file),
+                raw,
+                hashlib.sha256(raw).hexdigest(),
             )
-        )
+            try:
+                raw.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as error:
+                reason = "invalid-utf8"
+                entries.append(
+                    ScanEntry(
+                        path,
+                        file,
+                        language,
+                        ScanStatus.FAILED,
+                        reason,
+                        source,
+                    )
+                )
+                diagnostics.append(_diagnostic(file, reason, str(error)))
+                continue
+
+            entries.append(
+                ScanEntry(
+                    path,
+                    file,
+                    language,
+                    ScanStatus.INDEXED,
+                    None,
+                    source,
+                )
+            )
+    finally:
+        if root_fd is not None:
+            _close_fd(root_fd)
 
     return ScanResult(entries, diagnostics, not diagnostics)

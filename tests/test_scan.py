@@ -1,4 +1,5 @@
 import dataclasses
+import errno
 import hashlib
 import os
 import subprocess
@@ -226,6 +227,72 @@ class GitDiscoveryTest(unittest.TestCase):
                 )
                 self.assertFalse(result.complete)
 
+    def test_indeterminate_git_probe_fails_closed_without_filesystem_walk(self) -> None:
+        cases = (
+            subprocess.TimeoutExpired(["git", "rev-parse"], 60),
+            OSError("git executable missing"),
+            subprocess.CompletedProcess(
+                ["git", "rev-parse"], 0, stdout=b"unexpected\n", stderr=b""
+            ),
+            subprocess.CompletedProcess(
+                ["git", "rev-parse"],
+                9,
+                stdout=b"",
+                stderr=b"fatal: permission denied",
+            ),
+        )
+        for probe_result in cases:
+            with self.subTest(probe=type(probe_result).__name__), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "fallback.py").write_text("FALLBACK = True\n")
+
+                if isinstance(probe_result, BaseException):
+                    side_effect = probe_result
+                else:
+                    side_effect = None
+                with mock.patch(
+                    "hologram.scan.subprocess.run",
+                    side_effect=side_effect,
+                    return_value=(
+                        None if isinstance(probe_result, BaseException)
+                        else probe_result
+                    ),
+                ), mock.patch(
+                    "hologram.scan.os.walk",
+                    side_effect=AssertionError("indeterminate probe must not walk"),
+                ):
+                    result = scan_project(root, _config(exclude=()))
+
+                self.assertEqual(["<git>"], [entry.file for entry in result.entries])
+                self.assertEqual(ScanStatus.FAILED, result.entries[0].status)
+                self.assertEqual("git-list-failed", result.entries[0].reason)
+                self.assertEqual(
+                    ["scan-git-list-failed"],
+                    [diagnostic.code for diagnostic in result.diagnostics],
+                )
+                self.assertFalse(result.complete)
+
+    def test_recognized_not_git_result_uses_filesystem_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "fallback.py").write_text("FALLBACK = True\n")
+            not_git = subprocess.CompletedProcess(
+                ["git", "rev-parse"],
+                128,
+                stdout=b"",
+                stderr=b"fatal: not a git repository (or any parent): .git\n",
+            )
+
+            with mock.patch(
+                "hologram.scan.subprocess.run",
+                return_value=not_git,
+            ) as run:
+                result = scan_project(root, _config(exclude=()))
+
+            run.assert_called_once()
+            self.assertEqual(["fallback.py"], [source.file for source in result.sources])
+            self.assertTrue(result.complete)
+
 
 class FilesystemDiscoveryTest(unittest.TestCase):
     def test_non_git_fallback_and_relative_posix_sorting(self) -> None:
@@ -351,6 +418,48 @@ class FilesystemDiscoveryTest(unittest.TestCase):
                 with self.subTest(root=root), self.assertRaises(ValueError):
                     scan_project(root, default_config())
 
+    def test_walk_errors_are_failed_ordered_ledger_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "main.py").write_text("MAIN = True\n")
+            not_git = subprocess.CompletedProcess(
+                ["git", "rev-parse"],
+                128,
+                stdout=b"",
+                stderr=b"fatal: not a git repository\n",
+            )
+
+            def walk(
+                selected: Path,
+                *,
+                topdown: bool,
+                onerror,
+                followlinks: bool,
+            ):
+                self.assertEqual(root, selected)
+                self.assertTrue(topdown)
+                self.assertFalse(followlinks)
+                onerror(PermissionError(errno.EACCES, "denied", root / "z-blocked"))
+                onerror(PermissionError(errno.EACCES, "denied", root / "a-blocked"))
+                yield str(root), [], ["main.py"]
+
+            with mock.patch(
+                "hologram.scan.subprocess.run",
+                return_value=not_git,
+            ), mock.patch("hologram.scan.os.walk", side_effect=walk):
+                result = scan_project(root, _config(exclude=()))
+
+            failed = [
+                entry for entry in result.entries if entry.status is ScanStatus.FAILED
+            ]
+            self.assertEqual(["a-blocked", "z-blocked"], [entry.file for entry in failed])
+            self.assertEqual(["walk-error", "walk-error"], [entry.reason for entry in failed])
+            self.assertEqual(
+                ["scan-walk-error", "scan-walk-error"],
+                [diagnostic.code for diagnostic in result.diagnostics],
+            )
+            self.assertFalse(result.complete)
+
 
 class ClassificationTest(unittest.TestCase):
     def test_ledger_records_indexed_excluded_and_unsupported_candidates(self) -> None:
@@ -456,23 +565,29 @@ class SnapshotFailureTest(unittest.TestCase):
             path = root / "svc.py"
             original_raw = b"VALUE = 1\n"
             path.write_bytes(original_raw)
-            real_read_bytes = Path.read_bytes
-            reads = 0
+            real_open = os.open
+            opens = 0
 
-            def counted_read_bytes(candidate: Path) -> bytes:
-                nonlocal reads
-                if candidate == path.resolve():
-                    reads += 1
-                return real_read_bytes(candidate)
+            def counted_open(
+                candidate,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal opens
+                if candidate == "svc.py" and dir_fd is not None:
+                    opens += 1
+                return real_open(candidate, flags, mode, dir_fd=dir_fd)
 
-            with mock.patch.object(Path, "read_bytes", counted_read_bytes):
+            with mock.patch("hologram.scan.os.open", side_effect=counted_open):
                 result = scan_project(root, _config(exclude=()))
             path.write_bytes(b"VALUE = 2\n")
 
             source = result.entries[0].source
             self.assertIsNotNone(source)
             assert source is not None
-            self.assertEqual(1, reads)
+            self.assertEqual(1, opens)
             self.assertEqual(original_raw, source.raw)
             self.assertEqual(hashlib.sha256(original_raw).hexdigest(), source.sha256)
 
@@ -503,14 +618,20 @@ class SnapshotFailureTest(unittest.TestCase):
             root = Path(tmp)
             path = root / "denied.py"
             path.write_text("VALUE = 1\n")
-            real_read_bytes = Path.read_bytes
+            real_open = os.open
 
-            def denied(candidate: Path) -> bytes:
-                if candidate == path.resolve():
-                    raise OSError("permission denied")
-                return real_read_bytes(candidate)
+            def denied_open(
+                candidate,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                if candidate == "denied.py" and dir_fd is not None:
+                    raise PermissionError(errno.EACCES, "permission denied")
+                return real_open(candidate, flags, mode, dir_fd=dir_fd)
 
-            with mock.patch.object(Path, "read_bytes", denied):
+            with mock.patch("hologram.scan.os.open", side_effect=denied_open):
                 result = scan_project(root, _config(exclude=()))
 
             entry = result.entries[0]
@@ -522,6 +643,42 @@ class SnapshotFailureTest(unittest.TestCase):
                 [(d.code, d.severity, d.span) for d in result.diagnostics],
             )
             self.assertFalse(result.complete)
+
+    def test_final_open_race_to_outside_symlink_never_reads_outside_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            root = base / "project"
+            root.mkdir()
+            path = root / "svc.py"
+            path.write_bytes(b"SAFE = True\n")
+            outside = base / "outside.py"
+            outside_raw = b"SECRET_OUTSIDE = True\n"
+            outside.write_bytes(outside_raw)
+            real_open = os.open
+            swapped = False
+
+            def racing_open(
+                candidate,
+                flags: int,
+                mode: int = 0o777,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                nonlocal swapped
+                if candidate == "svc.py" and dir_fd is not None:
+                    path.unlink()
+                    path.symlink_to(outside)
+                    swapped = True
+                return real_open(candidate, flags, mode, dir_fd=dir_fd)
+
+            with mock.patch("hologram.scan.os.open", side_effect=racing_open):
+                result = scan_project(root, _config(exclude=()))
+
+            self.assertTrue(swapped)
+            self.assertFalse(result.complete)
+            self.assertEqual(ScanStatus.FAILED, result.entries[0].status)
+            self.assertIsNone(result.entries[0].source)
+            self.assertNotIn(outside_raw, [source.raw for source in result.sources])
 
 
 class LegacyAdapterTest(unittest.TestCase):
