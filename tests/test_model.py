@@ -108,6 +108,44 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             source.raw = b"price = 20\n"
 
+    def test_source_snapshot_owns_memoryview_bytes(self) -> None:
+        backing = bytearray(b"price = 10\n")
+        raw = memoryview(backing)
+        source = SourceFile(
+            Path("/repo/f.py"),
+            "f.py",
+            Language.PYTHON,
+            SourceRole.PRODUCTION,
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+        )
+
+        backing[:] = b"price = 20\n"
+
+        self.assertEqual(b"price = 10\n", source.raw)
+        self.assertIsInstance(hash(source), int)
+
+    def test_source_snapshot_rejects_ambiguous_raw_inputs(self) -> None:
+        cases = (
+            ("integer", 3, b"\0\0\0"),
+            ("string", "raw", b"raw"),
+            ("list", [65, 66], b"AB"),
+        )
+
+        for kind, raw, coerced in cases:
+            with self.subTest(kind=kind), self.assertRaisesRegex(
+                TypeError,
+                "^raw must be bytes, bytearray, or memoryview$",
+            ):
+                SourceFile(
+                    Path("/repo/f.py"),
+                    "f.py",
+                    Language.PYTHON,
+                    SourceRole.PRODUCTION,
+                    raw,
+                    hashlib.sha256(coerced).hexdigest(),
+                )
+
     def test_source_snapshot_text_strictly_decodes_utf8(self) -> None:
         raw = b"\xff"
         source = SourceFile(
@@ -366,6 +404,76 @@ class ModelTests(unittest.TestCase):
         self.assertEqual((file_ir,), project.files)
         self.assertEqual((diagnostic,), project.diagnostics)
         self.assertIsInstance(hash(project), int)
+
+    def test_tuple_fields_reject_ambiguous_values(self) -> None:
+        raw = b"pass\n"
+        source = SourceFile(
+            Path("/repo/f.py"),
+            "f.py",
+            Language.PYTHON,
+            SourceRole.PRODUCTION,
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+        )
+        symbol_id = SymbolId(
+            Language.PYTHON,
+            "f.py",
+            (),
+            SymbolKind.FUNCTION,
+            "run",
+            "()",
+        )
+        span = SourceSpan("f.py", 1, 0, 1, 4)
+        body = BodyIR(symbol_id, span, ())
+        symbol = Symbol(symbol_id, span, Visibility.PUBLIC, "run()")
+        file_ir = FileIR(source)
+        project = ProjectIR(Path("/repo"), (), (), True)
+        tuple_fields = (
+            (symbol_id, "container_path"),
+            (body, "events"),
+            (symbol, "params"),
+            (symbol, "supers"),
+            (symbol, "permits"),
+            (symbol, "raises"),
+            (symbol, "bindings"),
+            (symbol, "components"),
+            (symbol, "annotations"),
+            (symbol, "modifiers"),
+            (file_ir, "symbols"),
+            (file_ir, "calls"),
+            (file_ir, "imports"),
+            (file_ir, "references"),
+            (file_ir, "bodies"),
+            (file_ir, "diagnostics"),
+            (project, "files"),
+            (project, "diagnostics"),
+        )
+        invalid_factories = (
+            ("string", lambda: "scope"),
+            ("bytes", lambda: b"scope"),
+            ("set", lambda: {"scope"}),
+            ("mapping", lambda: {"scope": "value"}),
+            ("generator", lambda: (value for value in ("scope",))),
+            ("integer", lambda: 1),
+        )
+        violations = []
+
+        for record, field in tuple_fields:
+            for kind, factory in invalid_factories:
+                try:
+                    dataclasses.replace(record, **{field: factory()})
+                except TypeError as error:
+                    expected = f"{field} must be a tuple or list"
+                    if str(error) != expected:
+                        violations.append(
+                            f"{type(record).__name__}.{field}/{kind}: {error}"
+                        )
+                else:
+                    violations.append(
+                        f"{type(record).__name__}.{field}/{kind}: accepted"
+                    )
+
+        self.assertEqual([], violations)
 
     def test_dynamic_reference_keeps_context_and_confidence(self) -> None:
         owner = SymbolId(

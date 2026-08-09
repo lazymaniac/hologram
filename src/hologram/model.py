@@ -4,9 +4,12 @@ import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
+from typing import TypeVar
 
 
 IR_SCHEMA_VERSION = 2
+
+_T = TypeVar("_T")
 
 
 class Language(StrEnum):
@@ -101,6 +104,15 @@ class DiagnosticSeverity(StrEnum):
     ERROR = "error"
 
 
+def _own_tuple(
+    value: tuple[_T, ...] | list[_T],
+    field: str,
+) -> tuple[_T, ...]:
+    if not isinstance(value, (tuple, list)):
+        raise TypeError(f"{field} must be a tuple or list")
+    return tuple(value)
+
+
 def _validate_relative_file(file: str) -> None:
     path = PurePosixPath(file)
     if (
@@ -151,7 +163,11 @@ class SymbolId:
     signature_key: str
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "container_path", tuple(self.container_path))
+        object.__setattr__(
+            self,
+            "container_path",
+            _own_tuple(self.container_path, "container_path"),
+        )
         _validate_relative_file(self.file)
         if not self.name:
             raise ValueError("symbol name must not be empty")
@@ -167,6 +183,8 @@ class SourceFile:
     sha256: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.raw, (bytes, bytearray, memoryview)):
+            raise TypeError("raw must be bytes, bytearray, or memoryview")
         object.__setattr__(self, "raw", bytes(self.raw))
         _validate_relative_file(self.file)
         if len(self.sha256) != 64 or any(
@@ -232,7 +250,7 @@ class BodyIR:
     events: tuple[BodyEvent, ...]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "events", tuple(self.events))
+        object.__setattr__(self, "events", _own_tuple(self.events, "events"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,14 +271,26 @@ class Symbol:
     body_lines: int = 0
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "params", tuple(self.params))
-        object.__setattr__(self, "supers", tuple(self.supers))
-        object.__setattr__(self, "permits", tuple(self.permits))
-        object.__setattr__(self, "raises", tuple(self.raises))
-        object.__setattr__(self, "bindings", tuple(self.bindings))
-        object.__setattr__(self, "components", tuple(self.components))
-        object.__setattr__(self, "annotations", tuple(self.annotations))
-        object.__setattr__(self, "modifiers", tuple(self.modifiers))
+        object.__setattr__(self, "params", _own_tuple(self.params, "params"))
+        object.__setattr__(self, "supers", _own_tuple(self.supers, "supers"))
+        object.__setattr__(self, "permits", _own_tuple(self.permits, "permits"))
+        object.__setattr__(self, "raises", _own_tuple(self.raises, "raises"))
+        object.__setattr__(self, "bindings", _own_tuple(self.bindings, "bindings"))
+        object.__setattr__(
+            self,
+            "components",
+            _own_tuple(self.components, "components"),
+        )
+        object.__setattr__(
+            self,
+            "annotations",
+            _own_tuple(self.annotations, "annotations"),
+        )
+        object.__setattr__(
+            self,
+            "modifiers",
+            _own_tuple(self.modifiers, "modifiers"),
+        )
 
     @property
     def name(self) -> str:
@@ -307,12 +337,20 @@ class FileIR:
     parser_version: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "symbols", tuple(self.symbols))
-        object.__setattr__(self, "calls", tuple(self.calls))
-        object.__setattr__(self, "imports", tuple(self.imports))
-        object.__setattr__(self, "references", tuple(self.references))
-        object.__setattr__(self, "bodies", tuple(self.bodies))
-        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        object.__setattr__(self, "symbols", _own_tuple(self.symbols, "symbols"))
+        object.__setattr__(self, "calls", _own_tuple(self.calls, "calls"))
+        object.__setattr__(self, "imports", _own_tuple(self.imports, "imports"))
+        object.__setattr__(
+            self,
+            "references",
+            _own_tuple(self.references, "references"),
+        )
+        object.__setattr__(self, "bodies", _own_tuple(self.bodies, "bodies"))
+        object.__setattr__(
+            self,
+            "diagnostics",
+            _own_tuple(self.diagnostics, "diagnostics"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,5 +361,9 @@ class ProjectIR:
     complete: bool
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "files", tuple(self.files))
-        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        object.__setattr__(self, "files", _own_tuple(self.files, "files"))
+        object.__setattr__(
+            self,
+            "diagnostics",
+            _own_tuple(self.diagnostics, "diagnostics"),
+        )
