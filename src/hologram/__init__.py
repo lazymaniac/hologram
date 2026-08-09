@@ -45,6 +45,12 @@ from .model import (
     Visibility,
 )
 from .scan import ScanEntry, ScanResult, ScanStatus, detect_language, scan_project
+from .state import (
+    STATE_FORMAT_VERSION,
+    StateResult,
+    compute_state,
+    read_digest_state,
+)
 
 __all__ = [
     "CONFIG_NAME",
@@ -68,6 +74,10 @@ __all__ = [
     "ScanStatus",
     "detect_language",
     "scan_project",
+    "STATE_FORMAT_VERSION",
+    "StateResult",
+    "compute_state",
+    "read_digest_state",
     "Binding",
     "BodyEvent",
     "BodyEventKind",

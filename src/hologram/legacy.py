@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import argparse
 import ast
+import dataclasses
 import difflib
-import hashlib
 import re
 import shlex
 import subprocess
@@ -30,8 +30,16 @@ from .config import (
     default_config,
     load_config,
 )
+from .model import Language
+from .state import compute_state, read_digest_state
 
 TYPE_KINDS = ("class", "interface", "record", "enum", "type")
+LEGACY_EXTRACTOR_VERSIONS = {
+    language.value: "legacy-1" for language in Language
+}
+LEGACY_PARSER_VERSIONS = {
+    language.value: "legacy" for language in Language
+}
 
 
 @dataclass
@@ -1780,67 +1788,83 @@ def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol
 # Gather + fan-in
 # ---------------------------------------------------------------------------
 
+def _effective_config(
+    config: ProjectConfig,
+    langs: set[str] | None,
+) -> ProjectConfig:
+    return dataclasses.replace(
+        config,
+        languages=(
+            tuple(Language(value) for value in sorted(langs))
+            if langs is not None
+            else config.languages
+        ),
+    )
+
+
 def _gather(
     root: Path,
-    langs: set[str] | None = None,
-    config: ProjectConfig | None = None,
+    langs: set[str] | None,
+    config: ProjectConfig,
 ):
     """Extract symbols, identifier-token sets per file, and the corpus state hash.
     `langs` restricts to those languages (e.g. {"java"}); None means all."""
     root = root.resolve()
-    config = config or default_config()
-    if langs is None and config.languages:
-        langs = {language.value for language in config.languages}
-    files = scan_files(root, config)
-    if langs is not None:
-        files = [f for f in files if detect_language(f) in langs]
+    effective_config = _effective_config(config, langs)
+    scan_result = scan.scan_project(root, effective_config)
+    if not scan_result.complete:
+        detail = "; ".join(
+            diagnostic.message for diagnostic in scan_result.diagnostics
+        )
+        raise SystemExit(detail or "source scan incomplete")
+
+    files = [source.path for source in scan_result.sources]
+    missing = _missing_parser_langs(files)
+    if missing:
+        _bootstrap_or_die(missing, [])
+
     symbols: list[Symbol] = []
     file_tokens: dict[str, set[str]] = {}
-    state = hashlib.md5()
-    for f in files:
-        rel = str(f.relative_to(root))
-        raw = f.read_bytes()
-        state.update(rel.encode())
-        state.update(hashlib.md5(raw).digest())
-        text = raw.decode(errors="replace")
-        symbols.extend(extract_file(f, root, text))
+    loc = 0
+    for source in scan_result.sources:
+        rel = source.file
+        text = source.text
+        symbols.extend(extract_file(source.path, root, text))
         file_tokens[rel] = set(_IDENT_RE.findall(strip_comments_and_strings(text)))
-    return files, symbols, file_tokens, state.hexdigest()[:12]
+        loc += text.count("\n") + 1
+
+    state = compute_state(
+        root,
+        effective_config,
+        scan_result,
+        extractor_versions=LEGACY_EXTRACTOR_VERSIONS,
+        parser_versions=LEGACY_PARSER_VERSIONS,
+    )
+    return files, symbols, file_tokens, state.value, loc
 
 
 def _state_hash(
     root: Path,
-    config: ProjectConfig | None = None,
+    config: ProjectConfig,
     langs: set[str] | None = None,
 ) -> str:
-    """The corpus hash `_gather` would produce, without parsing anything — cheap
-    freshness probe for `check` / `--if-stale`."""
+    """Compute the versioned state over one immutable scanner snapshot."""
     root = root.resolve()
-    config = config or default_config()
-    if langs is None and config.languages:
-        langs = {language.value for language in config.languages}
-    files = scan_files(root, config)
-    if langs is not None:
-        files = [f for f in files if detect_language(f) in langs]
-    state = hashlib.md5()
-    for f in files:
-        try:
-            raw = f.read_bytes()
-        except OSError:
-            continue
-        state.update(str(f.relative_to(root)).encode())
-        state.update(hashlib.md5(raw).digest())
-    return state.hexdigest()[:12]
+    effective_config = _effective_config(config, langs)
+    scan_result = scan.scan_project(root, effective_config)
+    state = compute_state(
+        root,
+        effective_config,
+        scan_result,
+        extractor_versions=LEGACY_EXTRACTOR_VERSIONS,
+        parser_versions=LEGACY_PARSER_VERSIONS,
+    )
+    return state.value
 
 
 def _digest_state(out_path: Path) -> str | None:
     """The `state` stamp recorded in an existing digest's header, if any."""
-    try:
-        head = out_path.read_text(errors="replace").split("\n", 1)[0]
-    except OSError:
-        return None
-    m = re.search(r"· state (\w{12})", head)
-    return m.group(1) if m else None
+    return read_digest_state(out_path)
 
 
 def _fan_in_from_tokens(symbols: list[Symbol], file_tokens: dict[str, set[str]]) -> dict[str, float]:
@@ -2085,7 +2109,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   regen_cmd: str, scores: dict[str, float] | None = None,
                   private_sigs: bool = False, tested: set[str] | None = None,
                   behaviors: bool = False, state: str = "",
-                  deps: list[str] | None = None) -> str:
+                  deps: list[str] | None = None,
+                  loc: int | None = None) -> str:
     """Signatures only, as a package trie; each function's calls inline after `>`.
     Private members render as packed name lists (`- a,b`), or as full `-`-prefixed
     signatures when `private_sigs` is set.
@@ -2302,8 +2327,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if blines:
             tail = "\n" + "\n".join(blines)
 
-    loc = _total_loc(files)
-    state_part = f" · state {state}" if state else ""
+    if loc is None:
+        loc = _total_loc(files)
+    state_part = f" · state={state}" if state else ""
     head = (f"# {root.name} @{git_head(root)} {date.today().isoformat()} · "
             f"{loc:,} LOC{state_part} · regen: {regen_cmd}\n"
             "· legend: (C)lass (R)ecord (I)nterface (E)num (F)n (T)ype-alias · "
@@ -2328,8 +2354,9 @@ def build_digest(root: Path, regen_cmd: str = "hologram build",
                  langs: set[str] | None = None, private_sigs: bool = False,
                  behaviors: bool = False,
                  config: ProjectConfig | None = None) -> str:
-    config = config or default_config()
-    files, symbols, file_tokens, state = _gather(root, langs, config)
+    if config is None:
+        config = default_config()
+    files, symbols, file_tokens, state, loc = _gather(root, langs, config)
     scores = _fan_in_from_tokens(symbols, file_tokens)
     test_tokens: set[str] = set()
     for rel, toks in file_tokens.items():
@@ -2340,7 +2367,8 @@ def build_digest(root: Path, regen_cmd: str = "hologram build",
               and s.kind in ("fn", "method")} & test_tokens
     deps = _dep_lines(symbols, file_tokens)
     return render_simple(root, symbols, files, regen_cmd, scores, private_sigs,
-                         tested=tested, behaviors=behaviors, state=state, deps=deps)
+                         tested=tested, behaviors=behaviors, state=state,
+                         deps=deps, loc=loc)
 
 
 # ---------------------------------------------------------------------------
@@ -2609,13 +2637,6 @@ def run_cli(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print(f"{out_path}: fresh, skipping rebuild")
         return 0
-
-    files = scan_files(root, config)
-    if langs is not None:
-        files = [f for f in files if detect_language(f) in langs]
-    missing = _missing_parser_langs(files)
-    if missing:
-        _bootstrap_or_die(missing, argv if argv is not None else sys.argv[1:])
 
     if args.cmd == "diff":
         with tempfile.TemporaryDirectory(prefix="hologram-diff-") as tmp:

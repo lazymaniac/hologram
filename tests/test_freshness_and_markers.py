@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -52,6 +53,10 @@ class StateAndCheckTest(unittest.TestCase):
             run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
             self.assertEqual(hologram._digest_state(out),
                              hologram._state_hash(root, default_config()))
+            self.assertRegex(
+                out.read_text(encoding="utf-8").splitlines()[0],
+                r"(?:^|[ ·])state=[0-9a-f]{64}(?=$|[ ·])",
+            )
 
     def test_check_fresh_then_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -79,6 +84,47 @@ class StateAndCheckTest(unittest.TestCase):
             run_cli(["build", "--root", str(root), "--out", str(out),
                      "--if-stale", "--quiet"])
             self.assertNotEqual(out.stat().st_mtime_ns, mtime)
+
+    def test_build_scans_once_and_never_rereads_snapshot_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            source_paths = {
+                (root / "svc.py").resolve(),
+                (root / "test_svc.py").resolve(),
+            }
+            real_scan = hologram.legacy.scan.scan_project
+            real_read_bytes = Path.read_bytes
+            real_read_text = Path.read_text
+            scan_calls = 0
+
+            def counted_scan(*args, **kwargs):
+                nonlocal scan_calls
+                scan_calls += 1
+                return real_scan(*args, **kwargs)
+
+            def guarded_read_bytes(path, *args, **kwargs):
+                if path.resolve() in source_paths:
+                    raise AssertionError(f"source path reread: {path}")
+                return real_read_bytes(path, *args, **kwargs)
+
+            def guarded_read_text(path, *args, **kwargs):
+                if path.resolve() in source_paths:
+                    raise AssertionError(f"source path reread: {path}")
+                return real_read_text(path, *args, **kwargs)
+
+            with (
+                mock.patch.object(
+                    hologram.legacy.scan,
+                    "scan_project",
+                    side_effect=counted_scan,
+                ),
+                mock.patch.object(Path, "read_bytes", new=guarded_read_bytes),
+                mock.patch.object(Path, "read_text", new=guarded_read_text),
+            ):
+                digest = build_digest(root, config=default_config())
+
+        self.assertEqual(scan_calls, 1)
+        self.assertIn("Svc", digest)
 
 
 class TestedMarkerTest(unittest.TestCase):
@@ -140,7 +186,8 @@ class DepsMapTest(unittest.TestCase):
 
 
 class EmbedTest(unittest.TestCase):
-    DIGEST = ("# proj @x 2026-08-08 · 10 LOC · state ab · regen: x\n"
+    DIGEST = ("# proj @x 2026-08-08 · 10 LOC · state=" + "a" * 64
+              + " · regen: x\n"
               "· legend: …\n"
               "src\n"
               " Svc(C)\n"

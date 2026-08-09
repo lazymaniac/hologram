@@ -1,0 +1,132 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+from .config import ProjectConfig, canonical_config_bytes
+from .model import Diagnostic, IR_SCHEMA_VERSION
+from .scan import ScanEntry, ScanResult, ScanStatus
+
+
+STATE_FORMAT_VERSION = "hologram-state-v2"
+STATE_HEADER_RE = re.compile(
+    r"(?:^|[ ·])state=([0-9a-f]{64})(?=$|[ ·])"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class StateResult:
+    value: str
+    diagnostics: tuple[Diagnostic, ...]
+    complete: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.diagnostics, (tuple, list)):
+            raise TypeError("diagnostics must be a tuple or list")
+        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+
+
+def _feed(hasher: "hashlib._Hash", label: str, value: bytes) -> None:
+    label_bytes = label.encode("utf-8")
+    hasher.update(len(label_bytes).to_bytes(4, "big"))
+    hasher.update(label_bytes)
+    hasher.update(len(value).to_bytes(8, "big"))
+    hasher.update(value)
+
+
+def _version_bytes(
+    versions: Mapping[str, str],
+    active_languages: set[str],
+) -> bytes:
+    active_versions = {
+        language: versions[language]
+        for language in sorted(active_languages)
+        if language in versions
+    }
+    return json.dumps(
+        active_versions,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _status_bytes(entry: ScanEntry) -> bytes:
+    return f"{entry.status.value}\0{entry.reason or ''}".encode("utf-8")
+
+
+def compute_state(
+    root: Path,
+    config: ProjectConfig,
+    scan_result: ScanResult,
+    *,
+    extractor_versions: Mapping[str, str],
+    parser_versions: Mapping[str, str],
+) -> StateResult:
+    del root
+    hasher = hashlib.sha256()
+    _feed(hasher, "format", STATE_FORMAT_VERSION.encode("utf-8"))
+    _feed(hasher, "ir-schema", str(IR_SCHEMA_VERSION).encode("ascii"))
+    _feed(hasher, "config", canonical_config_bytes(config))
+
+    included = sorted(
+        (
+            entry
+            for entry in scan_result.entries
+            if entry.status in (ScanStatus.INDEXED, ScanStatus.FAILED)
+            and entry.language is not None
+        ),
+        key=lambda entry: entry.file,
+    )
+    active_languages = {entry.language.value for entry in included}
+    _feed(
+        hasher,
+        "extractors",
+        _version_bytes(extractor_versions, active_languages),
+    )
+    _feed(
+        hasher,
+        "parsers",
+        _version_bytes(parser_versions, active_languages),
+    )
+
+    for entry in included:
+        _feed(hasher, f"entry-status:{entry.file}", _status_bytes(entry))
+
+    git_sentinels = sorted(
+        (
+            entry
+            for entry in scan_result.entries
+            if entry.file == "<git>"
+            and entry.language is None
+            and entry.status is ScanStatus.FAILED
+        ),
+        key=lambda entry: entry.file,
+    )
+    for entry in git_sentinels:
+        _feed(hasher, f"entry-status:{entry.file}", _status_bytes(entry))
+
+    for entry in included:
+        if entry.source is None:
+            continue
+        _feed(hasher, "source-path", entry.source.file.encode("utf-8"))
+        _feed(hasher, "source-bytes", entry.source.raw)
+
+    return StateResult(
+        hasher.hexdigest(),
+        scan_result.diagnostics,
+        scan_result.complete,
+    )
+
+
+def read_digest_state(path: Path) -> str | None:
+    try:
+        content = Path(path).read_text(encoding="utf-8")
+    except (FileNotFoundError, UnicodeDecodeError):
+        return None
+    header = content.split("\n", 1)[0]
+    match = STATE_HEADER_RE.search(header)
+    return match.group(1) if match is not None else None
