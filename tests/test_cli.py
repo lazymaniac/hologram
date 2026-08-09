@@ -6,12 +6,20 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import hologram  # noqa: E402
-from hologram import run_cli  # noqa: E402
+from hologram import (  # noqa: E402
+    CONFIG_NAME,
+    ConfigError,
+    ProjectConfig,
+    default_config,
+    render_config,
+    run_cli,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
@@ -19,6 +27,12 @@ PYMINI_FILE = FIXTURES / "pymini" / "app.py"
 
 needs_java = unittest.skipUnless(hologram.has_parser("java"),
                                  "tree-sitter-java not installed")
+
+
+def write_manifest(root: Path) -> ProjectConfig:
+    config = default_config()
+    (root / CONFIG_NAME).write_text(render_config(config), encoding="utf-8")
+    return config
 
 
 def _make_repo(tmp: Path) -> Path:
@@ -45,8 +59,10 @@ def _hologram_hook_lines(content: str) -> list[str]:
 class CliBuildTest(unittest.TestCase):
     def test_build_writes_digest_file(self):
         with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            write_manifest(repo)
             out = Path(tmp) / "hologram.md"
-            code = run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
+            code = run_cli(["build", "--root", str(repo), "--out", str(out),
                             "--quiet"])
             self.assertEqual(code, 0)
             content = out.read_text()
@@ -55,8 +71,10 @@ class CliBuildTest(unittest.TestCase):
 
     def test_digest_regen_command_uses_module_entrypoint(self):
         with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            write_manifest(repo)
             out = Path(tmp) / "hologram.md"
-            run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
+            run_cli(["build", "--root", str(repo), "--out", str(out),
                      "--quiet"])
 
             header = out.read_text().splitlines()[0]
@@ -65,7 +83,7 @@ class CliBuildTest(unittest.TestCase):
             self.assertEqual(
                 shlex.split(regen),
                 [sys.executable, "-m", "hologram", "build",
-                 "--root", str(JAVAMINI.resolve()),
+                 "--root", str(repo.resolve()),
                  "--out", str(out.resolve())],
             )
 
@@ -73,6 +91,7 @@ class CliBuildTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             repo = _make_repo(tmp_path)
+            write_manifest(repo)
             (tmp_path / "artifacts").mkdir()
             relative_out = Path("artifacts") / "custom digest.md"
 
@@ -108,8 +127,81 @@ class CliBuildTest(unittest.TestCase):
             )
 
 
+class ConfigBoundaryTest(unittest.TestCase):
+    def test_build_and_check_require_manifest_before_scanning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            (root / "app.py").write_text("def app() -> int:\n    return 1\n")
+            for command in ("build", "check"):
+                with self.subTest(command=command):
+                    with mock.patch.object(
+                        hologram.legacy,
+                        "scan_files",
+                        side_effect=AssertionError("scan must not run"),
+                    ):
+                        with self.assertRaises(ConfigError) as caught:
+                            run_cli([command, "--root", str(root), "--quiet"])
+                    self.assertIn(str(root / CONFIG_NAME), str(caught.exception))
+
+    def test_init_does_not_write_through_dangling_manifest_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            target = root / "missing-manifest.toml"
+            manifest = root / CONFIG_NAME
+            manifest.symlink_to(target.name)
+
+            with self.assertRaises(ConfigError):
+                run_cli(["init", "--root", str(root), "--quiet"])
+
+            self.assertTrue(manifest.is_symlink())
+            self.assertEqual(manifest.readlink(), Path(target.name))
+            self.assertFalse(target.exists())
+
+
 @needs_java
 class InitHooksTest(unittest.TestCase):
+    def test_init_creates_exact_default_manifest_then_proceeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+
+            self.assertEqual(run_cli(["init", "--root", str(repo), "--quiet"]), 0)
+
+            self.assertEqual(
+                (repo / CONFIG_NAME).read_text(),
+                render_config(default_config()),
+            )
+            self.assertTrue((repo / "PROJECT_DIGEST.md").exists())
+
+    def test_init_loads_existing_manifest_without_overwriting_it(self):
+        existing = """schema_version = 2
+agents = ["claude"]
+languages = ["java"]
+include = ["src/**"]
+exclude = []
+hot_threshold = 7
+output = "CUSTOM_DIGEST.md"
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            manifest = repo / CONFIG_NAME
+            manifest.write_text(existing)
+
+            with mock.patch.object(
+                hologram.legacy,
+                "load_config",
+                wraps=hologram.load_config,
+            ) as load:
+                self.assertEqual(
+                    run_cli(["init", "--root", str(repo), "--quiet"]),
+                    0,
+                )
+
+            self.assertEqual(manifest.read_text(), existing)
+            load.assert_called_once_with(repo.resolve())
+            self.assertTrue((repo / "PROJECT_DIGEST.md").exists())
+
     def test_init_installs_hooks_and_gitignore_idempotently(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp))
@@ -280,9 +372,11 @@ class BootstrapTest(unittest.TestCase):
         hologram._PARSERS["java"] = None
         try:
             with tempfile.TemporaryDirectory() as tmp:
+                repo = _make_repo(Path(tmp))
+                write_manifest(repo)
                 out = Path(tmp) / "d.md"
                 with self.assertRaises(SystemExit) as ctx:
-                    run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
+                    run_cli(["build", "--root", str(repo), "--out", str(out),
                              "--quiet"])
                 self.assertFalse(out.exists())
             self.assertIn(

@@ -8,9 +8,24 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hologram  # noqa: E402
-from hologram import Symbol, build_digest, render_simple, run_cli  # noqa: E402
+from hologram import (  # noqa: E402
+    CONFIG_NAME,
+    ProjectConfig,
+    Symbol,
+    build_digest,
+    default_config,
+    render_config,
+    render_simple,
+    run_cli,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def write_manifest(root: Path) -> ProjectConfig:
+    config = default_config()
+    (root / CONFIG_NAME).write_text(render_config(config), encoding="utf-8")
+    return config
 
 
 def _proj(tmp: Path) -> Path:
@@ -32,14 +47,16 @@ class StateAndCheckTest(unittest.TestCase):
     def test_state_stamp_matches_state_hash(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
+            write_manifest(root)
             out = Path(tmp) / "d.md"
             run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
             self.assertEqual(hologram._digest_state(out),
-                             hologram._state_hash(root))
+                             hologram._state_hash(root, default_config()))
 
     def test_check_fresh_then_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
+            write_manifest(root)
             out = Path(tmp) / "d.md"
             run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
             self.assertEqual(run_cli(["check", "--root", str(root),
@@ -51,6 +68,7 @@ class StateAndCheckTest(unittest.TestCase):
     def test_build_if_stale_skips_when_fresh(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
+            write_manifest(root)
             out = Path(tmp) / "d.md"
             run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
             mtime = out.stat().st_mtime_ns
@@ -165,6 +183,7 @@ class EmbedTest(unittest.TestCase):
     def test_cli_build_embed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
+            write_manifest(root)
             out = Path(tmp) / "d.md"
             run_cli(["build", "--root", str(root), "--out", str(out),
                      "--embed", "--quiet"])
@@ -177,6 +196,7 @@ class DiffCommandTest(unittest.TestCase):
     def test_diff_shows_added_symbol(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
+            write_manifest(root)
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
             subprocess.run(["git", "add", "-A"], cwd=root, check=True)
             subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",

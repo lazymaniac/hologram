@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmark"))
 
 import bench  # noqa: E402
+from hologram import CONFIG_NAME, default_config, render_config  # noqa: E402
 
 
 class TaskLoaderTest(unittest.TestCase):
@@ -154,6 +155,90 @@ def _mini_corpus(tmp: Path) -> Path:
 
 
 class WorkspaceTest(unittest.TestCase):
+    def test_all_conditions_get_exact_canonical_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = _mini_corpus(tmp_path)
+            for condition in ("A", "B", "C"):
+                with self.subTest(condition=condition):
+                    ws = bench.make_workspace(
+                        repo,
+                        tmp_path / f"ws{condition}",
+                        condition,
+                    )
+                    try:
+                        self.assertEqual(
+                            (ws / CONFIG_NAME).read_text(encoding="utf-8"),
+                            render_config(default_config()),
+                        )
+                    finally:
+                        bench.drop_workspace(repo, ws)
+
+    def test_corpus_manifest_is_preserved_byte_for_byte(self):
+        provided = (
+            b"# Corpus-owned formatting must survive.\n"
+            b"schema_version = 2\n"
+            b'agents = ["claude"]\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = _mini_corpus(tmp_path)
+            (repo / CONFIG_NAME).write_bytes(provided)
+            subprocess.run(["git", "add", CONFIG_NAME], cwd=repo, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=b@b",
+                    "-c",
+                    "user.name=b",
+                    "commit",
+                    "-qm",
+                    "add manifest",
+                ],
+                cwd=repo,
+                check=True,
+            )
+            ws = bench.make_workspace(repo, tmp_path / "wsA", "A")
+            try:
+                self.assertEqual((ws / CONFIG_NAME).read_bytes(), provided)
+            finally:
+                bench.drop_workspace(repo, ws)
+
+    def test_dangling_corpus_manifest_symlink_is_not_followed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = _mini_corpus(tmp_path)
+            manifest = repo / CONFIG_NAME
+            manifest.symlink_to("missing-manifest.toml")
+            subprocess.run(["git", "add", CONFIG_NAME], cwd=repo, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=b@b",
+                    "-c",
+                    "user.name=b",
+                    "commit",
+                    "-qm",
+                    "add manifest symlink",
+                ],
+                cwd=repo,
+                check=True,
+            )
+            ws = bench.make_workspace(repo, tmp_path / "wsB", "B")
+            try:
+                workspace_manifest = ws / CONFIG_NAME
+                self.assertTrue(workspace_manifest.is_symlink())
+                self.assertEqual(
+                    workspace_manifest.readlink(),
+                    Path("missing-manifest.toml"),
+                )
+                self.assertFalse((ws / "missing-manifest.toml").exists())
+                self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
+            finally:
+                bench.drop_workspace(repo, ws)
+
     def test_condition_a_has_digest_and_instructions(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
@@ -172,6 +257,10 @@ class WorkspaceTest(unittest.TestCase):
             try:
                 self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
                 self.assertNotIn("PROJECT_DIGEST", (ws / "CLAUDE.md").read_text())
+                self.assertEqual(
+                    (ws / CONFIG_NAME).read_text(encoding="utf-8"),
+                    render_config(default_config()),
+                )
             finally:
                 bench.drop_workspace(repo, ws)
 

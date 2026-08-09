@@ -24,6 +24,14 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+from .config import (
+    CONFIG_NAME,
+    ProjectConfig,
+    default_config,
+    load_config,
+    render_config,
+)
+
 LANG_EXTENSIONS = {
     ".java": "java",
     ".py": "python",
@@ -87,9 +95,10 @@ def detect_language(path: Path) -> str | None:
     return LANG_EXTENSIONS.get(path.suffix)
 
 
-def scan_files(root: Path) -> list[Path]:
+def scan_files(root: Path, config: ProjectConfig | None = None) -> list[Path]:
     """Source files under root: git-tracked only when root is a git repo (so .gitignore
     excludes vendored/data trees), else a pruned filesystem walk. Deterministic order."""
+    del config  # The v2 scanner consumes this manifest in the next foundation step.
     if (root / ".git").exists():
         try:
             out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
@@ -1831,10 +1840,17 @@ def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol
 # Gather + fan-in
 # ---------------------------------------------------------------------------
 
-def _gather(root: Path, langs: set[str] | None = None):
+def _gather(
+    root: Path,
+    langs: set[str] | None = None,
+    config: ProjectConfig | None = None,
+):
     """Extract symbols, identifier-token sets per file, and the corpus state hash.
     `langs` restricts to those languages (e.g. {"java"}); None means all."""
-    files = scan_files(root)
+    config = config or default_config()
+    if langs is None and config.languages:
+        langs = {language.value for language in config.languages}
+    files = scan_files(root, config)
     if langs is not None:
         files = [f for f in files if detect_language(f) in langs]
     symbols: list[Symbol] = []
@@ -1851,10 +1867,17 @@ def _gather(root: Path, langs: set[str] | None = None):
     return files, symbols, file_tokens, state.hexdigest()[:12]
 
 
-def _state_hash(root: Path, langs: set[str] | None = None) -> str:
+def _state_hash(
+    root: Path,
+    config: ProjectConfig | None = None,
+    langs: set[str] | None = None,
+) -> str:
     """The corpus hash `_gather` would produce, without parsing anything — cheap
     freshness probe for `check` / `--if-stale`."""
-    files = scan_files(root)
+    config = config or default_config()
+    if langs is None and config.languages:
+        langs = {language.value for language in config.languages}
+    files = scan_files(root, config)
     if langs is not None:
         files = [f for f in files if detect_language(f) in langs]
     state = hashlib.md5()
@@ -2361,8 +2384,10 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
 def build_digest(root: Path, regen_cmd: str = "hologram build",
                  langs: set[str] | None = None, private_sigs: bool = False,
-                 behaviors: bool = False) -> str:
-    files, symbols, file_tokens, state = _gather(root, langs)
+                 behaviors: bool = False,
+                 config: ProjectConfig | None = None) -> str:
+    config = config or default_config()
+    files, symbols, file_tokens, state = _gather(root, langs, config)
     scores = _fan_in_from_tokens(symbols, file_tokens)
     test_tokens: set[str] = set()
     for rel, toks in file_tokens.items():
@@ -2622,23 +2647,32 @@ def run_cli(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
+    manifest_path = root / CONFIG_NAME
+    if args.cmd == "init" and not os.path.lexists(manifest_path):
+        manifest_path.write_text(
+            render_config(default_config()),
+            encoding="utf-8",
+        )
+    config = load_config(root)
     langs = None
     if getattr(args, "lang", None):
         langs = {l.strip() for arg in args.lang for l in arg.split(",") if l.strip()}
+    elif config.languages:
+        langs = {language.value for language in config.languages}
     out_path = (args.out or root / "PROJECT_DIGEST.md").resolve()
 
     if args.cmd == "check":
-        fresh = _digest_state(out_path) == _state_hash(root, langs)
+        fresh = _digest_state(out_path) == _state_hash(root, config, langs)
         if not args.quiet:
             print(f"{out_path}: {'fresh' if fresh else 'stale or missing'}")
         return 0 if fresh else 1
     if args.cmd == "build" and args.if_stale \
-            and _digest_state(out_path) == _state_hash(root, langs):
+            and _digest_state(out_path) == _state_hash(root, config, langs):
         if not args.quiet:
             print(f"{out_path}: fresh, skipping rebuild")
         return 0
 
-    files = scan_files(root)
+    files = scan_files(root, config)
     if langs is not None:
         files = [f for f in files if detect_language(f) in langs]
     missing = _missing_parser_langs(files)
@@ -2655,8 +2689,18 @@ def run_cli(argv: list[str] | None = None) -> int:
             if r.returncode != 0:
                 raise SystemExit(f"git worktree failed: {r.stderr.strip()}")
             try:
-                old = build_digest(wt, langs=langs, private_sigs=args.private)
-                new = build_digest(root, langs=langs, private_sigs=args.private)
+                old = build_digest(
+                    wt,
+                    langs=langs,
+                    private_sigs=args.private,
+                    config=config,
+                )
+                new = build_digest(
+                    root,
+                    langs=langs,
+                    private_sigs=args.private,
+                    config=config,
+                )
             finally:
                 subprocess.run(["git", "-C", str(root), "worktree", "remove",
                                 "--force", str(wt)], capture_output=True)
@@ -2676,7 +2720,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                               args.embed_max_tokens,
                           ),
                           langs=langs, private_sigs=args.private,
-                          behaviors=args.behaviors)
+                          behaviors=args.behaviors, config=config)
     out_path.write_text(digest)
     if not args.quiet:
         print(f"{out_path} written: {estimate_tokens(digest)} tokens")

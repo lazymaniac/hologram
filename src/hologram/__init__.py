@@ -1,4 +1,14 @@
 from . import legacy as _legacy
+from .config import (
+    CONFIG_NAME,
+    CONFIG_SCHEMA_VERSION,
+    ConfigError,
+    ProjectConfig,
+    canonical_config_bytes,
+    default_config,
+    load_config,
+    render_config,
+)
 from .legacy import (
     Symbol,
     build_digest,
@@ -36,6 +46,14 @@ from .model import (
 )
 
 __all__ = [
+    "CONFIG_NAME",
+    "CONFIG_SCHEMA_VERSION",
+    "ConfigError",
+    "ProjectConfig",
+    "canonical_config_bytes",
+    "default_config",
+    "load_config",
+    "render_config",
     "Symbol",
     "build_digest",
     "embed_digest",

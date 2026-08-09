@@ -1,3 +1,4 @@
+import shutil
 import sys
 import tempfile
 import unittest
@@ -6,7 +7,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hologram  # noqa: E402
-from hologram import Symbol, _tree_lines, build_digest, extract_file, render_simple  # noqa: E402
+from hologram import (  # noqa: E402
+    CONFIG_NAME,
+    ProjectConfig,
+    Symbol,
+    _tree_lines,
+    build_digest,
+    default_config,
+    extract_file,
+    render_config,
+    render_simple,
+)
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
@@ -14,6 +25,12 @@ PYMINI = FIXTURES / "pymini"
 
 needs_java = unittest.skipUnless(hologram.has_parser("java"),
                                  "tree-sitter-java not installed")
+
+
+def write_manifest(root: Path) -> ProjectConfig:
+    config = default_config()
+    (root / CONFIG_NAME).write_text(render_config(config), encoding="utf-8")
+    return config
 
 
 class CallExtractionTest(unittest.TestCase):
@@ -191,7 +208,6 @@ class ReconstructablePathTest(unittest.TestCase):
 @needs_java
 class LanguageFilterTest(unittest.TestCase):
     def test_only_requested_language_included(self):
-        import shutil
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "mixed"
             shutil.copytree(JAVAMINI, root)
@@ -205,8 +221,11 @@ class LanguageFilterTest(unittest.TestCase):
     def test_cli_lang_flag(self):
         from hologram import run_cli
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "javamini"
+            shutil.copytree(JAVAMINI, root)
+            write_manifest(root)
             out = Path(tmp) / "d.md"
-            code = run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
+            code = run_cli(["build", "--root", str(root), "--out", str(out),
                             "--lang", "java", "--quiet"])
             self.assertEqual(code, 0)
             self.assertIn("PricingEngine", out.read_text())
@@ -375,7 +394,6 @@ class PrivateMembersTest(unittest.TestCase):
         self.assertNotIn("- util:", out)               # names-only lines replaced
 
     def test_cli_private_flag(self):
-        import shutil
         from hologram import run_cli
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "proj"
@@ -385,6 +403,7 @@ class PrivateMembersTest(unittest.TestCase):
                 "    def run(self) -> int:\n        return self._step()\n"
                 "    def _step(self) -> int:\n        return 1\n"
             )
+            write_manifest(root)
             out = Path(tmp) / "d.md"
             run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
             self.assertIn("- _step", out.read_text())
