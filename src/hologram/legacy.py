@@ -16,6 +16,7 @@ import difflib
 import hashlib
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -2469,21 +2470,47 @@ def _hook_python() -> str:
     return sys.executable
 
 
+def _hologram_build_command(*args: str) -> str:
+    """Render a shell-safe command through the installed module entry point."""
+    return shlex.join([_hook_python(), "-m", "hologram", "build", *args])
+
+
+def _is_generated_hologram_hook_line(line: str) -> bool:
+    """Whether `line` is a Hologram-owned legacy or module hook command."""
+    command, separator, fallback = line.strip().rpartition("||")
+    if separator != "||" or fallback.strip() != "true":
+        return False
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if not argv or argv[-1] != "--quiet" or "--root" not in argv:
+        return False
+    if argv[1:4] == ["-m", "hologram", "build"]:
+        return True
+    return (len(argv) >= 3 and Path(argv[1]).name == "hologram.py"
+            and argv[2] == "build")
+
+
 def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None,
                    embed: bool = False) -> None:
-    lang_args = "".join(f' --lang {l}' for l in sorted(langs)) if langs else ""
-    embed_arg = " --embed" if embed else ""
-    hook_line = (f'{_hook_python()} -m hologram build --root "{repo.resolve()}"'
-                 f'{lang_args}{embed_arg} --quiet || true\n')
+    hook_args = ["--root", str(repo.resolve())]
+    for lang in sorted(langs or set()):
+        hook_args.extend(["--lang", lang])
+    if embed:
+        hook_args.append("--embed")
+    hook_args.append("--quiet")
+    hook_line = f"{_hologram_build_command(*hook_args)} || true\n"
     hooks_dir = repo / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     for name in HOOK_NAMES:
         hook = hooks_dir / name
         if hook.exists():
             content = hook.read_text()
-            if hook_line.rstrip("\n") in content:
-                continue
-            hook.write_text(content.rstrip("\n") + "\n" + hook_line)
+            kept = [line for line in content.splitlines()
+                    if not _is_generated_hologram_hook_line(line)]
+            preserved = "\n".join(kept).rstrip("\n")
+            hook.write_text(preserved + ("\n" if preserved else "") + hook_line)
         else:
             hook.write_text("#!/bin/sh\n" + hook_line)
         hook.chmod(0o755)
@@ -2582,7 +2609,7 @@ def run_cli(argv: list[str] | None = None) -> int:
     if args.cmd == "init":
         _install_hooks(root, args.quiet, langs, embed=args.embed)
     digest = build_digest(root,
-                          regen_cmd=f'{_hook_python()} "{Path(__file__).resolve()}" build',
+                          regen_cmd=_hologram_build_command(),
                           langs=langs, private_sigs=args.private,
                           behaviors=args.behaviors)
     out_path.write_text(digest)

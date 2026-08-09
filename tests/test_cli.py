@@ -1,4 +1,4 @@
-import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,6 +31,14 @@ def _make_repo(tmp: Path) -> Path:
     return repo
 
 
+def _hologram_hook_lines(content: str) -> list[str]:
+    return [
+        line for line in content.splitlines()
+        if "--root" in line
+        and ("-m hologram build" in line or "hologram.py" in line)
+    ]
+
+
 @needs_java
 class CliBuildTest(unittest.TestCase):
     def test_build_writes_digest_file(self):
@@ -42,6 +50,20 @@ class CliBuildTest(unittest.TestCase):
             content = out.read_text()
             self.assertIn("PricingEngine", content)
             self.assertIn("> ", content)
+
+    def test_digest_regen_command_uses_module_entrypoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "hologram.md"
+            run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
+                     "--quiet"])
+
+            header = out.read_text().splitlines()[0]
+            regen = header.split(" · regen: ", 1)[1]
+            self.assertNotIn("legacy.py", regen)
+            self.assertEqual(
+                shlex.split(regen),
+                [sys.executable, "-m", "hologram", "build"],
+            )
 
 
 @needs_java
@@ -58,6 +80,75 @@ class InitHooksTest(unittest.TestCase):
             self.assertNotIn("hologram.py", content)
             gitignore = (repo / ".gitignore").read_text()
             self.assertEqual(gitignore.count("PROJECT_DIGEST.md"), 1)
+
+    def test_init_replaces_generated_command_when_options_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            run_cli(["init", "--root", str(repo), "--lang", "java", "--quiet"])
+            hook = repo / ".git" / "hooks" / "post-commit"
+            hook.write_text(hook.read_text() + "echo keep-existing\n")
+
+            run_cli(["init", "--root", str(repo), "--embed", "--quiet"])
+
+            content = hook.read_text()
+            commands = _hologram_hook_lines(content)
+            self.assertEqual(len(commands), 1)
+            self.assertIn("--embed", commands[0])
+            self.assertNotIn("--lang java", commands[0])
+            self.assertIn("echo keep-existing", content)
+
+    def test_init_upgrades_legacy_generated_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            hook = repo / ".git" / "hooks" / "post-commit"
+            hook.write_text(
+                "#!/bin/sh\n"
+                "echo before\n"
+                f'{sys.executable} "/opt/hologram/hologram.py" build '
+                f'--root "{repo.resolve()}" --lang java --quiet || true\n'
+                "echo after\n"
+            )
+
+            run_cli(["init", "--root", str(repo), "--quiet"])
+
+            content = hook.read_text()
+            self.assertEqual(len(_hologram_hook_lines(content)), 1)
+            self.assertNotIn("hologram.py", content)
+            self.assertIn("echo before", content)
+            self.assertIn("echo after", content)
+
+    def test_generated_hook_quotes_interpreter_and_root_path(self):
+        with tempfile.TemporaryDirectory(prefix="hook $HOME path; ") as tmp:
+            tmp_path = Path(tmp)
+            repo = _make_repo(tmp_path)
+            actual_python = sys.executable
+            wrapper = tmp_path / "python launcher"
+            wrapper.write_text(
+                f"#!/bin/sh\nexec {shlex.quote(actual_python)} \"$@\"\n"
+            )
+            wrapper.chmod(0o755)
+            sys.executable = str(wrapper)
+            try:
+                run_cli(["init", "--root", str(repo), "--quiet"])
+            finally:
+                sys.executable = actual_python
+
+            hook = repo / ".git" / "hooks" / "post-commit"
+            command = _hologram_hook_lines(hook.read_text())[0]
+            self.assertTrue(command.endswith(" || true"))
+            self.assertEqual(
+                shlex.split(command.removesuffix(" || true")),
+                [str(wrapper), "-m", "hologram", "build", "--root",
+                 str(repo.resolve()), "--quiet"],
+            )
+
+            digest = repo / "PROJECT_DIGEST.md"
+            digest.unlink()
+            result = subprocess.run(
+                [str(hook)], cwd=repo, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(digest.exists(), result.stderr)
 
     def test_init_chains_existing_hook(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -92,21 +183,23 @@ class BootstrapTest(unittest.TestCase):
         # python never needs a parser
         self.assertEqual(hologram._missing_parser_langs([PYMINI_FILE]), set())
 
-    def test_cli_exits_with_instructions_when_bootstrap_exhausted(self):
+    def test_cli_fails_fast_with_parser_extra_guidance_without_writes(self):
         saved = hologram._PARSERS["java"]
         hologram._PARSERS["java"] = None
-        os.environ["HOLOGRAM_BOOTSTRAPPED"] = "1"  # pretend re-exec already happened
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 out = Path(tmp) / "d.md"
                 with self.assertRaises(SystemExit) as ctx:
                     run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
                              "--quiet"])
-            self.assertIn("pip install", str(ctx.exception))
+                self.assertFalse(out.exists())
+            self.assertIn(
+                f"{sys.executable} -m pip install 'hologram-code-map[parsers]'",
+                str(ctx.exception),
+            )
             self.assertIn("tree-sitter-java", str(ctx.exception))
         finally:
             hologram._PARSERS["java"] = saved
-            del os.environ["HOLOGRAM_BOOTSTRAPPED"]
 
 
 class HookPythonSelectionTest(unittest.TestCase):
