@@ -34,10 +34,22 @@ from .config import (
     default_config,
     load_config,
 )
-from .model import CallKind, Language, SourceFile, SymbolId, SymbolKind, Visibility
+from .model import (
+    CallKind,
+    CallRef,
+    Language,
+    ReferenceConfidence,
+    ReferenceKind,
+    SourceFile,
+    SourceSpan,
+    SymbolId,
+    SymbolKind,
+    Visibility,
+)
 from .model import FileIR as CanonicalFileIR
 from .parsers.api import DEFAULT_REGISTRY
 from .parsers.api import extract_file as extract_canonical_file
+from .parsers.common import split_top_commas, tight_type
 from .parsers.treesitter import GRAMMAR_METADATA
 from .pipeline import BuildSnapshot, IncompleteBuildError, build_project
 from .resolve import ResolutionStatus
@@ -216,6 +228,60 @@ def _legacy_span_bytes(file_ir: CanonicalFileIR, span) -> bytes:
     )
 
 
+def _legacy_span_inside(inner, outer) -> bool:
+    return (
+        inner.file == outer.file
+        and (inner.start_line, inner.start_column)
+        >= (outer.start_line, outer.start_column)
+        and (inner.end_line, inner.end_column)
+        <= (outer.end_line, outer.end_column)
+    )
+
+
+def _legacy_reference_is_call(file_ir: CanonicalFileIR, span) -> bool:
+    lines = file_ir.source.raw.splitlines(keepends=True)
+    index = span.end_line - 1
+    if index < 0 or index >= len(lines):
+        return False
+    suffix = lines[index][span.end_column :].lstrip()
+    if suffix.startswith(b"?."):
+        suffix = suffix[2:].lstrip()
+    return suffix.startswith(b"(")
+
+
+def _legacy_java_declaration_line(file_ir: CanonicalFileIR, symbol) -> int:
+    """Restore v1's annotation-leading line without weakening canonical spans."""
+
+    if not symbol.annotations:
+        return symbol.span.start_line
+    lines = file_ir.source.text.splitlines()
+    cursor = symbol.span.start_line - 2
+    start = symbol.span.start_line
+    remaining = len(symbol.annotations)
+    parenthesis_depth = 0
+    while cursor >= 0 and remaining:
+        stripped = lines[cursor].strip()
+        if not stripped:
+            break
+        parenthesis_depth += stripped.count(")") - stripped.count("(")
+        if stripped.startswith("@") and parenthesis_depth <= 0:
+            start = cursor + 1
+            remaining -= 1
+            parenthesis_depth = 0
+        elif parenthesis_depth <= 0:
+            break
+        cursor -= 1
+    return start
+
+
+def _legacy_symbol_line(file_ir: CanonicalFileIR, symbol) -> int:
+    if file_ir.source.language is Language.CPP:
+        return _legacy_cpp_declaration_line(file_ir, symbol) or symbol.span.start_line
+    if file_ir.source.language is Language.JAVA:
+        return _legacy_java_declaration_line(file_ir, symbol)
+    return symbol.span.start_line
+
+
 def _legacy_java_call_name(file_ir: CanonicalFileIR, call) -> str | None:
     if call.kind is CallKind.CONSTRUCT:
         if call.name in {"super", "this"}:
@@ -315,14 +381,44 @@ def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
                     -call.span.end_column,
                 )
             )
+    anonymous_calls = (
+        [
+            item
+            for item in file_ir.references
+            if item.owner is None
+            and item.kind is ReferenceKind.NAME
+            and item.confidence is ReferenceConfidence.POSSIBLE
+            and _legacy_span_inside(item.span, symbol.span)
+            and _legacy_reference_is_call(file_ir, item.span)
+        ]
+        if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES
+        else []
+    )
+    ordered_items: list[tuple[SourceSpan, CallRef | None, str | None]] = [
+        (call.span, call, None) for call in owned
+    ]
+    if anonymous_calls:
+        ordered_items.extend(
+            (item.span, None, item.name) for item in anonymous_calls
+        )
+        ordered_items.sort(
+            key=lambda item: (
+                item[0].start_line,
+                item[0].start_column,
+                -item[0].end_line,
+                -item[0].end_column,
+            )
+        )
     result: list[str] = []
-    for call in owned:
-        if (
+    for _span, call, possible_name in ordered_items:
+        if call is None:
+            name = possible_name
+        elif (
             file_ir.source.language is Language.C
             and call.kind is CallKind.CONSTRUCT
         ):
             continue
-        if file_ir.source.language is Language.JAVA:
+        elif file_ir.source.language is Language.JAVA:
             name = _legacy_java_call_name(file_ir, call)
         elif file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES:
             name = _legacy_typescript_call_name(call)
@@ -564,6 +660,117 @@ def _legacy_kotlin_shape(symbol) -> tuple[list[str], str | None, str]:
     return params, symbol.returns, f"{symbol.name}({','.join(params)}){suffix}"
 
 
+def _legacy_matching_paren(raw: str, start: int) -> int | None:
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(start, len(raw)):
+        character = raw[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {'"', "'", "`"}:
+            quote = character
+        elif character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    return None
+
+
+def _legacy_top_level_colon(raw: str) -> int | None:
+    pairs = {"<": ">", "(": ")", "[": "]", "{": "}"}
+    closing = set(pairs.values())
+    stack: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(raw):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in {'"', "'", "`"}:
+            quote = character
+        elif character in pairs:
+            stack.append(pairs[character])
+        elif character in closing:
+            if stack and stack[-1] == character:
+                stack.pop()
+        elif character == ":" and not stack:
+            return index
+    return None
+
+
+def _legacy_typescript_parameter_type(raw: str) -> str:
+    colon = _legacy_top_level_colon(raw)
+    if colon is None:
+        return "?"
+    type_name = raw[colon + 1 :].strip()
+    depth = 0
+    for index, character in enumerate(type_name):
+        if character in "<([{":
+            depth += 1
+        elif character in ">)]}":
+            depth = max(0, depth - 1)
+        elif (
+            character == "="
+            and depth == 0
+            and type_name[index : index + 2] != "=>"
+        ):
+            type_name = type_name[:index].rstrip()
+            break
+    return tight_type(type_name) or "?"
+
+
+def _legacy_typescript_shape(
+    file_ir: CanonicalFileIR,
+    symbol,
+) -> tuple[list[str], str | None, str]:
+    params = list(symbol.params)
+    if symbol.kind is not SymbolKind.TYPE and symbol.kind not in _LEGACY_CALLABLE_KINDS:
+        return params, symbol.returns, symbol.signature
+    raw = _legacy_span_bytes(file_ir, symbol.span).decode("utf-8", errors="replace")
+    if symbol.kind is SymbolKind.TYPE and params:
+        _separator, found, value = raw.partition("=")
+        if found:
+            restored_type = tight_type(value.strip().removesuffix(";").rstrip())
+            if restored_type:
+                params = [restored_type]
+        return params, symbol.returns, symbol.signature
+    opening = raw.find("(")
+    closing = _legacy_matching_paren(raw, opening) if opening >= 0 else None
+    if closing is not None:
+        restored_params = [
+            _legacy_typescript_parameter_type(item)
+            for item in split_top_commas(
+                raw[opening + 1 : closing],
+                opens="<([{",
+                closes=">)]}",
+            )
+        ]
+        if len(restored_params) == len(params):
+            params = restored_params
+    suffix = (
+        f":{symbol.returns}"
+        if symbol.returns
+        and symbol.returns != "void"
+        and symbol.kind is not SymbolKind.CONSTRUCTOR
+        else ""
+    )
+    return params, symbol.returns, f"{symbol.name}({','.join(params)}){suffix}"
+
+
 def _legacy_task5_container(language: Language, symbol) -> str | None:
     if (
         language is Language.RUST
@@ -741,7 +948,9 @@ def _canonical_to_legacy(
                 supported = False
             if not supported:
                 continue
-        if file_ir.source.language is Language.GO:
+        if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES:
+            params, returns, signature = _legacy_typescript_shape(file_ir, symbol)
+        elif file_ir.source.language is Language.GO:
             params, returns, signature = _legacy_go_shape(symbol)
         elif file_ir.source.language is Language.KOTLIN:
             params, returns, signature = _legacy_kotlin_shape(symbol)
@@ -764,12 +973,7 @@ def _canonical_to_legacy(
                     else symbol.kind.value
                 ),
                 file=symbol.file,
-                line=(
-                    _legacy_cpp_declaration_line(file_ir, symbol)
-                    or symbol.span.start_line
-                    if file_ir.source.language is Language.CPP
-                    else symbol.span.start_line
-                ),
+                line=_legacy_symbol_line(file_ir, symbol),
                 signature=signature,
                 params=params,
                 returns=returns,
@@ -825,6 +1029,7 @@ def _canonical_to_legacy(
                     else {
                         binding.name: binding.type_name
                         for binding in symbol.bindings
+                        if not binding.name.startswith("\0hologram-")
                     }
                 ),
                 size=(

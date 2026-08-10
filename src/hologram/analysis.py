@@ -508,6 +508,16 @@ def _intrinsically_reachable(symbol: Symbol) -> bool:
         and sid.name == "main"
     ):
         return True
+    if (
+        sid.language is Language.JAVA
+        and sid.kind is SymbolKind.CONSTRUCTOR
+        and symbol.visibility is Visibility.PRIVATE
+        and not symbol.params
+        and symbol.body_lines <= 2
+    ):
+        # Empty private constructors are deliberate non-instantiability guards,
+        # not useful dead-code candidates even when no construction edge exists.
+        return True
     if len(symbol.params) != 1:
         return False
     parameter = canonical_type_key(symbol.params[0]).removeprefix("java.lang.")

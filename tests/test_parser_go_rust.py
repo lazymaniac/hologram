@@ -157,6 +157,26 @@ class GoParserTest(unittest.TestCase):
         self.assertEqual(quote.params, ("OrderId",))
         self.assertEqual(quote.returns, "Quote")
 
+        embedded = extract_file(
+            snapshot(
+                b"package app\n"
+                b"type Base interface { Value() int }\n"
+                b"type Derived interface { Base; Other() int }\n",
+                Language.GO,
+                "src/interfaces.go",
+            )
+        )
+        derived = symbol(embedded, "Derived", SymbolKind.INTERFACE)
+        self.assertEqual(derived.supers, ("Base",))
+        self.assertTrue(
+            any(
+                reference.owner == derived.id
+                and reference.kind is ReferenceKind.TYPE
+                and reference.name == "Base"
+                for reference in embedded.references
+            )
+        )
+
     def test_bindings_calls_references_bodies_and_stable_ids_are_complete(self) -> None:
         result = extract_file(snapshot(GO_SOURCE, Language.GO, "src/app.go"))
         run = symbol(result, "Run", SymbolKind.FUNCTION)
@@ -395,6 +415,16 @@ class RustParserTest(unittest.TestCase):
         )
         rational = symbol(result, "Rational", SymbolKind.CLASS)
         self.assertEqual(rational.supers, ("Pricer",))
+        self.assertTrue(
+            {"Pricer", "Rational"}.issubset(
+                {
+                    reference.name
+                    for reference in result.references
+                    if reference.owner == rational.id
+                    and reference.kind is ReferenceKind.TYPE
+                }
+            )
+        )
         self.assertEqual(rational.components, ("num", "den"))
         self.assertEqual(
             symbol(result, "num", SymbolKind.FIELD).id.container_path, ("Rational",)
@@ -588,9 +618,7 @@ fn outer(input: OrderId) {
             (BodyEventKind.LOCAL, "made"),
             {(event.kind, event.text) for event in body.events},
         )
-        self.assertFalse(
-            {"callback", "made"} & {item.name for item in result.symbols}
-        )
+        self.assertFalse({"callback", "made"} & {item.name for item in result.symbols})
         self.assertEqual(
             symbol(result, "value", SymbolKind.FIELD).id.container_path,
             ("outer(OrderId)", "Local"),
@@ -682,7 +710,11 @@ class GoRustSyntaxDiagnosticTest(unittest.TestCase):
                 self.assertEqual(result.diagnostics[0].span, error_span)
                 callable_symbol = symbol(result, callable_name)
                 self.assertEqual(
-                    [call.name for call in result.calls if call.caller == callable_symbol.id],
+                    [
+                        call.name
+                        for call in result.calls
+                        if call.caller == callable_symbol.id
+                    ],
                     ["alive"],
                 )
                 self.assertEqual(

@@ -98,6 +98,7 @@ def _symbol(
     returns: str | None = None,
     language: Language = Language.PYTHON,
     params: tuple[str, ...] = (),
+    body_lines: int = 0,
 ) -> Symbol:
     signature_key = f"({','.join(params)})" if kind in _CALLABLE_KINDS else ""
     identifier = SymbolId(
@@ -117,6 +118,7 @@ def _symbol(
         returns=returns,
         annotations=annotations,
         modifiers=modifiers,
+        body_lines=body_lines,
     )
 
 
@@ -781,6 +783,39 @@ class ReferenceAnalysisTest(unittest.TestCase):
         self.assertEqual(by_id[entrypoint.id].zero, ZeroReference.UNCERTAIN)
         self.assertEqual(by_id[private_main.id].zero, ZeroReference.STRONG)
         self.assertEqual(by_id[wrong_parameter.id].zero, ZeroReference.STRONG)
+
+    def test_empty_private_java_constructor_is_a_non_instantiability_guard(
+        self,
+    ) -> None:
+        guard = _symbol(
+            "src/Utility.java",
+            "Utility",
+            language=Language.JAVA,
+            kind=SymbolKind.CONSTRUCTOR,
+            container=("Utility",),
+            visibility=Visibility.PRIVATE,
+            body_lines=2,
+        )
+        nonempty = _symbol(
+            "src/Unused.java",
+            "Unused",
+            language=Language.JAVA,
+            kind=SymbolKind.CONSTRUCTOR,
+            container=("Unused",),
+            visibility=Visibility.PRIVATE,
+            body_lines=3,
+        )
+        analyzed = analyze_project(
+            _project(
+                _file(guard.file, language=Language.JAVA, symbols=(guard,)),
+                _file(nonempty.file, language=Language.JAVA, symbols=(nonempty,)),
+            ),
+            _resolution(),
+            hot_threshold=10,
+        )
+        by_id = {item.symbol.id: item.references for item in analyzed.symbols}
+        self.assertEqual(by_id[guard.id].zero, ZeroReference.UNCERTAIN)
+        self.assertEqual(by_id[nonempty.id].zero, ZeroReference.STRONG)
 
     def test_zero_decision_table_covers_same_file_protected_and_ambiguity(
         self,

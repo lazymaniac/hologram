@@ -60,6 +60,7 @@ _WEAK_REFERENCE_CONTEXTS = frozenset(
         ReferenceContext.STRING,
     }
 )
+_ARITY_BINDING_NAME = "\0hologram-arity"
 
 
 def _module_name(file: str) -> str | None:
@@ -128,6 +129,37 @@ def _parameters(
         if parameter.annotation is not None:
             bindings.append(Binding(parameter.arg, base_type(type_name)))
     return tuple(parameter_types), tuple(bindings)
+
+
+def _arity_binding(node: ast.FunctionDef | ast.AsyncFunctionDef) -> Binding:
+    arguments = node.args
+    positional = [*arguments.posonlyargs, *arguments.args]
+    positional_count = sum(
+        parameter.arg not in {"cls", "self"} for parameter in positional
+    )
+    defaulted_positions = set(
+        range(len(positional) - len(arguments.defaults), len(positional))
+    )
+    required_positional = sum(
+        parameter.arg not in {"cls", "self"} and index not in defaulted_positions
+        for index, parameter in enumerate(positional)
+    )
+    required_keywords = sum(
+        parameter.arg not in {"cls", "self"} and default is None
+        for parameter, default in zip(
+            arguments.kwonlyargs, arguments.kw_defaults, strict=True
+        )
+    )
+    keyword_count = sum(
+        parameter.arg not in {"cls", "self"} for parameter in arguments.kwonlyargs
+    )
+    minimum = required_positional + required_keywords
+    maximum = (
+        "*"
+        if arguments.vararg is not None or arguments.kwarg is not None
+        else str(positional_count + keyword_count)
+    )
+    return Binding(_ARITY_BINDING_NAME, f"{minimum}:{maximum}")
 
 
 def _base_name(node: ast.AST) -> str:
@@ -390,7 +422,7 @@ class _DeclarationVisitor(ast.NodeVisitor):
             kind = SymbolKind.METHOD
         else:
             kind = SymbolKind.FUNCTION
-        owned = _OwnedBindingRaiseVisitor(parameter_bindings)
+        owned = _OwnedBindingRaiseVisitor((*parameter_bindings, _arity_binding(node)))
         for statement in node.body:
             owned.visit(statement)
         modifiers = ("async",) if isinstance(node, ast.AsyncFunctionDef) else ()

@@ -26,6 +26,27 @@ from hologram.resolve import ResolutionStatus, canonical_type_key
 _CALLABLE_KINDS = frozenset(
     {SymbolKind.FUNCTION, SymbolKind.METHOD, SymbolKind.CONSTRUCTOR}
 )
+_CANONICAL_TYPESCRIPT_SIGNATURE_LANGUAGES = frozenset(
+    {Language.TYPESCRIPT, Language.JAVASCRIPT, Language.TSX}
+)
+_STATIC_DEPENDENCY_LANGUAGES = frozenset(
+    {
+        Language.TYPESCRIPT,
+        Language.JAVASCRIPT,
+        Language.TSX,
+        Language.VUE,
+        Language.SVELTE,
+    }
+)
+_TYPE_OWNER_KINDS = frozenset(
+    {
+        SymbolKind.CLASS,
+        SymbolKind.INTERFACE,
+        SymbolKind.RECORD,
+        SymbolKind.ENUM,
+        SymbolKind.TYPE,
+    }
+)
 _MAP_REQUIRED_CATEGORIES = frozenset(
     {
         "declaration",
@@ -241,6 +262,13 @@ def _core_facts(
     returns: str | None,
     raises: tuple[str, ...],
 ) -> list[ObservedFact]:
+    signature, parameters, returns, raises = _canonical_signature(
+        symbol_id,
+        signature,
+        parameters,
+        returns,
+        raises,
+    )
     return [
         _fact(corpus, symbol_id, line, "declaration", {"name": symbol_id.name}),
         _fact(corpus, symbol_id, line, "kind", {"kind": symbol_id.kind.value}),
@@ -265,6 +293,73 @@ def _core_facts(
             },
         ),
     ]
+
+
+def _canonical_type_fragment(value: str) -> str:
+    if value in {"?", "<?>"}:
+        return value
+    return canonical_type_key(value)
+
+
+def _canonical_signature(
+    symbol_id: SymbolId,
+    signature: str,
+    parameters: tuple[str, ...],
+    returns: str | None,
+    raises: tuple[str, ...],
+) -> tuple[str, tuple[str, ...], str | None, tuple[str, ...]]:
+    language = symbol_id.language
+    kind = symbol_id.kind
+    name = symbol_id.name
+
+    if language in _CANONICAL_TYPESCRIPT_SIGNATURE_LANGUAGES:
+        if kind in _CALLABLE_KINDS:
+            parameters = tuple(_canonical_type_fragment(item) for item in parameters)
+            returns = _canonical_type_fragment(returns) if returns is not None else None
+            raises = tuple(_canonical_type_fragment(item) for item in raises)
+            signature = f"{name}({','.join(parameters)})"
+            if returns is not None:
+                signature += f":{returns}"
+        elif kind in {SymbolKind.CONSTANT, SymbolKind.FIELD}:
+            signature, parameters, returns, raises = name, (), None, ()
+        elif kind is SymbolKind.PROPERTY:
+            declared = (
+                _canonical_type_fragment(returns) if returns is not None else None
+            )
+            signature = name + (f":{declared}" if declared is not None else "")
+            parameters, returns, raises = (), None, ()
+        elif kind is SymbolKind.TYPE and parameters:
+            signature = f"type {name}={_canonical_type_fragment(parameters[0])}"
+            parameters, returns, raises = (), None, ()
+        elif kind in {
+            SymbolKind.CLASS,
+            SymbolKind.INTERFACE,
+            SymbolKind.ENUM,
+            SymbolKind.RECORD,
+        }:
+            signature = f"{kind.value} {name}"
+            parameters, returns, raises = (), None, ()
+
+    elif language is Language.JAVA:
+        if kind in _CALLABLE_KINDS:
+            parameters = tuple(_canonical_type_fragment(item) for item in parameters)
+            returns = _canonical_type_fragment(returns) if returns is not None else None
+            raises = tuple(_canonical_type_fragment(item) for item in raises)
+            signature = f"{name}({','.join(parameters)})"
+            if returns not in {None, "void"}:
+                signature += f":{returns}"
+        elif kind in {SymbolKind.CONSTANT, SymbolKind.FIELD, SymbolKind.PROPERTY}:
+            signature, parameters, returns, raises = name, (), None, ()
+        elif kind in {
+            SymbolKind.CLASS,
+            SymbolKind.INTERFACE,
+            SymbolKind.ENUM,
+            SymbolKind.RECORD,
+        }:
+            signature = f"{kind.value} {name}"
+            parameters, returns, raises = (), None, ()
+
+    return signature, parameters, returns, raises
 
 
 def _zero_facts(
@@ -336,6 +431,39 @@ def _component_target(
         and candidate.name == name
     ]
     return candidates[0] if len(candidates) == 1 else None
+
+
+def _structural_component_targets(
+    owner: SymbolId,
+    symbols: Mapping[SymbolId, object],
+) -> tuple[SymbolId, ...]:
+    if owner.kind not in _TYPE_OWNER_KINDS:
+        return ()
+    if owner.language in {
+        Language.TYPESCRIPT,
+        Language.JAVASCRIPT,
+        Language.TSX,
+        Language.VUE,
+        Language.SVELTE,
+    }:
+        member_kinds = {SymbolKind.METHOD, SymbolKind.PROPERTY}
+    elif owner.language in {Language.JAVA, Language.PYTHON}:
+        member_kinds = {SymbolKind.FIELD, SymbolKind.CONSTANT}
+    else:
+        return ()
+    container = (*owner.container_path, owner.name)
+    return tuple(
+        sorted(
+            (
+                candidate
+                for candidate in symbols
+                if candidate.file == owner.file
+                and candidate.container_path == container
+                and candidate.kind in member_kinds
+            ),
+            key=_symbol_id_key,
+        )
+    )
 
 
 def _mentions_type(raw: str, name: str) -> bool:
@@ -484,11 +612,14 @@ def _model_facts(corpus: str, analyzed: AnalyzedProject) -> tuple[ObservedFact, 
             )
             facts.extend(_call_facts(corpus, symbol_id, line, targets))
 
-        for raw in symbol.components:
-            if (target := _component_target(symbol_id, raw, symbols)) is not None:
-                facts.append(
-                    _relation_fact(corpus, symbol_id, line, "component", target)
-                )
+        component_targets = set(_structural_component_targets(symbol_id, symbols))
+        component_targets.update(
+            target
+            for raw in symbol.components
+            if (target := _component_target(symbol_id, raw, symbols)) is not None
+        )
+        for target in sorted(component_targets, key=_symbol_id_key):
+            facts.append(_relation_fact(corpus, symbol_id, line, "component", target))
         for kind, values in (("super", symbol.supers), ("permit", symbol.permits)):
             for raw in values:
                 target = _resolved_relation_target(
@@ -506,14 +637,22 @@ def _model_facts(corpus: str, analyzed: AnalyzedProject) -> tuple[ObservedFact, 
             for symbol in file_ir.symbols
             if symbol.kind is SymbolKind.MODULE and not symbol.id.container_path
         ]
-        if len(candidates) == 1:
-            module_by_file[file_ir.source.file] = candidates[0]
+        preferred = [
+            symbol
+            for symbol in candidates
+            if file_ir.module is not None and symbol.name == file_ir.module
+        ]
+        selected = preferred if len(preferred) == 1 else candidates
+        if len(selected) == 1:
+            module_by_file[file_ir.source.file] = selected[0]
     dependencies: set[tuple[SymbolId, str]] = set()
     for resolved_import in analyzed.resolution.imports:
         if (
             resolved_import.status is ResolutionStatus.EXTERNAL
             and not resolved_import.fact.reexport
+            and not resolved_import.fact.module.startswith((".", "/"))
             and (owner := module_by_file.get(resolved_import.source_file)) is not None
+            and owner.id.language in _STATIC_DEPENDENCY_LANGUAGES
         ):
             dependencies.add((owner.id, resolved_import.fact.module))
     for owner_id, module in sorted(
@@ -583,11 +722,14 @@ def _render_facts(corpus: str, ir: RenderIR) -> tuple[ObservedFact, ...]:
         facts.extend(_zero_facts(corpus, symbol_id, line, _marker_zero(symbol.markers)))
         if symbol_id.kind in _CALLABLE_KINDS:
             facts.extend(_call_facts(corpus, symbol_id, line, symbol.call_targets))
-        for raw in symbol.components:
-            if (target := _component_target(symbol_id, raw, symbols)) is not None:
-                facts.append(
-                    _relation_fact(corpus, symbol_id, line, "component", target)
-                )
+        component_targets = set(_structural_component_targets(symbol_id, symbols))
+        component_targets.update(
+            target
+            for raw in symbol.components
+            if (target := _component_target(symbol_id, raw, symbols)) is not None
+        )
+        for target in sorted(component_targets, key=_symbol_id_key):
+            facts.append(_relation_fact(corpus, symbol_id, line, "component", target))
         for kind, values in (("super", symbol.supers), ("permit", symbol.permits)):
             for raw in values:
                 target = _render_relation_target(symbol_id, raw, symbols)
@@ -615,12 +757,12 @@ def _render_facts(corpus: str, ir: RenderIR) -> tuple[ObservedFact, ...]:
     return tuple(sorted(facts, key=_fact_key))
 
 
-def observe_project(
+def _observe_project_artifact(
     *,
     corpus: str,
     root: Path,
     config: ProjectConfig,
-) -> tuple[ObservedFact, ...]:
+) -> tuple[tuple[ObservedFact, ...], str, int]:
     snapshot = pipeline.build_project(root, config)
     snapshot.require_complete()
     analyzed = analysis.analyze_project(
@@ -646,7 +788,21 @@ def observe_project(
     )
     if model_required != rendered_required:
         raise ValueError("canonical render projection lost observed fact provenance")
-    return model_facts
+    return model_facts, rendered, len(snapshot.project.files)
+
+
+def observe_project(
+    *,
+    corpus: str,
+    root: Path,
+    config: ProjectConfig,
+) -> tuple[ObservedFact, ...]:
+    facts, _rendered, _file_count = _observe_project_artifact(
+        corpus=corpus,
+        root=root,
+        config=config,
+    )
+    return facts
 
 
 def observe_rendered_map(

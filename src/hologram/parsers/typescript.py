@@ -29,8 +29,9 @@ from hologram.model import (
     SymbolKind,
     Visibility,
 )
+from hologram.resolve import canonical_type_key
 
-from .common import base_type, ordered_unique, reference, symbol_id, tight_type
+from .common import base_type, ordered_unique, reference, symbol_id
 from .treesitter import (
     OwnershipContext,
     ast_collect,
@@ -142,8 +143,8 @@ _REGISTRATION_CALLS = frozenset(
 )
 _CALLBACK_KEYS = frozenset({"callback", "handler", "listener", "target"})
 _IDENTIFIER_RE = re.compile(r"^(?:[^\W\d]|\$)[\w$]*$", re.UNICODE)
-_SCRIPT_OPEN_RE = re.compile(br"<script\b[^>]*>", re.IGNORECASE)
-_SCRIPT_CLOSE_RE = re.compile(br"</script\s*>", re.IGNORECASE)
+_SCRIPT_OPEN_RE = re.compile(rb"<script\b[^>]*>", re.IGNORECASE)
+_SCRIPT_CLOSE_RE = re.compile(rb"</script\s*>", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,10 +253,7 @@ def _source_span(source: SourceFile) -> SourceSpan:
 
 
 def _sfc_program_buffers(raw: bytes) -> tuple[tuple[bytes, ...], bool]:
-    blank = bytes(
-        byte if byte in {0x0A, 0x0D} else 0x20
-        for byte in raw
-    )
+    blank = bytes(byte if byte in {0x0A, 0x0D} else 0x20 for byte in raw)
     programs: list[bytes] = []
     position = 0
     unclosed = False
@@ -298,7 +296,7 @@ def _type_text(node: Any | None) -> str | None:
     value = ast_text(node).strip()
     if value.startswith(":"):
         value = value[1:].strip()
-    return tight_type(value) or None
+    return canonical_type_key(value) if value else None
 
 
 def _simple_type(type_name: str) -> str:
@@ -358,7 +356,9 @@ def _parameters(node: Any) -> tuple[_Parameter, ...]:
         names = _pattern_names(pattern)
         if not names:
             continue
-        result.append(_Parameter(_type_text(type_node) or "?", names, parameter, type_node))
+        result.append(
+            _Parameter(_type_text(type_node) or "?", names, parameter, type_node)
+        )
     return tuple(result)
 
 
@@ -367,9 +367,7 @@ def _annotation_text(node: Any) -> str:
 
 
 def _annotations(nodes: Iterable[Any]) -> tuple[str, ...]:
-    return ordered_unique(
-        text for node in nodes if (text := _annotation_text(node))
-    )
+    return ordered_unique(text for node in nodes if (text := _annotation_text(node)))
 
 
 def _accessibility(node: Any) -> Visibility | None:
@@ -410,6 +408,11 @@ def _local_export_names(node: Any) -> frozenset[str]:
             or ast_field(child, "declaration") is not None
         ):
             continue
+        value = ast_field(child, "value")
+        if value is not None and value.type == "identifier":
+            name = ast_text(value)
+            if name:
+                names.append(name)
         clause = _direct_child(child, {"export_clause"})
         for specifier in _named_children(clause):
             if specifier.type != "export_specifier":
@@ -467,7 +470,10 @@ def _class_bindings(body: Any | None) -> tuple[Binding, ...]:
             type_name = _type_text(ast_field(member, "type")) or _inferred_type(value)
             if name and type_name:
                 bindings.append(Binding(name, _simple_type(type_name)))
-        elif member.type == "method_definition" and ast_text(ast_field(member, "name")) == "constructor":
+        elif (
+            member.type == "method_definition"
+            and ast_text(ast_field(member, "name")) == "constructor"
+        ):
             for parameter in _parameters(member):
                 if _accessibility(parameter.node) is not None or any(
                     ast_text(child) == "readonly" for child in _children(parameter.node)
@@ -526,7 +532,9 @@ def _enum_members(body: Any | None) -> tuple[tuple[str, Any], ...]:
             "string",
         }:
             continue
-        name_node = ast_field(child, "name") if child.type == "enum_assignment" else child
+        name_node = (
+            ast_field(child, "name") if child.type == "enum_assignment" else child
+        )
         name = ast_text(name_node)
         if name:
             result.append((name, child))
@@ -552,7 +560,9 @@ def _wrapped_callables(
         return (node,)
     if node.type == "export_statement":
         declaration = ast_field(node, "declaration")
-        return _wrapped_callables(declaration, allowed) if declaration is not None else ()
+        return (
+            _wrapped_callables(declaration, allowed) if declaration is not None else ()
+        )
     if node.type == "ambient_declaration":
         return tuple(
             callable_node
@@ -606,7 +616,7 @@ def _qualified_type(node: Any) -> tuple[str | None, str]:
 
 def _type_references(
     source: SourceFile,
-    owner: SymbolId,
+    owner: SymbolId | None,
     roots: Iterable[Any | None],
 ) -> tuple[ReferenceRef, ...]:
     references: list[ReferenceRef] = []
@@ -614,13 +624,14 @@ def _type_references(
         qualifier, name = _qualified_type(node)
         if not name or name in _PRIMITIVE_TYPES:
             continue
+        type_query = node.parent is not None and node.parent.type == "type_query"
         references.append(
             reference(
                 owner,
                 node_span(source, node),
                 name,
                 qualifier,
-                ReferenceKind.TYPE,
+                ReferenceKind.NAME if type_query else ReferenceKind.TYPE,
                 context=ReferenceContext.TYPE,
                 confidence=ReferenceConfidence.DEFINITE,
             )
@@ -745,7 +756,7 @@ def _node_by_span(source: SourceFile, nodes: Iterable[Any]) -> dict[SourceSpan, 
 
 def _body_references(
     source: SourceFile,
-    owner: SymbolId,
+    owner: SymbolId | None,
     events: Iterable[BodyEvent],
     nodes: Iterable[Any],
 ) -> tuple[ReferenceRef, ...]:
@@ -763,10 +774,7 @@ def _body_references(
         parent = syntax.parent
         field = _field_name(parent, syntax)
         parent_type = parent.type if parent is not None else ""
-        if (
-            parent_type in _FIELD_KINDS | {"enum_assignment"}
-            and field == "name"
-        ):
+        if parent_type in _FIELD_KINDS | {"enum_assignment"} and field == "name":
             continue
         if parent_type == "enum_body" and syntax.type in {
             "number",
@@ -774,10 +782,7 @@ def _body_references(
             "string",
         }:
             continue
-        if (
-            parent_type == "jsx_attribute"
-            and syntax.type == "property_identifier"
-        ):
+        if parent_type == "jsx_attribute" and syntax.type == "property_identifier":
             continue
         if (
             parent_type
@@ -790,12 +795,24 @@ def _body_references(
             and ast_text(syntax)[:1].islower()
         ):
             continue
-        if parent is not None and parent.type in {"pair", "pair_pattern"} and field == "key":
+        if (
+            parent is not None
+            and parent.type in {"pair", "pair_pattern"}
+            and field == "key"
+        ):
             continue
-        if parent is not None and parent.type == "nested_type_identifier" and field == "module":
+        if (
+            parent is not None
+            and parent.type == "nested_type_identifier"
+            and field == "module"
+        ):
             continue
         qualifier: str | None = None
-        if parent is not None and parent.type == "member_expression" and field == "property":
+        if (
+            parent is not None
+            and parent.type == "member_expression"
+            and field == "property"
+        ):
             qualifier = ast_text(ast_field(parent, "object")) or None
         elif event.kind is BodyEventKind.TYPE:
             qualifier, name = _qualified_type(syntax)
@@ -835,7 +852,10 @@ def _config_references(
 ) -> tuple[ReferenceRef, ...]:
     references: list[ReferenceRef] = []
     for call in nodes:
-        if call.type != "call_expression" or _registration_name(call) not in _REGISTRATION_CALLS:
+        if (
+            call.type != "call_expression"
+            or _registration_name(call) not in _REGISTRATION_CALLS
+        ):
             continue
         arguments = ast_field(call, "arguments")
         for value in _named_children(arguments):
@@ -844,9 +864,13 @@ def _config_references(
             for pair in _named_children(value):
                 if pair.type != "pair":
                     continue
-                key = ast_text(ast_field(pair, "key")).strip('"\'')
+                key = ast_text(ast_field(pair, "key")).strip("\"'")
                 callback = ast_field(pair, "value")
-                if key not in _CALLBACK_KEYS or callback is None or callback.type != "string":
+                if (
+                    key not in _CALLBACK_KEYS
+                    or callback is None
+                    or callback.type != "string"
+                ):
                     continue
                 name = _string_value(callback)
                 if not _IDENTIFIER_RE.fullmatch(name):
@@ -875,9 +899,7 @@ def _join_reference_events(
         if reference.kind is ReferenceKind.NAME
         and reference.confidence is ReferenceConfidence.POSSIBLE
     }
-    existing = {
-        (event.kind, event.span) for event in events
-    }
+    existing = {(event.kind, event.span) for event in events}
     result: list[BodyEvent] = []
     for event in events:
         result.append(event)
@@ -886,7 +908,9 @@ def _join_reference_events(
             and event.span in additions
             and (BodyEventKind.NAME, event.span) not in existing
         ):
-            result.append(BodyEvent(BodyEventKind.NAME, additions[event.span], event.span))
+            result.append(
+                BodyEvent(BodyEventKind.NAME, additions[event.span], event.span)
+            )
     return tuple(result)
 
 
@@ -905,12 +929,16 @@ def _imports_and_reexports(
             clause = _direct_child(node, {"import_clause"})
             if clause is None:
                 if source_node is not None:
-                    imports.append(ImportRef(node_span(source, source_node), module, None, None))
+                    imports.append(
+                        ImportRef(node_span(source, source_node), module, None, None)
+                    )
                 continue
             for child in _named_children(clause):
                 if child.type == "identifier":
                     imports.append(
-                        ImportRef(node_span(source, child), module, "default", ast_text(child))
+                        ImportRef(
+                            node_span(source, child), module, "default", ast_text(child)
+                        )
                     )
                 elif child.type == "namespace_import":
                     alias = _direct_child(child, {"identifier"})
@@ -943,7 +971,9 @@ def _imports_and_reexports(
             )
             continue
         specifiers = tuple(
-            child for child in _named_children(clause) if child.type == "export_specifier"
+            child
+            for child in _named_children(clause)
+            if child.type == "export_specifier"
         )
         if not specifiers and clause.type == "namespace_export":
             alias_node = _direct_child(clause, {"identifier"})
@@ -1003,9 +1033,7 @@ def _syntax_diagnostics(
     diagnostics: list[Diagnostic] = []
     if root.has_error:
         erroneous = [
-            node
-            for node in _walk_all(root)
-            if node.is_error or node.is_missing
+            node for node in _walk_all(root) if node.is_error or node.is_missing
         ]
         target = min(
             erroneous,
@@ -1039,8 +1067,10 @@ class _Declarations:
         self.boundaries: list[Any] = []
         self.references: list[ReferenceRef] = []
         self.regions: list[_Region] = []
+        self.anonymous: list[Any] = []
         self._export_scopes: list[frozenset[str]] = []
         self._callable_segments: dict[tuple[int, int, str], str] = {}
+        self._ambient_depth = 0
 
     @property
     def current_exports(self) -> frozenset[str]:
@@ -1120,6 +1150,7 @@ class _Declarations:
         wrapper_modifiers: tuple[str, ...] = (),
         class_bindings: tuple[Binding, ...] = (),
     ) -> None:
+        exported = exported or self._ambient_depth > 0
         if node.type == "import_statement":
             self.boundaries.append(node)
             return
@@ -1141,16 +1172,20 @@ class _Declarations:
             )
             return
         if node.type == "ambient_declaration":
-            for child in _named_children(node):
-                self.declaration(
-                    child,
-                    container_path,
-                    scope_kind,
-                    exported=exported,
-                    decorators=decorators,
-                    wrapper_modifiers=(*wrapper_modifiers, "declare"),
-                    class_bindings=class_bindings,
-                )
+            self._ambient_depth += 1
+            try:
+                for child in _named_children(node):
+                    self.declaration(
+                        child,
+                        container_path,
+                        scope_kind,
+                        exported=True,
+                        decorators=decorators,
+                        wrapper_modifiers=(*wrapper_modifiers, "declare"),
+                        class_bindings=class_bindings,
+                    )
+            finally:
+                self._ambient_depth -= 1
             return
         if node.type in _NAMESPACE_KINDS:
             self.namespace_declaration(
@@ -1174,6 +1209,7 @@ class _Declarations:
         if node.type in _FUNCTION_DECLARATIONS:
             name = ast_text(ast_field(node, "name"))
             if not name:
+                self.anonymous.append(node)
                 self.scope(
                     node,
                     container_path,
@@ -1182,6 +1218,7 @@ class _Declarations:
                 )
                 return
             if scope_kind == "anonymous":
+                self.anonymous.append(node)
                 self.scope(
                     node,
                     container_path,
@@ -1206,6 +1243,16 @@ class _Declarations:
                 node,
                 (*container_path, self.callable_segment(node, name)),
                 "callable",
+            )
+            return
+        if node.type in _CALLABLE_DECLARATIONS:
+            self.boundaries.append(node)
+            self.anonymous.append(node)
+            self.scope(
+                node,
+                container_path,
+                "anonymous",
+                class_bindings=class_bindings,
             )
             return
         if node.type in {"lexical_declaration", "variable_declaration"}:
@@ -1234,6 +1281,7 @@ class _Declarations:
                 )
                 self.scope(node, (*container_path, name), "callable")
             else:
+                self.anonymous.append(node)
                 self.scope(
                     node,
                     container_path,
@@ -1334,7 +1382,9 @@ class _Declarations:
                 "type_parameters",
             }
         )
-        self.references.extend(_type_references(self.source, type_symbol.id, type_roots))
+        self.references.extend(
+            _type_references(self.source, type_symbol.id, type_roots)
+        )
         self.references.extend(
             _annotation_references(self.source, type_symbol.id, decorators)
         )
@@ -1411,9 +1461,7 @@ class _Declarations:
                     container_path,
                     type_name,
                     type_kind,
-                    _unique_nodes(
-                        (*decorators, *_field_nodes(member, "decorator"))
-                    ),
+                    _unique_nodes((*decorators, *_field_nodes(member, "decorator"))),
                     class_bindings,
                 )
             elif member.type in _TYPE_KINDS:
@@ -1532,7 +1580,12 @@ class _Declarations:
                 )
                 self.scope(value, (*container_path, name), "callable")
                 continue
-            if len(names) == 1 and value is not None and value.type == "object" and self.object_api(value):
+            if (
+                len(names) == 1
+                and value is not None
+                and value.type == "object"
+                and self.object_api(value)
+            ):
                 name = names[0]
                 object_symbol = Symbol(
                     symbol_id(self.source, container_path, SymbolKind.CLASS, name),
@@ -1600,7 +1653,7 @@ class _Declarations:
                 value = ast_field(member, "value")
                 if value is None or value.type not in _CALLABLE_VALUES:
                     continue
-                name = ast_text(ast_field(member, "key")).strip('"\'')
+                name = ast_text(ast_field(member, "key")).strip("\"'")
                 if name:
                     self.callable(
                         name,
@@ -1790,6 +1843,30 @@ def _owned_facts(
     return events, _calls(source, owner, nodes), references
 
 
+def _possible_anonymous_references(
+    source: SourceFile,
+    nodes: Iterable[Any],
+    ownership: OwnershipContext,
+) -> tuple[ReferenceRef, ...]:
+    references: list[ReferenceRef] = []
+    for node in _unique_nodes(nodes):
+        owned = owned_nodes(source, node, ownership=ownership)
+        events = body_events(source, node, ownership=ownership)
+        for item in _body_references(source, None, events, owned):
+            references.append(
+                ReferenceRef(
+                    None,
+                    item.span,
+                    item.name,
+                    None,
+                    item.kind,
+                    item.context,
+                    ReferenceConfidence.POSSIBLE,
+                )
+            )
+    return ordered_unique(references)
+
+
 def extract(source: SourceFile, parser: object | None) -> FileIR:
     if source.language not in _TYPESCRIPT_LANGUAGES:
         raise ValueError(f"unsupported TypeScript-family language {source.language}")
@@ -1829,7 +1906,7 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
         declarations.boundaries.extend(import_boundaries)
         declarations.scope(root, (), "module")
     boundaries = tuple(declarations.boundaries)
-    ownership = ownership_context(boundaries, include_anonymous=True)
+    ownership = ownership_context(boundaries)
     callables = declarations.freeze_callables(ownership)
 
     symbols: list[Symbol] = [module_symbol]
@@ -1849,7 +1926,14 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
     symbols.sort(key=lambda item: item.span)
 
     calls: list[CallRef] = []
-    references: list[ReferenceRef] = list(declarations.references)
+    references: list[ReferenceRef] = [
+        *declarations.references,
+        *_possible_anonymous_references(
+            source,
+            declarations.anonymous,
+            ownership,
+        ),
+    ]
     bodies: list[BodyIR] = []
 
     module_events: list[BodyEvent] = []

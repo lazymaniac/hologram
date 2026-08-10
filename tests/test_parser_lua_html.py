@@ -12,10 +12,12 @@ from hologram.model import (
     BodyEventKind,
     CallKind,
     Language,
+    ReferenceConfidence,
     ReferenceKind,
     SourceFile,
     SourceRole,
     SymbolKind,
+    Visibility,
 )
 from hologram.parsers.api import extract_file
 from hologram.parsers.common import validate_body_events
@@ -131,11 +133,13 @@ class LuaParserTest(unittest.TestCase):
         nested = symbol(result, "nested", SymbolKind.FUNCTION)
 
         self.assertEqual(helper.params, ("?",))
+        self.assertIs(helper.visibility, Visibility.PRIVATE)
         self.assertIn(Binding("x", "?"), helper.bindings)
         self.assertEqual(run.id.container_path, ("M",))
         self.assertEqual(run.params, ("?",))
         self.assertIn(Binding("id", "?"), run.bindings)
-        self.assertEqual(nested.id.container_path, ("M", "run(?)"))
+        self.assertEqual(nested.id.container_path, ("M", "run"))
+        self.assertIs(nested.visibility, Visibility.PRIVATE)
         self.assertIn(Binding("value", "?"), nested.bindings)
         self.assertEqual(reset.id.container_path, ("M",))
         self.assertIn(Binding("self", "M"), reset.bindings)
@@ -196,6 +200,79 @@ class LuaParserTest(unittest.TestCase):
             {item.id for item in result.symbols},
             {item.id for item in shifted.symbols},
         )
+
+    def test_local_function_nested_in_assigned_callable_is_private(self) -> None:
+        raw = b"""\
+local Filter = create_filter({
+post_filter = function()
+  local function server_started(value)
+    return value
+  end
+  return server_started(true)
+end
+})
+return Filter
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/filter.lua"))
+
+        nested = symbol(result, "server_started", SymbolKind.FUNCTION)
+        self.assertIs(nested.visibility, Visibility.PRIVATE)
+
+    def test_anonymous_callback_calls_do_not_roll_into_named_owner(self) -> None:
+        raw = b"""\
+local M = {}
+local function nested() end
+function M.run()
+  direct()
+  schedule(function()
+    nested()
+  end)
+end
+return M
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/callback_calls.lua"))
+        run = symbol(result, "run", SymbolKind.METHOD)
+
+        self.assertEqual(
+            [
+                (item.receiver, item.name)
+                for item in result.calls
+                if item.caller == run.id
+            ],
+            [(None, "direct"), (None, "schedule")],
+        )
+        body = next(item for item in result.bodies if item.owner == run.id)
+        self.assertNotIn(
+            "nested",
+            [item.text for item in body.events if item.kind is BodyEventKind.CALL],
+        )
+        self.assertTrue(
+            any(
+                item.owner is None
+                and item.name == "nested"
+                and item.confidence is ReferenceConfidence.POSSIBLE
+                for item in result.references
+            )
+        )
+
+    def test_table_callback_slot_keeps_possible_reachability(self) -> None:
+        raw = b"""\
+local function prepare(value) return value end
+return {
+  pre_filter = prepare,
+  run = function(value) return prepare(value) end,
+}
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/filter.lua"))
+
+        possible = [
+            item
+            for item in result.references
+            if item.owner is None
+            and item.name == "prepare"
+            and item.confidence is ReferenceConfidence.POSSIBLE
+        ]
+        self.assertEqual(len(possible), 2)
 
     def test_static_brackets_long_requires_and_dynamic_requires_are_exact(self) -> None:
         source = snapshot(
@@ -301,9 +378,7 @@ return M
 """
         result = extract_file(snapshot(raw, Language.LUA, "src/shadow.lua"))
 
-        modules = [
-            item for item in result.symbols if item.kind is SymbolKind.MODULE
-        ]
+        modules = [item for item in result.symbols if item.kind is SymbolKind.MODULE]
         self.assertEqual(result.module, "M")
         self.assertEqual(len(modules), 1)
         self.assertEqual(modules[0].span.start_line, 1)
@@ -336,6 +411,29 @@ return M
         self.assertEqual(limit[0].span.start_line, 4)
         self.assertEqual(limit[0].returns, "number")
 
+    def test_chunk_tables_are_modules_and_only_literals_are_constants(self) -> None:
+        raw = b"""\
+local imported = require("external")
+local CONFIG = { enabled = true }
+local label = "ready"
+local count = 2
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/config.lua"))
+
+        self.assertEqual(
+            [item.name for item in result.symbols if item.kind is SymbolKind.MODULE],
+            ["CONFIG"],
+        )
+        self.assertEqual(
+            {
+                item.name: item.returns
+                for item in result.symbols
+                if item.kind is SymbolKind.CONSTANT
+            },
+            {"label": "string", "count": "number"},
+        )
+        self.assertNotIn("imported", {item.name for item in result.symbols})
+
     def test_nested_explicit_members_include_their_lexical_owner(self) -> None:
         raw = b"""\
 local M = {}
@@ -360,7 +458,7 @@ return M
         ]
         self.assertEqual(
             [item.id.container_path for item in runs],
-            [("install_one()", "M"), ("install_two()", "M")],
+            [("install_one", "M"), ("install_two", "M")],
         )
         self.assertEqual(len({item.id for item in runs}), 2)
 
@@ -407,7 +505,7 @@ return {
                     "methods",
                     "slash_commands",
                     "fetch",
-                    "setup(?)",
+                    "setup",
                     "self",
                     "handlers",
                 ),
@@ -415,7 +513,7 @@ return {
                     "methods",
                     "tools",
                     "fetch_webpage",
-                    "setup(?)",
+                    "setup",
                     "self",
                     "handlers",
                 ),
@@ -439,9 +537,7 @@ return T
         callables = [item for item in result.symbols if item.name == "x"]
         self.assertEqual(len(callables), 1)
         self.assertEqual(callables[0].span.start_line, 5)
-        owned_bodies = [
-            item for item in result.bodies if item.owner == callables[0].id
-        ]
+        owned_bodies = [item for item in result.bodies if item.owner == callables[0].id]
         self.assertEqual(len(owned_bodies), 1)
         self.assertEqual(owned_bodies[0].span.start_line, 6)
 
@@ -466,13 +562,26 @@ return T
 
         self.assertNotIn("stale", {item.name for item in result.symbols})
         current = symbol(result, "current", SymbolKind.FUNCTION)
-        self.assertEqual(current.id.container_path, ("T", "x()"))
+        self.assertEqual(current.id.container_path, ("T", "x"))
         self.assertEqual(current.span.start_line, 9)
         self.assertEqual(
             [item.name for item in result.calls if item.caller.name == "x"],
             ["current"],
         )
         self.assertNotIn("stale", {item.owner.name for item in result.bodies})
+
+    def test_direct_returned_table_functions_are_methods(self) -> None:
+        raw = b"""\
+return {
+  setup = function(value)
+    return value
+  end,
+}
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/scenario.lua"))
+
+        setup = symbol(result, "setup", SymbolKind.METHOD)
+        self.assertEqual(setup.id.container_path, ())
 
     def test_v1_nested_method_container_preserves_the_full_qualifier(self) -> None:
         raw = """\

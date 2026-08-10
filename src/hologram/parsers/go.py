@@ -432,7 +432,7 @@ class _Extractor:
             for member in named_children(type_node):
                 if member.type in {"method_elem", "method_spec"}:
                     continue
-                if member.type in {"type_identifier", "qualified_type"}:
+                if member.type in {"type_elem", "type_identifier", "qualified_type"}:
                     supers.append(_binding_type(ast_text(member)))
         else:
             kind = SymbolKind.TYPE

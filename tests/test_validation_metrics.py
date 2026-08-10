@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+import hologram
 from hologram import analysis, pipeline, render
 from hologram.config import ProjectConfig, default_config
 from hologram.resolve import ResolutionStatus
@@ -311,6 +312,74 @@ class ObservedFactTest(unittest.TestCase):
             "GoldTypeScriptBase",
         )
 
+    @unittest.skipUnless(
+        hologram.has_parser("typescript"), "tree-sitter-typescript not installed"
+    )
+    def test_typescript_signature_facts_are_structurally_canonical(self) -> None:
+        raw = """\
+export type Pair = { left: string; right: number };
+export interface Props { value: Map < string, number >; }
+const internal = 1;
+export function run(value: Pair): void {}
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "api.ts").write_text(raw, encoding="utf-8")
+            facts = observe_project(corpus="fixture", root=root, config=_config())
+
+        signatures = {
+            (_name(fact), json.loads(fact.subject)[3]): _thaw(fact.value)
+            for fact in facts
+            if fact.category == "signature"
+        }
+        self.assertEqual(
+            signatures[("Pair", "type")],
+            {
+                "text": "type Pair={left:string;right:number}",
+                "params": [],
+                "returns": None,
+                "raises": [],
+            },
+        )
+        self.assertEqual(
+            signatures[("value", "property")],
+            {
+                "text": "value:Map<string,number>",
+                "params": [],
+                "returns": None,
+                "raises": [],
+            },
+        )
+        self.assertEqual(
+            signatures[("internal", "constant")],
+            {
+                "text": "internal",
+                "params": [],
+                "returns": None,
+                "raises": [],
+            },
+        )
+        self.assertEqual(
+            signatures[("run", "fn")],
+            {
+                "text": "run(Pair):void",
+                "params": ["Pair"],
+                "returns": "void",
+                "raises": [],
+            },
+        )
+        component = next(
+            fact
+            for fact in facts
+            if fact.category == "relation"
+            and _name(fact) == "Props"
+            and _thaw(fact.value)["kind"] == "component"  # type: ignore[index]
+        )
+        self.assertEqual(
+            _thaw(component.value)["target"]["symbol"][4],  # type: ignore[index]
+            "value",
+        )
+
     def test_ambiguous_and_external_calls_are_omitted_without_reordering(self) -> None:
         config = _config()
         snapshot = pipeline.build_project(SYNTHETIC_ROOT, config)
@@ -367,6 +436,8 @@ class ObservedFactTest(unittest.TestCase):
             root = Path(tmp)
             (root / "app.ts").write_text(
                 'import express from "express";\n'
+                'import { missing } from "./missing";\n'
+                "declare namespace Local {}\n"
                 "export function run(): number { return 1; }\n",
                 encoding="utf-8",
             )
@@ -381,6 +452,31 @@ class ObservedFactTest(unittest.TestCase):
         self.assertEqual(
             _thaw(dependency.value),
             {"kind": "dependency", "target": {"external": "express"}},
+        )
+        self.assertEqual(
+            sum(
+                fact.category == "relation"
+                and _thaw(fact.value)["kind"] == "dependency"  # type: ignore[index]
+                for fact in facts
+            ),
+            1,
+        )
+
+    def test_dynamic_language_imports_are_not_static_dependency_relations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app.py").write_text(
+                "import external_package\n\ndef run():\n    return 1\n",
+                encoding="utf-8",
+            )
+            facts = observe_project(corpus="external", root=root, config=_config())
+
+        self.assertFalse(
+            any(
+                fact.category == "relation"
+                and _thaw(fact.value)["kind"] == "dependency"  # type: ignore[index]
+                for fact in facts
+            )
         )
 
 

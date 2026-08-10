@@ -31,7 +31,7 @@ from hologram.parsers.common import validate_body_events
 from hologram.scan import detect_language
 from tests.parser_assertions import assert_body_fact_events
 
-ALIAS_SOURCE = b'''\
+ALIAS_SOURCE = b"""\
 import Client, { Quote as PriceQuote } from "./api";
 import * as ids from "./ids";
 export { OrderId as PublicOrderId } from "./ids";
@@ -39,9 +39,9 @@ export const load = (id: ids.OrderId): PriceQuote => Client.fetch?.(id);
 export const onReady = (): void => {};
 register({ handler: "onReady" });
 const note = "onReady";
-'''
+"""
 
-DECLARATION_SOURCE = b'''\
+DECLARATION_SOURCE = b"""\
 @sealed
 export abstract class Outer extends Base implements API {
   private readonly count: number = 1;
@@ -80,9 +80,9 @@ export const api = {
   get(path: string): string { return fetchIt(path); },
   post: (body: string): string => body,
 };
-'''
+"""
 
-OWNERSHIP_SOURCE = b'''\
+OWNERSHIP_SOURCE = b"""\
 queue(() => boot());
 
 export function outer(items: Item[]): void {
@@ -92,9 +92,9 @@ export function outer(items: Item[]): void {
   named(items[0]);
   inner(items[0]);
 }
-'''
+"""
 
-HIDDEN_SHAPES_SOURCE = b'''\
+HIDDEN_SHAPES_SOURCE = b"""\
 declare function ambient(x: Input): Output;
 function overloaded(x: string): void;
 function overloaded(x: number): void;
@@ -110,9 +110,9 @@ export const asyncArrow = async (input: Input): Promise<Output> => load(input);
 export function construct(): Map<string, Output> {
   return new Map<string, Output>();
 }
-'''
+"""
 
-EDGE_SHAPES_SOURCE = b'''\
+EDGE_SHAPES_SOURCE = b"""\
 class Outer {
   method(): void { class Inner extends Base {} }
 }
@@ -127,6 +127,8 @@ class PrivateApi {
 
 const locallyExported = 1;
 export { locallyExported };
+const defaultExported = 2;
+export default defaultExported;
 const { visible, hidden } = source;
 export { visible };
 
@@ -142,9 +144,9 @@ class Initialized {
   @decorated()
   method(): void {}
 }
-'''
+"""
 
-BODY_SOURCE = '''\
+BODY_SOURCE = """\
 export function flow(items: Item[]): Result {
   const total: number = 0;
   for (const item of items) {
@@ -161,7 +163,7 @@ export function flow(items: Item[]): Result {
   }
   return finish(total);
 }
-'''.encode()
+""".encode()
 
 
 def snapshot(
@@ -281,7 +283,9 @@ class TypeScriptParserTest(unittest.TestCase):
                     first = parser.parse(b"first")  # type: ignore[union-attr]
                     second = parser.parse(b"second")  # type: ignore[union-attr]
 
-                expected_tree = fallback.tree if expected == "fallback" else primary.tree
+                expected_tree = (
+                    fallback.tree if expected == "fallback" else primary.tree
+                )
                 self.assertIs(first, expected_tree)
                 self.assertIs(second, expected_tree)
                 self.assertEqual(len(fallback.calls), fallback_calls * 2)
@@ -297,8 +301,12 @@ class TypeScriptParserTest(unittest.TestCase):
         result = extract_file(source)
 
         self.assertFalse(result.diagnostics)
-        self.assertEqual(symbol(result, "View", SymbolKind.FUNCTION).id.language, Language.JAVASCRIPT)
-        self.assertTrue(all(item.id.language is Language.JAVASCRIPT for item in result.symbols))
+        self.assertEqual(
+            symbol(result, "View", SymbolKind.FUNCTION).id.language, Language.JAVASCRIPT
+        )
+        self.assertTrue(
+            all(item.id.language is Language.JAVASCRIPT for item in result.symbols)
+        )
 
     def test_all_suffixes_dispatch_with_exact_language_ids(self) -> None:
         cases = {
@@ -324,7 +332,9 @@ class TypeScriptParserTest(unittest.TestCase):
                 self.assertTrue(
                     all(item.id.language is language for item in result.symbols)
                 )
-                self.assertTrue(all(call.caller.language is language for call in result.calls))
+                self.assertTrue(
+                    all(call.caller.language is language for call in result.calls)
+                )
 
     def test_snapshot_import_reexport_config_and_module_facts_are_exact(self) -> None:
         source = snapshot(ALIAS_SOURCE, file="src/aliases.ts")
@@ -353,7 +363,9 @@ class TypeScriptParserTest(unittest.TestCase):
         )
         public_id = symbol(result, "PublicOrderId", SymbolKind.REEXPORT)
         self.assertEqual(public_id.visibility, Visibility.PUBLIC)
-        self.assertEqual(public_id.span, token_span(source, b"OrderId as PublicOrderId"))
+        self.assertEqual(
+            public_id.span, token_span(source, b"OrderId as PublicOrderId")
+        )
 
         load = symbol(result, "load", SymbolKind.FUNCTION)
         self.assertEqual(load.params, ("ids.OrderId",))
@@ -485,26 +497,39 @@ class TypeScriptParserTest(unittest.TestCase):
             symbol(result, "post", SymbolKind.METHOD).id.container_path,
             ("api",),
         )
-        self.assertTrue(all(item.id.language is Language.TYPESCRIPT for item in result.symbols))
+        self.assertTrue(
+            all(item.id.language is Language.TYPESCRIPT for item in result.symbols)
+        )
         assert_body_fact_events(self, result)
 
-    def test_calls_are_uncapped_optional_construct_exact_and_source_ordered(self) -> None:
+    def test_calls_are_uncapped_optional_construct_exact_and_source_ordered(
+        self,
+    ) -> None:
         calls = b"\n".join(f"  fn{index}?.();".encode() for index in range(20))
-        raw = b"export function many(): void {\n" + calls + b"\n  new Widget(1, 2);\n}\n"
+        raw = (
+            b"export function many(): void {\n" + calls + b"\n  new Widget(1, 2);\n}\n"
+        )
         result = extract_file(snapshot(raw, file="src/many.ts"))
         many = symbol(result, "many", SymbolKind.FUNCTION)
         owned = [call for call in result.calls if call.caller == many.id]
 
-        self.assertEqual([call.name for call in owned], [*(f"fn{i}" for i in range(20)), "Widget"])
+        self.assertEqual(
+            [call.name for call in owned], [*(f"fn{i}" for i in range(20)), "Widget"]
+        )
         self.assertEqual(len(owned), 21)
         self.assertTrue(all(call.kind is CallKind.CALL for call in owned[:20]))
         self.assertEqual(owned[-1].kind, CallKind.CONSTRUCT)
         self.assertEqual(owned[-1].arity, 2)
-        self.assertEqual(owned[-1].span, token_span(snapshot(raw, file="src/many.ts"), b"new Widget(1, 2)"))
+        self.assertEqual(
+            owned[-1].span,
+            token_span(snapshot(raw, file="src/many.ts"), b"new Widget(1, 2)"),
+        )
         self.assertEqual(owned, sorted(owned, key=lambda call: call.span))
         assert_body_fact_events(self, result)
 
-    def test_nested_named_and_anonymous_expressions_have_nearest_owner(self) -> None:
+    def test_named_callables_keep_owners_and_anonymous_bodies_are_excluded(
+        self,
+    ) -> None:
         result = extract_file(snapshot(OWNERSHIP_SOURCE, file="src/owners.ts"))
         module = symbol(result, "src/owners", SymbolKind.MODULE)
         outer = symbol(result, "outer", SymbolKind.FUNCTION)
@@ -513,19 +538,19 @@ class TypeScriptParserTest(unittest.TestCase):
         by_name = {call.name: call.caller for call in result.calls}
 
         self.assertEqual(by_name["queue"], module.id)
-        self.assertEqual(by_name["boot"], module.id)
         self.assertEqual(by_name["map"], outer.id)
-        self.assertEqual(by_name["helper"], outer.id)
         self.assertEqual(by_name["convert"], named.id)
         self.assertEqual(by_name["finish"], inner.id)
         self.assertEqual(by_name["named"], outer.id)
         self.assertEqual(by_name["inner"], outer.id)
+        self.assertNotIn("boot", by_name)
+        self.assertNotIn("helper", by_name)
         self.assertEqual(named.id.container_path, ("outer",))
         self.assertEqual(inner.id.container_path, ("outer",))
         assert_body_fact_events(self, result)
 
-    def test_anonymous_callbacks_keep_locals_as_module_body_facts_only(self) -> None:
-        raw = b'''\
+    def test_anonymous_callbacks_are_fact_ownership_boundaries(self) -> None:
+        raw = b"""\
 describe("one", () => {
   const shared = make();
   run(shared);
@@ -534,29 +559,69 @@ describe("two", function () {
   const shared = makeOther();
   runOther(shared);
 });
-'''
+"""
         result = extract_file(snapshot(raw, file="src/callbacks.ts"))
         module = symbol(result, "src/callbacks", SymbolKind.MODULE)
         module_body = next(item for item in result.bodies if item.owner == module.id)
 
         self.assertFalse(result.diagnostics)
         self.assertNotIn("shared", {item.name for item in result.symbols})
-        self.assertEqual(
-            [
-                event.span.start_line
+        self.assertFalse(
+            any(
+                event.kind is BodyEventKind.LOCAL and event.text == "shared"
                 for event in module_body.events
-                if event.kind is BodyEventKind.LOCAL and event.text == "shared"
-            ],
-            [2, 6],
+            )
         )
         self.assertEqual(
             [call.name for call in result.calls if call.caller == module.id],
-            ["describe", "make", "run", "describe", "makeOther", "runOther"],
+            ["describe", "describe"],
         )
         assert_body_fact_events(self, result)
 
+    def test_ambient_type_queries_and_anonymous_reachability_are_conservative(
+        self,
+    ) -> None:
+        raw = b"""\
+declare global {
+  namespace Runtime {
+    interface Session { ready: boolean; }
+  }
+}
+const load = async (): Promise<string> => "ok";
+type Loaded = Awaited<ReturnType<typeof load>>;
+const callbackOnly = (): void => {};
+export function mount(): void {
+  schedule(() => callbackOnly());
+}
+"""
+        result = extract_file(snapshot(raw, file="src/ambient.ts"))
+
+        runtime = symbol(result, "Runtime", SymbolKind.MODULE)
+        session = symbol(result, "Session", SymbolKind.INTERFACE)
+        loaded = symbol(result, "Loaded", SymbolKind.TYPE)
+        self.assertIs(runtime.visibility, Visibility.PUBLIC)
+        self.assertIs(session.visibility, Visibility.PUBLIC)
+        self.assertTrue(
+            any(
+                item.owner == loaded.id
+                and item.name == "load"
+                and item.kind is ReferenceKind.NAME
+                and item.confidence is ReferenceConfidence.DEFINITE
+                for item in result.references
+            )
+        )
+        self.assertTrue(
+            any(
+                item.owner is None
+                and item.name == "callbackOnly"
+                and item.kind is ReferenceKind.NAME
+                and item.confidence is ReferenceConfidence.POSSIBLE
+                for item in result.references
+            )
+        )
+
     def test_anonymous_callbacks_do_not_coalesce_named_callable_locals(self) -> None:
-        raw = b'''\
+        raw = b"""\
 describe("one", () => {
   const helper = () => first();
   function declared() { second(); }
@@ -567,7 +632,7 @@ describe("two", function () {
   function declared() { fourth(); }
   helper(); declared();
 });
-'''
+"""
         result = extract_file(snapshot(raw, file="src/callback-callables.ts"))
         module = symbol(result, "src/callback-callables", SymbolKind.MODULE)
         module_body = next(item for item in result.bodies if item.owner == module.id)
@@ -575,36 +640,23 @@ describe("two", function () {
         self.assertFalse(result.diagnostics)
         self.assertEqual([item.name for item in result.symbols], [module.name])
         self.assertEqual([item.owner for item in result.bodies], [module.id])
-        self.assertEqual(
-            [
-                event.span.start_line
+        self.assertFalse(
+            any(
+                event.kind is BodyEventKind.LOCAL and event.text == "helper"
                 for event in module_body.events
-                if event.kind is BodyEventKind.LOCAL and event.text == "helper"
-            ],
-            [2, 7],
+            )
         )
         self.assertEqual(
             [call.name for call in result.calls if call.caller == module.id],
-            [
-                "describe",
-                "first",
-                "second",
-                "helper",
-                "declared",
-                "describe",
-                "third",
-                "fourth",
-                "helper",
-                "declared",
-            ],
+            ["describe", "describe"],
         )
         assert_body_fact_events(self, result)
 
     def test_repeated_classes_in_anonymous_callbacks_fail_closed(self) -> None:
-        raw = b'''\
+        raw = b"""\
 describe("one", () => { class Local { run() { first(); } } });
 describe("two", () => { class Local { run() { second(); } } });
-'''
+"""
         result = extract_file(snapshot(raw, file="src/callback-classes.ts"))
 
         self.assertEqual(result.symbols, ())
@@ -644,27 +696,71 @@ describe("two", () => { class Local { run() { second(); } } });
         self.assertIn("async", async_arrow.modifiers)
         construct = symbol(result, "construct", SymbolKind.FUNCTION)
         call = next(call for call in result.calls if call.caller == construct.id)
-        self.assertEqual((call.name, call.kind, call.arity), ("Map", CallKind.CONSTRUCT, 0))
+        self.assertEqual(
+            (call.name, call.kind, call.arity), ("Map", CallKind.CONSTRUCT, 0)
+        )
         assert_body_fact_events(self, result)
 
-    def test_anonymous_default_exports_keep_calls_on_the_module_owner(self) -> None:
+    def test_anonymous_default_exports_do_not_leak_body_facts(self) -> None:
         raw = (
             b"export default function () { const local = make(); functionBoot(local); }\n"
             b"export default class { run() { classBoot(); } }\n"
         )
         result = extract_file(snapshot(raw, file="src/defaults.ts"))
         module = symbol(result, "src/defaults", SymbolKind.MODULE)
-        self.assertEqual(
-            {call.name for call in result.calls if call.caller == module.id},
-            {"make", "functionBoot", "classBoot"},
-        )
+        self.assertFalse(any(call.caller == module.id for call in result.calls))
         self.assertNotIn("local", {item.name for item in result.symbols})
         self.assertFalse(
-            any(
-                item.name in {"default", "anonymous"}
-                for item in result.symbols
-            )
+            any(item.name in {"default", "anonymous"} for item in result.symbols)
         )
+
+    def test_callable_type_whitespace_does_not_change_symbol_identity(self) -> None:
+        raw = b"""\
+export function select(value: { eventType: number; start: any }): void {}
+interface Api { task(options: Partial<Loggable & Timeoutable>): void; }
+"""
+        result = extract_file(snapshot(raw, file="src/types.ts"))
+
+        select = symbol(result, "select", SymbolKind.FUNCTION)
+        task = symbol(result, "task", SymbolKind.METHOD)
+        self.assertEqual(select.params, ("{eventType:number;start:any}",))
+        self.assertEqual(
+            select.id.signature_key,
+            "({eventType:number;start:any})",
+        )
+        self.assertEqual(task.params, ("Partial<Loggable&Timeoutable>",))
+        self.assertEqual(
+            task.id.signature_key,
+            "(Partial<Loggable&Timeoutable>)",
+        )
+
+    def test_discarded_duplicate_object_owner_prunes_nested_callables(self) -> None:
+        raw = b"""\
+module.exports = defineConfig({
+  component: {
+    setupNodeEvents() {
+      const componentOnly = () => first();
+      return componentOnly();
+    },
+  },
+  e2e: {
+    setupNodeEvents() {
+      const queryDatabase = () => {
+        const fetchData = async () => second();
+        return fetchData();
+      };
+      return queryDatabase();
+    },
+  },
+});
+"""
+        result = extract_file(snapshot(raw, file="cypress.config.ts"))
+
+        self.assertNotIn(
+            "queryDatabase",
+            {item.name for item in result.symbols},
+        )
+        self.assertNotIn("fetchData", {item.name for item in result.symbols})
 
     def test_edge_grammar_shapes_do_not_leak_flatten_or_drop_facts(self) -> None:
         result = extract_file(snapshot(EDGE_SHAPES_SOURCE, file="src/edges.ts"))
@@ -691,6 +787,10 @@ describe("two", () => { class Local { run() { second(); } } });
         )
         self.assertEqual(
             symbol(result, "locallyExported", SymbolKind.CONSTANT).visibility,
+            Visibility.PUBLIC,
+        )
+        self.assertEqual(
+            symbol(result, "defaultExported", SymbolKind.CONSTANT).visibility,
             Visibility.PUBLIC,
         )
         self.assertEqual(
@@ -742,10 +842,7 @@ describe("two", () => { class Local { run() { second(); } } });
         self.assertEqual({call.name for call in result.calls}, {"visible"})
 
     def test_adjacent_sfc_scripts_are_independent_original_byte_programs(self) -> None:
-        raw = (
-            b"<script>export const a=1</script>"
-            b"<script>export const b=2</script>"
-        )
+        raw = b"<script>export const a=1</script><script>export const b=2</script>"
         for language, file in (
             (Language.VUE, "Adjacent.vue"),
             (Language.SVELTE, "Adjacent.svelte"),
@@ -760,10 +857,12 @@ describe("two", () => { class Local { run() { second(); } } });
                 self.assertEqual(b.span, token_span(source, b"b=2"))
                 self.assertIs(a.id.language, language)
                 self.assertIs(b.id.language, language)
-                self.assertEqual(len({item.id for item in result.symbols}), len(result.symbols))
+                self.assertEqual(
+                    len({item.id for item in result.symbols}), len(result.symbols)
+                )
 
     def test_comments_do_not_break_pending_member_decorators(self) -> None:
-        raw = b'''\
+        raw = b"""\
 class Decorated {
   @first // first docs
   @second /* second docs */
@@ -773,7 +872,7 @@ class Decorated {
   // field docs
   field: Dep = make();
 }
-'''
+"""
         result = extract_file(snapshot(raw, file="src/decorators.ts"))
         method = symbol(result, "method", SymbolKind.METHOD, ("Decorated",))
         field = symbol(result, "field", SymbolKind.FIELD, ("Decorated",))
@@ -799,12 +898,14 @@ class Decorated {
                 annotation_refs,
             )
 
-    def test_explicit_this_and_rest_parameters_share_signature_binding_events(self) -> None:
-        raw = b'''\
+    def test_explicit_this_and_rest_parameters_share_signature_binding_events(
+        self,
+    ) -> None:
+        raw = b"""\
 function invoke(this: Client, ...args: string[]): void {
   dispatch(this, args);
 }
-'''
+"""
         result = extract_file(snapshot(raw, file="src/this-param.ts"))
         invoke = symbol(result, "invoke", SymbolKind.FUNCTION)
         self.assertEqual(invoke.params, ("Client", "string[]"))
@@ -821,8 +922,10 @@ function invoke(this: Client, ...args: string[]): void {
         self.assertIn(("args", token_span(result.source, b"args")), param_events)
         assert_body_fact_events(self, result)
 
-    def test_overload_definitions_coalesce_and_descendants_use_signature_paths(self) -> None:
-        raw = b'''\
+    def test_overload_definitions_coalesce_and_descendants_use_signature_paths(
+        self,
+    ) -> None:
+        raw = b"""\
 function same(x: string): string;
 function same(x: string): string {
   return normalize(x);
@@ -835,7 +938,7 @@ function choose(x: string | number): string | number {
   nested();
   return x;
 }
-'''
+"""
         result = extract_file(snapshot(raw, file="src/overloads.ts"))
         same = [
             item
@@ -851,17 +954,19 @@ function choose(x: string | number): string | number {
         )
 
         nested = symbol(result, "nested", SymbolKind.FUNCTION)
-        self.assertEqual(nested.id.container_path, ("choose(string | number)",))
+        self.assertEqual(nested.id.container_path, ("choose(string|number)",))
         self.assertEqual(len({item.id for item in result.symbols}), len(result.symbols))
         assert_body_fact_events(self, result)
 
-    def test_declaration_and_intrinsic_jsx_names_are_not_definite_references(self) -> None:
-        raw = b'''\
+    def test_declaration_and_intrinsic_jsx_names_are_not_definite_references(
+        self,
+    ) -> None:
+        raw = b"""\
 function id<T extends Base>(value: T): T { return value; }
 class RefShape { field: Dep = make(); }
 enum Choice { A, B = init() }
 const view = <div className="x"><Widget item={value} /></div>;
-'''
+"""
         source = snapshot(raw, language=Language.TSX, file="src/refs.tsx")
         result = extract_file(source)
         definite = {
@@ -879,7 +984,9 @@ const view = <div className="x"><Widget item={value} /></div>;
             ("className", b"className", 1),
             ("item", b"item", 1),
         ):
-            self.assertNotIn((name, token_span(source, token, occurrence=occurrence)), definite)
+            self.assertNotIn(
+                (name, token_span(source, token, occurrence=occurrence)), definite
+            )
         for name, token in (
             ("Base", b"Base"),
             ("Dep", b"Dep"),
@@ -952,12 +1059,28 @@ const view = <div className="x"><Widget item={value} /></div>;
         )
         validate_body_events(body.events)
         self.assertEqual(
-            [event.text for event in body.events if event.kind is BodyEventKind.CONTROL_ENTER],
+            [
+                event.text
+                for event in body.events
+                if event.kind is BodyEventKind.CONTROL_ENTER
+            ],
             ["loop", "if", "try", "catch", "finally"],
         )
         self.assertEqual(
-            len([event for event in body.events if event.kind is BodyEventKind.CONTROL_ENTER]),
-            len([event for event in body.events if event.kind is BodyEventKind.CONTROL_EXIT]),
+            len(
+                [
+                    event
+                    for event in body.events
+                    if event.kind is BodyEventKind.CONTROL_ENTER
+                ]
+            ),
+            len(
+                [
+                    event
+                    for event in body.events
+                    if event.kind is BodyEventKind.CONTROL_EXIT
+                ]
+            ),
         )
         handle = next(call for call in original.calls if call.name == "handle")
         self.assertEqual(handle.span, token_span(source, b"service.handle(widget)"))
@@ -965,8 +1088,8 @@ const view = <div className="x"><Widget item={value} /></div>;
 
     def test_vue_and_svelte_masked_scripts_keep_original_byte_coordinates(self) -> None:
         raw = (
-            "pr\u00e9<script>export const first = (): string => \"\u017c\";</script>tail\r\n"
-            "<div>\u0142</div><script lang=\"ts\">export function second(x: number): number "
+            'pr\u00e9<script>export const first = (): string => "\u017c";</script>tail\r\n'
+            '<div>\u0142</div><script lang="ts">export function second(x: number): number '
             "{ return x + 1; }</script>fin"
         ).encode()
         cases = ((Language.VUE, "Widget.vue"), (Language.SVELTE, "Widget.svelte"))
@@ -981,14 +1104,20 @@ const view = <div className="x"><Widget item={value} /></div>;
                 second = symbol(result, "second", SymbolKind.FUNCTION)
                 self.assertEqual(component.signature, "component Widget")
                 self.assertEqual(first.span.start_line, 1)
-                self.assertEqual(first.span.start_column, token_span(source, b"first").start_column)
+                self.assertEqual(
+                    first.span.start_column, token_span(source, b"first").start_column
+                )
                 self.assertEqual(second.span.start_line, 2)
                 self.assertEqual(
                     second.span.start_column,
                     token_span(source, b"function second").start_column,
                 )
-                self.assertTrue(all(item.id.language is language for item in result.symbols))
-                self.assertTrue(all(call.caller.language is language for call in result.calls))
+                self.assertTrue(
+                    all(item.id.language is language for item in result.symbols)
+                )
+                self.assertTrue(
+                    all(call.caller.language is language for call in result.calls)
+                )
                 assert_body_fact_events(self, result)
 
     def test_component_is_emitted_without_a_script(self) -> None:
@@ -998,7 +1127,11 @@ const view = <div className="x"><Widget item={value} /></div>;
         ):
             with self.subTest(language=language):
                 result = extract_file(
-                    snapshot(b"<template>\xc5\xbc</template>\r\n", language=language, file=file)
+                    snapshot(
+                        b"<template>\xc5\xbc</template>\r\n",
+                        language=language,
+                        file=file,
+                    )
                 )
                 component = symbol(result, "Only", SymbolKind.CLASS)
                 self.assertIs(component.id.language, language)
@@ -1006,7 +1139,9 @@ const view = <div className="x"><Widget item={value} /></div>;
 
     def test_syntax_errors_are_diagnostics_with_partial_facts(self) -> None:
         result = extract_file(
-            snapshot(b"export class Broken { method( { return call(); }\n", file="Broken.ts")
+            snapshot(
+                b"export class Broken { method( { return call(); }\n", file="Broken.ts"
+            )
         )
         self.assertIn("Broken", {item.name for item in result.symbols})
         self.assertEqual(len(result.diagnostics), 1)

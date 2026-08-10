@@ -565,8 +565,7 @@ def _trait_bounds(node: object | None) -> tuple[str, ...]:
     return ordered_unique(
         _binding_type(ast_text(child))
         for child in named_children(node)
-        if child.type
-        in {"generic_type", "scoped_type_identifier", "type_identifier"}
+        if child.type in {"generic_type", "scoped_type_identifier", "type_identifier"}
         and ast_text(child)
     )
 
@@ -580,16 +579,23 @@ class _Extractor:
         self.references: list[ReferenceRef] = []
         self.bodies: list[BodyIR] = []
         relations: dict[str, list[str]] = {}
+        relation_nodes: dict[str, list[object]] = {}
         for node in walk_all(root):
             if node.type != "impl_item":
                 continue
-            target = _binding_type(_type_text(ast_field(node, "type")))
+            target_node = ast_field(node, "type")
+            target = _binding_type(_type_text(target_node))
             trait = ast_field(node, "trait")
             trait_name = _binding_type(_type_text(trait)) if trait is not None else ""
             if target and trait_name:
                 relations.setdefault(target, []).append(trait_name)
+                relation_nodes.setdefault(target, []).extend((target_node, trait))
         self.relations = {
             name: ordered_unique(values) for name, values in relations.items()
+        }
+        self.relation_nodes = {
+            name: tuple(node for node in nodes if node is not None)
+            for name, nodes in relation_nodes.items()
         }
 
     def extract_region(self, node: object, container_path: tuple[str, ...]) -> None:
@@ -647,7 +653,13 @@ class _Extractor:
         self.add_symbol(symbol, node)
         self.references.extend(
             _type_references(
-                self.source, symbol.id, (body, ast_field(node, "type_parameters"))
+                self.source,
+                symbol.id,
+                (
+                    body,
+                    ast_field(node, "type_parameters"),
+                    *self.relation_nodes.get(name, ()),
+                ),
             )
         )
         owned_path = (*container_path, name)
@@ -690,6 +702,13 @@ class _Extractor:
             modifiers=_modifiers(node),
         )
         self.add_symbol(symbol, node)
+        self.references.extend(
+            _type_references(
+                self.source,
+                symbol.id,
+                self.relation_nodes.get(name, ()),
+            )
+        )
         owned_path = (*container_path, name)
         for variant in variants:
             variant_name = ast_text(ast_field(variant, "name"))

@@ -992,8 +992,8 @@ class ValidationGoldCoverageTest(unittest.TestCase):
                 "5b01babaf788702ea42fa9f069e71bade456df7976477a1d9d3911322f23f4a6",
             ),
             ("facts", "cypress"): (
-                1217,
-                "e13d148fc9af524fb1bc6f197c1cdf47f40b3c71216cbb3d218209552dd18450",
+                1219,
+                "9b202c6b7e857bf3013a3328837877d64eabc342eacb592a8cdf70798dfe5132",
             ),
             ("facts", "hologram"): (
                 3380,
@@ -1012,8 +1012,8 @@ class ValidationGoldCoverageTest(unittest.TestCase):
                 "4dc3c86cffc9097e201e4fce4c858a9ce79c27917db2fdc5e1f3d4da0149d0c1",
             ),
             ("exclusions", "cypress"): (
-                248,
-                "00428a149f49d81a085ff799814a520a78f3de9c7dcb32da27773a01fca0101d",
+                246,
+                "566484c626eda4bad930c8977868cbb8445e6b73ddb7ebf899cc86067d50d953",
             ),
             ("exclusions", "hologram"): (
                 1569,

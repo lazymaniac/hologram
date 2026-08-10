@@ -11,6 +11,9 @@ from unittest.mock import patch
 import hologram.resolve as resolver_module
 from hologram.model import (
     Binding,
+    BodyEvent,
+    BodyEventKind,
+    BodyIR,
     CallKind,
     CallRef,
     FileIR,
@@ -99,6 +102,7 @@ def file_ir(
     calls: tuple[CallRef, ...] = (),
     imports: tuple[ImportRef, ...] = (),
     references: tuple[ReferenceRef, ...] = (),
+    bodies: tuple[BodyIR, ...] = (),
 ) -> FileIR:
     return FileIR(
         source(file, language),
@@ -107,6 +111,7 @@ def file_ir(
         calls=calls,
         imports=imports,
         references=references,
+        bodies=bodies,
     )
 
 
@@ -713,9 +718,7 @@ class ImportResolutionTest(unittest.TestCase):
                 Language.C,
                 module=None,
                 symbols=(owner,),
-                imports=(
-                    ImportRef(span(owner.file, 2), "./api.h", None, None),
-                ),
+                imports=(ImportRef(span(owner.file, 2), "./api.h", None, None),),
                 calls=(call(owner, "fetch"),),
             ),
         )
@@ -850,6 +853,33 @@ class ImportResolutionTest(unittest.TestCase):
                     resolve_project(raw).imports[0].status,
                     ResolutionStatus.RESOLVED,
                 )
+
+    def test_lua_path_alias_retains_the_exported_module_owner(self) -> None:
+        owner = symbol("lua/app.lua", Language.LUA, "run")
+        module = symbol(
+            "lua/types.lua",
+            Language.LUA,
+            "M",
+            kind=SymbolKind.MODULE,
+        )
+        raw = project(
+            file_ir(
+                owner.file,
+                Language.LUA,
+                module="app",
+                symbols=(owner,),
+                imports=(ImportRef(span(owner.file, 1), "lua.types", None, "types"),),
+            ),
+            file_ir(
+                module.file,
+                Language.LUA,
+                module="M",
+                symbols=(module,),
+            ),
+        )
+        imported = resolve_project(raw).imports[0]
+        self.assertEqual(imported.status, ResolutionStatus.RESOLVED)
+        self.assertEqual(imported.target_symbols, (module.id,))
 
     def test_wildcard_keeps_only_public_targets_without_becoming_ambiguous(
         self,
@@ -1668,9 +1698,7 @@ class CallResolutionTest(unittest.TestCase):
                 Language.JAVA,
                 module="app",
                 symbols=(owner,),
-                imports=(
-                    ImportRef(span(owner.file, 2), "lib.Api", "fetch", None),
-                ),
+                imports=(ImportRef(span(owner.file, 2), "lib.Api", "fetch", None),),
                 calls=(call(owner, "fetch", arity=1),),
             ),
         )
@@ -1679,6 +1707,152 @@ class CallResolutionTest(unittest.TestCase):
         self.assertEqual(result.calls[0].status, ResolutionStatus.RESOLVED)
         self.assertEqual(result.calls[0].target, unary.id)
         self.assertEqual(result.calls[0].candidates, (unary.id,))
+
+    def test_python_extracted_arity_range_accepts_defaults_and_rejects_underflow(
+        self,
+    ) -> None:
+        owner = symbol("app.py", Language.PYTHON, "run")
+        target = symbol(
+            owner.file,
+            Language.PYTHON,
+            "fetch",
+            params=("int", "str"),
+            bindings=(Binding("\0hologram-arity", "1:2"),),
+        )
+        raw = project(
+            file_ir(
+                owner.file,
+                Language.PYTHON,
+                module="app",
+                symbols=(owner, target),
+                calls=(
+                    call(owner, "fetch", arity=1, line=10),
+                    call(owner, "fetch", arity=2, line=11),
+                    call(owner, "fetch", arity=0, line=12),
+                ),
+            )
+        )
+
+        result = resolve_project(raw).calls
+        self.assertEqual([item.target for item in result[:2]], [target.id, target.id])
+        self.assertEqual(result[2].status, ResolutionStatus.UNRESOLVED)
+
+    def test_lua_module_root_self_scope_and_flexible_member_arity(self) -> None:
+        connection = symbol(
+            "lua/pkg/client.lua",
+            Language.LUA,
+            "Connection",
+            kind=SymbolKind.MODULE,
+        )
+        owner = symbol(
+            connection.file,
+            Language.LUA,
+            "connect",
+            kind=SymbolKind.METHOD,
+            container=("Connection",),
+        )
+        ready = symbol(
+            connection.file,
+            Language.LUA,
+            "is_ready",
+            kind=SymbolKind.METHOD,
+            container=("Connection",),
+        )
+        logger = symbol(
+            "lua/pkg/log.lua",
+            Language.LUA,
+            "Logger",
+            kind=SymbolKind.MODULE,
+        )
+        warn = symbol(
+            logger.file,
+            Language.LUA,
+            "warn",
+            kind=SymbolKind.METHOD,
+            container=("Logger",),
+            params=("?", "..."),
+        )
+        model_choice = symbol(
+            logger.file,
+            Language.LUA,
+            "model_choice",
+            kind=SymbolKind.METHOD,
+            container=("Logger",),
+            params=("?", "?"),
+        )
+        formatter = symbol(
+            logger.file,
+            Language.LUA,
+            "Formatter",
+            kind=SymbolKind.MODULE,
+        )
+        create = symbol(
+            logger.file,
+            Language.LUA,
+            "new",
+            kind=SymbolKind.METHOD,
+            container=("Formatter",),
+            params=("?",),
+        )
+        builtin_decoy = symbol(
+            logger.file,
+            Language.LUA,
+            "next",
+            kind=SymbolKind.METHOD,
+            container=("Formatter",),
+        )
+        raw = project(
+            file_ir(
+                connection.file,
+                Language.LUA,
+                module=None,
+                symbols=(connection, owner, ready),
+                imports=(ImportRef(span(connection.file, 2), "pkg.log", None, "log"),),
+                calls=(
+                    call(owner, "is_ready", receiver="self", arity=0),
+                    call(owner, "warn", receiver="log", arity=1, line=11),
+                    call(owner, "model_choice", receiver="log", arity=1, line=12),
+                    call(owner, "new", receiver="log.Formatter", arity=0, line=13),
+                    call(
+                        owner,
+                        "model_choice",
+                        receiver='require("pkg.log")',
+                        arity=1,
+                        line=14,
+                    ),
+                    call(owner, "is_ready", receiver="Connection", line=15),
+                    call(owner, "next", line=16),
+                ),
+            ),
+            file_ir(
+                logger.file,
+                Language.LUA,
+                module=None,
+                symbols=(
+                    logger,
+                    warn,
+                    model_choice,
+                    formatter,
+                    create,
+                    builtin_decoy,
+                ),
+            ),
+        )
+
+        result = resolve_project(raw)
+        self.assertEqual(result.imports[0].status, ResolutionStatus.RESOLVED)
+        self.assertEqual(
+            tuple((item.status, item.target) for item in result.calls),
+            (
+                (ResolutionStatus.RESOLVED, ready.id),
+                (ResolutionStatus.RESOLVED, warn.id),
+                (ResolutionStatus.RESOLVED, model_choice.id),
+                (ResolutionStatus.RESOLVED, create.id),
+                (ResolutionStatus.RESOLVED, model_choice.id),
+                (ResolutionStatus.RESOLVED, ready.id),
+                (ResolutionStatus.EXTERNAL, None),
+            ),
+        )
 
     def test_same_name_without_import_stays_ambiguous(self) -> None:
         owner = symbol("app.py", Language.PYTHON, "run")
@@ -1781,9 +1955,7 @@ class CallResolutionTest(unittest.TestCase):
         self.assertEqual(result[2].target, gadget.id)
 
     def test_type_namespace_is_not_shadowed_by_a_value_binding(self) -> None:
-        client = symbol(
-            "app.java", Language.JAVA, "Client", kind=SymbolKind.CLASS
-        )
+        client = symbol("app.java", Language.JAVA, "Client", kind=SymbolKind.CLASS)
         owner = symbol(
             "app.java",
             Language.JAVA,
@@ -2052,6 +2224,72 @@ class CallResolutionTest(unittest.TestCase):
             [item.status for item in resolve_project(raw).calls],
             [ResolutionStatus.UNRESOLVED, ResolutionStatus.UNRESOLVED],
         )
+
+    def test_body_events_distinguish_member_bindings_from_local_shadows(self) -> None:
+        owner_type = symbol(
+            "App.java",
+            Language.JAVA,
+            "App",
+            kind=SymbolKind.CLASS,
+        )
+        member = symbol(
+            "App.java",
+            Language.JAVA,
+            "member",
+            kind=SymbolKind.FIELD,
+            container=("App",),
+            visibility=Visibility.PRIVATE,
+        )
+        owner = symbol(
+            "App.java",
+            Language.JAVA,
+            "run",
+            kind=SymbolKind.METHOD,
+            container=("App",),
+            bindings=(Binding("member", "String"), Binding("local", "String")),
+        )
+        references = (
+            ReferenceRef(
+                owner.id,
+                span(owner.file, 10),
+                "member",
+                None,
+                ReferenceKind.NAME,
+                ReferenceContext.CODE,
+                ReferenceConfidence.DEFINITE,
+            ),
+            ReferenceRef(
+                owner.id,
+                span(owner.file, 11),
+                "local",
+                None,
+                ReferenceKind.NAME,
+                ReferenceContext.CODE,
+                ReferenceConfidence.DEFINITE,
+            ),
+        )
+        body = BodyIR(
+            owner.id,
+            span(owner.file, 9),
+            (BodyEvent(BodyEventKind.LOCAL, "local", span(owner.file, 9)),),
+        )
+        result = resolve_project(
+            project(
+                file_ir(
+                    owner.file,
+                    Language.JAVA,
+                    module="app",
+                    symbols=(owner_type, member, owner),
+                    references=references,
+                    bodies=(body,),
+                )
+            )
+        )
+        self.assertEqual(
+            [item.status for item in result.references],
+            [ResolutionStatus.RESOLVED, ResolutionStatus.UNRESOLVED],
+        )
+        self.assertEqual(result.references[0].target, member.id)
 
     def test_external_and_unresolved_explicit_aliases_stop_homonym_fallback(
         self,

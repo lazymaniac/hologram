@@ -12,6 +12,7 @@ from unittest.mock import patch
 import hologram.parsers.python as python_parser
 from hologram import legacy
 from hologram.model import (
+    Binding,
     BodyEvent,
     BodyEventKind,
     CallKind,
@@ -273,7 +274,12 @@ class PythonParserTest(unittest.TestCase):
         self.assertEqual(nested.id.container_path, ("outer",))
         self.assertEqual(
             [(binding.name, binding.type_name) for binding in outer.bindings],
-            [("order", "OrderId"), ("client", "Client"), ("note", "Label")],
+            [
+                ("order", "OrderId"),
+                ("\0hologram-arity", "1:1"),
+                ("client", "Client"),
+                ("note", "Label"),
+            ],
         )
         self.assertEqual(nested.raises, ("PricingError",))
         self.assertNotIn(
@@ -299,6 +305,26 @@ class PythonParserTest(unittest.TestCase):
         )
         self.assert_file_identity(result)
         assert_body_fact_events(self, result)
+
+    def test_callable_bindings_retain_python_accepted_arity_range(self) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+def optional(a: int, b: str = "x", *, c: bool = True):
+    return a
+
+def variadic(a, *rest, **kwargs):
+    return a
+""",
+                file="arity.py",
+                language=Language.PYTHON,
+            )
+        )
+
+        optional = next(item for item in result.symbols if item.name == "optional")
+        variadic = next(item for item in result.symbols if item.name == "variadic")
+        self.assertIn(Binding("\0hologram-arity", "1:3"), optional.bindings)
+        self.assertIn(Binding("\0hologram-arity", "1:*"), variadic.bindings)
 
     def test_body_events_are_complete_balanced_and_use_utf8_byte_columns(self) -> None:
         result = extract_file(

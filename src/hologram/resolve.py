@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import TypeVar
 
 from .model import (
+    BodyEventKind,
     CallKind,
     CallRef,
     Diagnostic,
@@ -160,6 +161,33 @@ _TYPE_KINDS = frozenset(
 _CALLABLE_KINDS = frozenset(
     {SymbolKind.FUNCTION, SymbolKind.METHOD, SymbolKind.CONSTRUCTOR}
 )
+_ARITY_BINDING_NAME = "\0hologram-arity"
+
+
+def _accepts_arity(symbol: Symbol, arity: int | None) -> bool:
+    if arity is None or symbol.id.language is Language.LUA:
+        return True
+    arity_range = next(
+        (
+            binding.type_name
+            for binding in symbol.bindings
+            if binding.name == _ARITY_BINDING_NAME
+        ),
+        None,
+    )
+    if arity_range is not None:
+        minimum_text, separator, maximum_text = arity_range.partition(":")
+        if (
+            separator
+            and minimum_text.isdecimal()
+            and (maximum_text == "*" or maximum_text.isdecimal())
+        ):
+            minimum = int(minimum_text)
+            maximum = None if maximum_text == "*" else int(maximum_text)
+            return arity >= minimum and (maximum is None or arity <= maximum)
+    if symbol.params[-1:] == ("...",):
+        return arity >= len(symbol.params) - 1
+    return arity == len(symbol.params)
 
 
 def _family(language: Language) -> str:
@@ -191,6 +219,33 @@ def _extensionless(file: str) -> str:
 
 
 _EXACT_FILE_PREFIX = "\0file:"
+_LUA_REQUIRE_RECEIVER = re.compile(r"""require\((?:"([^"]+)"|'([^']+)')\)\Z""")
+_LUA_BUILTIN_CALLS = frozenset(
+    {
+        "assert",
+        "collectgarbage",
+        "dofile",
+        "error",
+        "getmetatable",
+        "ipairs",
+        "load",
+        "next",
+        "pairs",
+        "pcall",
+        "print",
+        "rawequal",
+        "rawget",
+        "rawlen",
+        "rawset",
+        "require",
+        "select",
+        "setmetatable",
+        "tonumber",
+        "tostring",
+        "type",
+        "xpcall",
+    }
+)
 
 
 def _exact_file_key(file: str) -> str:
@@ -228,6 +283,18 @@ def _path_module(file_ir: FileIR) -> str:
             parts = parts[:-1]
         return "/".join(("crate", *parts))
     return value
+
+
+def _lua_source_module(file_ir: FileIR) -> str | None:
+    if file_ir.source.language is not Language.LUA:
+        return None
+    path = PurePosixPath(_extensionless(file_ir.source.file))
+    if path.parts[:1] != ("lua",):
+        return None
+    parts = path.parts[1:]
+    if parts[-1:] == ("init",):
+        parts = parts[:-1]
+    return ".".join(parts) or None
 
 
 def _declared_module(file_ir: FileIR) -> str | None:
@@ -337,6 +404,15 @@ class _Resolver:
             )
         )
         self.symbol_by_id = {symbol.id: symbol for symbol in self.symbols}
+        self.value_binding_names = {
+            body.owner: frozenset(
+                event.text
+                for event in body.events
+                if event.kind in {BodyEventKind.LOCAL, BodyEventKind.PARAM}
+            )
+            for file_ir in self.files
+            for body in file_ir.bodies
+        }
         self.by_family_name: dict[tuple[str, str], list[Symbol]] = defaultdict(list)
         self.by_file_name: dict[tuple[str, str], list[Symbol]] = defaultdict(list)
         self.by_container_name: dict[tuple[str, tuple[str, ...], str], list[Symbol]] = (
@@ -401,6 +477,8 @@ class _Resolver:
             language = file_ir.source.language
             family = _family(language)
             base_keys = {_path_module(file_ir)}
+            if lua_source_module := _lua_source_module(file_ir):
+                base_keys.add(lua_source_module)
             if declared := _declared_module(file_ir):
                 base_keys.add(declared)
             if language in {
@@ -500,6 +578,10 @@ class _Resolver:
                 key = _module_symbol_key(file_ir, module_symbol)
                 if not key:
                     continue
+                if language is Language.LUA:
+                    for base_key in base_keys:
+                        if base_key:
+                            self.module_owners[family, base_key].add(module_symbol.id)
                 self.module_files[family, key].add(file_ir.source.file)
                 self.module_owners[family, key].add(module_symbol.id)
                 for symbol in public:
@@ -919,9 +1001,7 @@ class _Resolver:
                 else set()
             )
             namespace_status = (
-                self.namespace_reexport_evidence.get(
-                    (family, key, fact.name)
-                )
+                self.namespace_reexport_evidence.get((family, key, fact.name))
                 if fact.name is not None
                 else None
             )
@@ -1023,8 +1103,10 @@ class _Resolver:
             if local:
                 target_symbols = self._symbols(item.target_symbols)
                 alias_module_keys = set(namespace_targets)
+                if fact.name is None and key:
+                    alias_module_keys.add(key)
                 separator = "/" if file_ir.source.language is Language.RUST else "."
-                for target_symbol in target_symbols:
+                for target_symbol in target_symbols if fact.name is not None else ():
                     if target_symbol.kind is not SymbolKind.MODULE:
                         continue
                     symbol_key = separator.join(
@@ -1252,6 +1334,34 @@ class _Resolver:
                 return tuple(sorted(values, key=lambda item: item.id))
         return ()
 
+    def _enclosing_members(self, owner: Symbol, name: str) -> tuple[Symbol, ...]:
+        container = owner.id.container_path
+        for length in range(len(container), 0, -1):
+            values = self.by_container_name.get(
+                (owner.file, container[:length], name), ()
+            )
+            if values:
+                return tuple(sorted(values, key=lambda item: item.id))
+        return ()
+
+    def _owned_declarations(self, owner: Symbol, name: str) -> tuple[Symbol, ...]:
+        containers: tuple[tuple[str, ...], ...]
+        if owner.kind is SymbolKind.MODULE:
+            containers = (owner.id.container_path,)
+        elif owner.kind in _CALLABLE_KINDS:
+            containers = (
+                (*owner.id.container_path, owner.name),
+                (*owner.id.container_path, f"{owner.name}{owner.id.signature_key}"),
+            )
+        else:
+            containers = ()
+        values = {
+            symbol.id: symbol
+            for container in containers
+            for symbol in self.by_container_name.get((owner.file, container, name), ())
+        }
+        return tuple(sorted(values.values(), key=lambda item: item.id))
+
     def _direct_supers(self, types: Iterable[Symbol]) -> tuple[Symbol, ...]:
         values: dict[SymbolId, Symbol] = {}
         for type_symbol in types:
@@ -1357,12 +1467,21 @@ class _Resolver:
             if owner
             else {}
         )
+        shadowing_bindings = (
+            self.value_binding_names.get(owner.id, frozenset(bindings))
+            if owner is not None
+            else frozenset()
+        )
 
         if (
             qualifier is None
-            and name in bindings
+            and owner is not None
+            and name in shadowing_bindings
             and kind in {CallKind.CALL, ReferenceKind.NAME}
         ):
+            declared = self._filtered(self._owned_declarations(owner, name), kind)
+            if declared:
+                return None, declared
             return ResolutionStatus.UNRESOLVED, ()
 
         if (
@@ -1377,9 +1496,23 @@ class _Resolver:
                 else (ResolutionStatus.UNRESOLVED, ())
             )
 
+        if file_ir.source.language is Language.LUA and qualifier is not None:
+            required = _LUA_REQUIRE_RECEIVER.fullmatch(qualifier)
+            if required is not None:
+                module = required.group(1) or required.group(2)
+                _key, files, exports = self._module_scope(file_ir, module)
+                if not files:
+                    return ResolutionStatus.EXTERNAL, ()
+                values = self._filtered(self._symbols(exports.get(name, ())), kind)
+                return (None, values) if values else (ResolutionStatus.UNRESOLVED, ())
+
         if qualifier in {"this", "self", "cls"} and owner is not None:
             direct = self._filtered(
-                self._members(self._enclosing_types(file_ir, owner), name), kind
+                (
+                    *self._enclosing_members(owner, name),
+                    *self._members(self._enclosing_types(file_ir, owner), name),
+                ),
+                kind,
             )
             return None, direct
 
@@ -1389,7 +1522,11 @@ class _Resolver:
 
         if qualifier is None and owner is not None and owner.id.container_path:
             direct = self._filtered(
-                self._members(self._enclosing_types(file_ir, owner), name), kind
+                (
+                    *self._enclosing_members(owner, name),
+                    *self._members(self._enclosing_types(file_ir, owner), name),
+                ),
+                kind,
             )
             if direct:
                 return None, direct
@@ -1406,7 +1543,12 @@ class _Resolver:
                     file_ir.source.file,
                     namespace,
                     local_type,
-                    ReferenceKind.TYPE,
+                    ReferenceKind.NAME,
+                )
+                namespace_types = tuple(
+                    value
+                    for value in namespace_types
+                    if value.kind in _TYPE_KINDS or value.kind is SymbolKind.MODULE
                 )
                 if namespace_status is not None or namespace_types:
                     members = self._filtered(
@@ -1436,6 +1578,19 @@ class _Resolver:
             return (None, members) if members else (ResolutionStatus.UNRESOLVED, ())
 
         if qualifier is not None:
+            if file_ir.source.language is Language.LUA and re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]*", qualifier
+            ):
+                modules = tuple(
+                    value
+                    for value in self.by_file_name.get(
+                        (file_ir.source.file, qualifier), ()
+                    )
+                    if value.kind is SymbolKind.MODULE
+                )
+                members = self._filtered(self._members(modules, name), kind)
+                if members:
+                    return None, members
             terminal, values = self._alias_scope(
                 file_ir.source.file, qualifier, name, kind
             )
@@ -1456,7 +1611,12 @@ class _Resolver:
                         file_ir.source.file,
                         namespace,
                         local_type,
-                        ReferenceKind.TYPE,
+                        ReferenceKind.NAME,
+                    )
+                    namespace_types = tuple(
+                        value
+                        for value in namespace_types
+                        if value.kind in _TYPE_KINDS or value.kind is SymbolKind.MODULE
                     )
                     members = self._filtered(
                         self._members(namespace_types, name),
@@ -1487,6 +1647,13 @@ class _Resolver:
         )
         if same_file:
             return None, same_file
+
+        if (
+            file_ir.source.language is Language.LUA
+            and kind is CallKind.CALL
+            and name in _LUA_BUILTIN_CALLS
+        ):
+            return ResolutionStatus.EXTERNAL, ()
 
         same_module = self._filtered(self._same_module(file_ir, name), kind)
         if same_module:
@@ -1524,15 +1691,15 @@ class _Resolver:
                 associated_constructors.update(value.id for value in explicit)
                 if explicit:
                     for constructor in explicit:
-                        if arity is None or len(constructor.params) == arity:
+                        if _accepts_arity(constructor, arity):
                             construction_values[constructor.id] = constructor
                 else:
                     construction_values[type_symbol.id] = type_symbol
             for constructor in (
                 value for value in values if value.kind is SymbolKind.CONSTRUCTOR
             ):
-                if constructor.id not in associated_constructors and (
-                    arity is None or len(constructor.params) == arity
+                if constructor.id not in associated_constructors and _accepts_arity(
+                    constructor, arity
                 ):
                     construction_values[constructor.id] = constructor
             values = tuple(
@@ -1546,7 +1713,7 @@ class _Resolver:
             and values
             and all(value.kind in _CALLABLE_KINDS for value in values)
         ):
-            values = tuple(value for value in values if len(value.params) == arity)
+            values = tuple(value for value in values if _accepts_arity(value, arity))
         ids = _stable_ids(value.id for value in values)
         if terminal is ResolutionStatus.AMBIGUOUS:
             return ResolutionStatus.AMBIGUOUS, ids

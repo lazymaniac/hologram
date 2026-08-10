@@ -166,14 +166,6 @@ def _module_candidates(
     root: object,
     pairs: dict[tuple[int, int, str], Any],
 ) -> tuple[tuple[str, Any], ...]:
-    returned = _returned_names(root)
-    qualified_roots = {
-        parts[0]
-        for node in walk_all(root)
-        if node.type == "function_declaration"
-        if not _has_function_ancestor(node)
-        if len(parts := _index_parts(ast_field(node, "name"))) > 1
-    }
     values: list[tuple[str, Any]] = []
     seen: set[str] = set()
     for value_key, name_node in pairs.items():
@@ -185,7 +177,7 @@ def _module_candidates(
         if len(parts) != 1:
             continue
         name = parts[0]
-        if name not in seen and (name in returned or name in qualified_roots):
+        if name not in seen:
             values.append((name, name_node))
             seen.add(name)
     return tuple(values)
@@ -222,6 +214,8 @@ def _imports(
 
 
 def _is_local(node: Any) -> bool:
+    if any(ast_text(child) == "local" for child in getattr(node, "children", ())):
+        return True
     current = node
     while getattr(current, "parent", None) is not None:
         current = current.parent
@@ -229,7 +223,7 @@ def _is_local(node: Any) -> bool:
             return True
         if current.type in _FUNCTION_KINDS:
             return False
-    return any(ast_text(child) == "local" for child in getattr(node, "children", ()))
+    return False
 
 
 def _parameters(node: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -270,11 +264,7 @@ def _field_name(node: object) -> str | None:
 
 def _returned_table_field_parts(node: object) -> tuple[str, ...]:
     field = getattr(node, "parent", None)
-    if (
-        field is None
-        or field.type != "field"
-        or ast_field(field, "value") != node
-    ):
+    if field is None or field.type != "field" or ast_field(field, "value") != node:
         return ()
     name = _field_name(field)
     if not name:
@@ -327,12 +317,14 @@ def _callables(
     for node in walk_all(root):
         if node.type not in _FUNCTION_KINDS:
             continue
+        returned_parts: tuple[str, ...] = ()
         if node.type == "function_declaration":
             name_node = ast_field(node, "name")
             parts = _index_parts(name_node)
         else:
             name_node = assignments.get(_key(node))
-            parts = _index_parts(name_node) or _returned_table_field_parts(node)
+            returned_parts = _returned_table_field_parts(node)
+            parts = _index_parts(name_node) or returned_parts
         if not parts:
             continue
         name = parts[-1]
@@ -340,8 +332,7 @@ def _callables(
         lexical_container = lexical_owner(node)
         container = (*lexical_container, *explicit_container)
         params, parameter_names = _parameters(node)
-        signature_key = f"({','.join(params)})"
-        owned = (*container, f"{name}{signature_key}")
+        owned = (*container, name)
         value = _Callable(
             node,
             name_node,
@@ -350,15 +341,13 @@ def _callables(
             owned,
             params,
             parameter_names,
-            bool(explicit_container),
+            bool(explicit_container or returned_parts),
             bool(name_node is not None and name_node.type == "method_index_expression"),
             _is_local(node) or (not explicit_container and bool(container)),
         )
         values.append(value)
         owned_paths[_key(node)] = owned
-    effective: dict[
-        tuple[tuple[str, ...], bool, str, tuple[str, ...]], _Callable
-    ] = {}
+    effective: dict[tuple[tuple[str, ...], bool, str, tuple[str, ...]], _Callable] = {}
     for value in values:
         identity = (value.container_path, value.member, value.name, value.params)
         effective[identity] = value
@@ -375,11 +364,7 @@ def _callables(
 
     return tuple(
         sorted(
-            (
-                value
-                for value in effective.values()
-                if not has_discarded_owner(value)
-            ),
+            (value for value in effective.values() if not has_discarded_owner(value)),
             key=lambda value: _key(value.node),
         )
     )
@@ -525,6 +510,65 @@ def _references(
     )
 
 
+def _possible_name_references(
+    events: tuple[BodyEvent, ...],
+    *,
+    exclude: tuple[BodyEvent, ...] = (),
+) -> tuple[ReferenceRef, ...]:
+    definite = frozenset(exclude)
+    return ordered_unique(
+        reference(
+            None,
+            event.span,
+            event.text,
+            None,
+            ReferenceKind.NAME,
+            context=ReferenceContext.CODE,
+            confidence=ReferenceConfidence.POSSIBLE,
+        )
+        for event in events
+        if event not in definite
+        if event.kind is BodyEventKind.NAME
+        if _IDENTIFIER_RE.fullmatch(event.text)
+    )
+
+
+def _possible_source_references(
+    source: SourceFile,
+    root: object,
+) -> tuple[ReferenceRef, ...]:
+    """Keep conservative reachability from calls and table callback slots."""
+
+    references: list[ReferenceRef] = []
+    for node in walk_all(root):
+        target: object | None = None
+        name: str | None = None
+        if node.type == "function_call":
+            target = ast_field(node, "name")
+            parts = _call_parts(target)
+            if parts is not None:
+                _receiver, name = parts
+        elif node.type == "field":
+            value = ast_field(node, "value")
+            if value is not None and value.type == "identifier":
+                target = value
+                name = ast_text(value)
+        if target is None or name is None or not _IDENTIFIER_RE.fullmatch(name):
+            continue
+        references.append(
+            reference(
+                None,
+                node_span(source, target),
+                name,
+                None,
+                ReferenceKind.NAME,
+                context=ReferenceContext.CODE,
+                confidence=ReferenceConfidence.POSSIBLE,
+            )
+        )
+    return ordered_unique(references)
+
+
 def _inferred_type(node: object | None) -> str | None:
     if node is None:
         return None
@@ -582,11 +626,13 @@ def _constant_declarations(
         aligned = len(names) == len(expressions_)
         for index, name_node in enumerate(names):
             parts = _index_parts(name_node)
-            if not parts or not parts[-1].isupper():
+            if not parts:
                 continue
             name = parts[-1]
             container = parts[:-1]
-            if not container and name in module_names:
+            value = expressions_[index] if aligned else None
+            inferred = _inferred_type(value)
+            if inferred in {None, "function", "table"}:
                 continue
             if container and container[0] not in module_names:
                 continue
@@ -601,13 +647,12 @@ def _constant_declarations(
                     target,
                 )
             target = target or name_node
-            value = expressions_[index] if aligned else None
             symbol = Symbol(
                 symbol_id(source, container, SymbolKind.CONSTANT, name),
                 node_span(source, target),
                 Visibility.PRIVATE if not container else Visibility.PUBLIC,
                 name,
-                returns=_inferred_type(value),
+                returns=inferred,
             )
             values.setdefault(symbol.id, symbol)
     return tuple(values.values())
@@ -623,7 +668,8 @@ def extract(source: SourceFile, parser: object | None):
     module_names = frozenset(name for name, _ in modules)
     callables = _callables(root, assignments)
     named_nodes = tuple(callable_.node for callable_ in callables)
-    ownership = ownership_context(named_nodes, include_anonymous=True)
+    ownership = ownership_context(named_nodes)
+    inclusive_ownership = ownership_context(named_nodes, include_anonymous=True)
 
     symbols: list[Symbol] = [
         Symbol(
@@ -636,7 +682,12 @@ def extract(source: SourceFile, parser: object | None):
     ]
     symbols.extend(_constant_declarations(source, root, module_names))
     calls: list[CallRef] = []
-    references: list[ReferenceRef] = []
+    references: list[ReferenceRef] = [
+        *_possible_name_references(
+            body_events(source, root, ownership=inclusive_ownership)
+        ),
+        *_possible_source_references(source, root),
+    ]
     bodies: list[BodyIR] = []
     for callable_ in callables:
         kind = SymbolKind.METHOD if callable_.member else SymbolKind.FUNCTION
@@ -706,6 +757,16 @@ def extract(source: SourceFile, parser: object | None):
         calls.extend(_owned_calls(source, symbol.id, callable_.node, ownership))
         references.extend(
             _references(source, symbol.id, callable_.node, events, ownership)
+        )
+        references.extend(
+            _possible_name_references(
+                body_events(
+                    source,
+                    callable_.node,
+                    ownership=inclusive_ownership,
+                ),
+                exclude=events,
+            )
         )
 
     module = modules[0][0] if len(modules) == 1 else None

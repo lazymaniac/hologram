@@ -21,6 +21,7 @@ from hologram.model import (
     ReferenceKind,
     ReferenceRef,
     SourceFile,
+    SourceSpan,
     Symbol,
     SymbolId,
     SymbolKind,
@@ -60,6 +61,26 @@ _CALL_KINDS = frozenset(
         "object_creation_expression",
     }
 )
+
+
+def _declaration_span(
+    source: SourceFile,
+    declaration: object,
+    name: object | None,
+) -> SourceSpan:
+    whole = node_span(source, declaration)
+    if name is None:
+        return whole
+    identifier = node_span(source, name)
+    return SourceSpan(
+        whole.file,
+        identifier.start_line,
+        identifier.start_column,
+        whole.end_line,
+        whole.end_column,
+    )
+
+
 _ANNOTATION_KINDS = frozenset({"annotation", "marker_annotation"})
 _COMMENT_KINDS = frozenset({"block_comment", "line_comment"})
 _FIELD_KINDS = frozenset({"constant_declaration", "field_declaration"})
@@ -142,9 +163,7 @@ def _qualified_name_parts(node: Any | None) -> tuple[str, ...]:
     if node.type in {"identifier", "type_identifier"}:
         return (ast_text(node),)
     return tuple(
-        part
-        for child in _named_children(node)
-        for part in _qualified_name_parts(child)
+        part for child in _named_children(node) for part in _qualified_name_parts(child)
     )
 
 
@@ -481,15 +500,34 @@ def _calls(
 
 
 def _body_references(
+    source: SourceFile,
     owner: SymbolId,
     events: Iterable[BodyEvent],
     *,
+    region: Any | None = None,
+    member_names: Iterable[str] = (),
+    shadow_names: Iterable[str] = (),
     annotation_spans: Iterable[Any] = (),
     ignored_type_spans: Iterable[Any] = (),
 ) -> tuple[ReferenceRef, ...]:
     references: list[ReferenceRef] = []
     weak_spans = tuple(annotation_spans)
     ignored_types = frozenset(ignored_type_spans)
+    members = frozenset(member_names)
+    shadows = frozenset(shadow_names)
+    explicit_qualifiers: dict[SourceSpan, str] = {}
+    for node in _walk_owned(region):
+        if node.type != "identifier":
+            continue
+        parent = getattr(node, "parent", None)
+        if parent is None or parent.type != "field_access":
+            continue
+        field = ast_field(parent, "field")
+        if not _same_node(field, node):
+            continue
+        receiver = ast_field(parent, "object")
+        if receiver is not None:
+            explicit_qualifiers[node_span(source, node)] = ast_text(receiver)
     for event in events:
         if event.kind is BodyEventKind.NAME:
             kind = ReferenceKind.NAME
@@ -510,7 +548,14 @@ def _body_references(
                 owner,
                 event.span,
                 event.text,
-                None,
+                explicit_qualifiers.get(event.span)
+                or (
+                    "this"
+                    if event.kind is BodyEventKind.NAME
+                    and event.text in members
+                    and event.text not in shadows
+                    else None
+                ),
                 kind,
                 context=context,
                 confidence=ReferenceConfidence.DEFINITE,
@@ -543,9 +588,7 @@ def _annotation_body_events(
         for event in events
     )
     existing_names = {
-        event.span
-        for event in classified
-        if event.kind is BodyEventKind.NAME
+        event.span for event in classified if event.kind is BodyEventKind.NAME
     }
     result: list[BodyEvent] = []
     for event in classified:
@@ -613,7 +656,7 @@ def _ignored_qualified_type_spans(source: SourceFile, root: Any) -> tuple[Any, .
 
 def _type_references(
     source: SourceFile,
-    owner: SymbolId,
+    owner: SymbolId | None,
     nodes: Iterable[Any | None],
 ) -> tuple[ReferenceRef, ...]:
     return ordered_unique(
@@ -744,21 +787,19 @@ def _is_declaration_name(node: Any) -> bool:
 
 def _region_references(
     source: SourceFile,
-    owner: SymbolId,
+    owner: SymbolId | None,
     region: Any | None,
 ) -> tuple[ReferenceRef, ...]:
     if region is None:
         return ()
     annotation_spans = tuple(
-        node_span(source, annotation)
-        for annotation in _annotation_nodes((region,))
+        node_span(source, annotation) for annotation in _annotation_nodes((region,))
     )
     references = [
         item
         for item in _type_references(source, owner, (region,))
         if not any(
-            _inside(item.span, annotation_span)
-            for annotation_span in annotation_spans
+            _inside(item.span, annotation_span) for annotation_span in annotation_spans
         )
     ]
     for node in _walk_owned(region):
@@ -781,6 +822,49 @@ def _region_references(
                 confidence=ReferenceConfidence.DEFINITE,
             )
         )
+    return ordered_unique(references)
+
+
+def _anonymous_references(
+    source: SourceFile,
+    root: Any,
+) -> tuple[ReferenceRef, ...]:
+    """Retain conservative reachability evidence from unsupported lambdas."""
+
+    references: list[ReferenceRef] = []
+    for node in _walk_all(root):
+        if node.type != "lambda_expression":
+            continue
+        for item in _region_references(source, None, node):
+            references.append(
+                ReferenceRef(
+                    None,
+                    item.span,
+                    item.name,
+                    item.qualifier,
+                    item.kind,
+                    item.context,
+                    ReferenceConfidence.POSSIBLE,
+                )
+            )
+        for candidate in _walk_owned(node):
+            if candidate.type != "object_creation_expression":
+                continue
+            type_node = ast_field(candidate, "type")
+            name = base_type(tight_type(ast_text(type_node)))
+            if type_node is None or not name:
+                continue
+            references.append(
+                reference(
+                    None,
+                    node_span(source, type_node),
+                    name,
+                    None,
+                    ReferenceKind.NAME,
+                    context=ReferenceContext.CODE,
+                    confidence=ReferenceConfidence.POSSIBLE,
+                )
+            )
     return ordered_unique(references)
 
 
@@ -875,7 +959,8 @@ class _Extractor:
         implicit_public: bool = False,
     ) -> None:
         kind = _TYPE_KINDS[node.type]
-        name = ast_text(ast_field(node, "name"))
+        name_node = ast_field(node, "name")
+        name = ast_text(name_node)
         if not name:
             return
         body = ast_field(node, "body")
@@ -930,12 +1015,10 @@ class _Extractor:
         bound_nodes = _type_bound_nodes(node)
         type_symbol = Symbol(
             symbol_id(self.source, container_path, kind, name),
-            node_span(self.source, node),
+            _declaration_span(self.source, node, name_node),
             _visibility(
                 node,
-                default=(
-                    Visibility.PUBLIC if implicit_public else Visibility.INTERNAL
-                ),
+                default=(Visibility.PUBLIC if implicit_public else Visibility.INTERNAL),
             ),
             f"{prefix}{signature_kind} {name}",
             params=params,
@@ -1031,12 +1114,13 @@ class _Extractor:
         node: Any,
         container_path: tuple[str, ...],
     ) -> None:
-        name = ast_text(ast_field(node, "name"))
+        name_node = ast_field(node, "name")
+        name = ast_text(name_node)
         if not name:
             return
         symbol = Symbol(
             symbol_id(self.source, container_path, SymbolKind.CONSTANT, name),
-            node_span(self.source, node),
+            _declaration_span(self.source, node, name_node),
             Visibility.PUBLIC,
             name,
             annotations=_annotations(node),
@@ -1044,9 +1128,7 @@ class _Extractor:
         self.symbols.append(symbol)
         arguments = ast_field(node, "arguments")
         self.calls.extend(_calls(self.source, symbol.id, arguments))
-        self.references.extend(
-            _region_references(self.source, symbol.id, arguments)
-        )
+        self.references.extend(_region_references(self.source, symbol.id, arguments))
         self.references.extend(_annotation_references(self.source, symbol.id, node))
         self.references.extend(
             _annotation_references_from_nodes(
@@ -1136,9 +1218,7 @@ class _Extractor:
             )
             value = ast_field(declarator, "value")
             self.calls.extend(_calls(self.source, symbol.id, value))
-            self.references.extend(
-                _region_references(self.source, symbol.id, value)
-            )
+            self.references.extend(_region_references(self.source, symbol.id, value))
             self.references.extend(
                 _annotation_references_from_nodes(
                     self.source,
@@ -1163,7 +1243,8 @@ class _Extractor:
             "compact_constructor_declaration",
             "constructor_declaration",
         }
-        name = ast_text(ast_field(node, "name")) or type_name
+        name_node = ast_field(node, "name")
+        name = ast_text(name_node) or type_name
         if node.type == "compact_constructor_declaration":
             parameters = record_parameters
         else:
@@ -1173,11 +1254,13 @@ class _Extractor:
         returns = type_name if constructor else tight_type(ast_text(return_node))
         raises = _throws(node)
         body = ast_field(node, "body")
+        parameter_bindings = _parameter_bindings(parameters)
+        local_bindings = _local_bindings(body)
         bindings = _binding_tuple(
             (
                 *class_bindings,
-                *_parameter_bindings(parameters),
-                *_local_bindings(body),
+                *parameter_bindings,
+                *local_bindings,
             )
         )
         kind = SymbolKind.CONSTRUCTOR if constructor else SymbolKind.METHOD
@@ -1186,7 +1269,7 @@ class _Extractor:
         )
         symbol = Symbol(
             symbol_id(self.source, container_path, kind, name, params),
-            node_span(self.source, node),
+            _declaration_span(self.source, node, name_node),
             _visibility(
                 node,
                 default=(
@@ -1251,8 +1334,14 @@ class _Extractor:
         self.calls.extend(_calls(self.source, symbol.id, body))
         self.references.extend(
             _body_references(
+                self.source,
                 symbol.id,
                 callable_events,
+                region=body,
+                member_names=(binding.name for binding in class_bindings),
+                shadow_names=(
+                    binding.name for binding in (*parameter_bindings, *local_bindings)
+                ),
                 annotation_spans=annotation_spans,
                 ignored_type_spans=_ignored_qualified_type_spans(self.source, node),
             )
@@ -1279,6 +1368,7 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
             )
         )
     extractor.extract_types()
+    extractor.references.extend(_anonymous_references(source, root))
     return FileIR(
         source,
         module=module,

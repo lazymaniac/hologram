@@ -353,6 +353,9 @@ class JavaParserTest(unittest.TestCase):
         self.assertEqual(config.modifiers, ("public", "final"))
         self.assertEqual(refresh.annotations, ("Bean",))
         self.assertEqual(run.annotations, ("Override",))
+        self.assertEqual(refresh.span.start_line, 5)
+        self.assertEqual(run.span.start_line, 8)
+        self.assertEqual(listen.span.start_line, 11)
         self.assertEqual(run.modifiers, ("protected",))
         self.assertEqual(listen.annotations, ('EventListener("onRefresh")',))
         self.assertEqual(main.modifiers, ("public", "static"))
@@ -575,10 +578,7 @@ class Probe {}
         self.assertFalse(result.diagnostics)
         self.assertEqual(result.module, "shop.app.api")
         self.assertEqual(
-            [
-                (item.module, item.name, item.wildcard)
-                for item in result.imports
-            ],
+            [(item.module, item.name, item.wildcard) for item in result.imports],
             [
                 ("shop.engine", "Engine", False),
                 ("shop.Factory", "make", False),
@@ -606,9 +606,7 @@ class Probe {
             "LocalAnno",
             "CastAnno",
         }
-        found = [
-            item for item in result.references if item.name in annotation_names
-        ]
+        found = [item for item in result.references if item.name in annotation_names]
 
         self.assertEqual({item.name for item in found}, annotation_names)
         self.assertTrue(
@@ -630,6 +628,38 @@ class Probe {
         )
         assert_body_fact_events(self, result)
 
+    def test_member_shadowing_and_lambda_reachability_keep_exact_evidence(self) -> None:
+        raw = b"""\
+package app;
+class Reachability {
+  private static final int LIMIT = 1;
+  private int value;
+  private Reachability() {}
+  private int helper() { return value; }
+  void run(int value) {
+    this.value = value;
+    stream.map(item -> helper() + LIMIT);
+  }
+}
+"""
+        result = extract_file(snapshot(raw, file="src/Reachability.java"))
+        run = symbol(result, "run", SymbolKind.METHOD)
+
+        field_reference = next(
+            item
+            for item in result.references
+            if item.owner == run.id
+            and item.name == "value"
+            and item.qualifier == "this"
+        )
+        self.assertIs(field_reference.confidence, ReferenceConfidence.DEFINITE)
+        possible = {
+            item.name
+            for item in result.references
+            if item.owner is None and item.confidence is ReferenceConfidence.POSSIBLE
+        }
+        self.assertTrue({"helper", "LIMIT"}.issubset(possible))
+
     def test_local_event_listener_callback_joins_a_literal_and_name_event(
         self,
     ) -> None:
@@ -647,8 +677,7 @@ class Probe {
         callback = [
             item
             for item in result.references
-            if item.name == "onRefresh"
-            and item.context is ReferenceContext.ANNOTATION
+            if item.name == "onRefresh" and item.context is ReferenceContext.ANNOTATION
         ]
 
         self.assertEqual(len(callback), 1)
@@ -719,9 +748,7 @@ class Probe {
         self.assertTrue({"Seed", "VALUE"}.issubset(owned_reference_names[factory.id]))
         self.assertTrue({"Source", "value"}.issubset(owned_reference_names[field.id]))
         self.assertTrue(
-            {"Registry", "FACTORY", "field"}.issubset(
-                owned_reference_names[probe.id]
-            )
+            {"Registry", "FACTORY", "field"}.issubset(owned_reference_names[probe.id])
         )
 
     def test_class_and_method_generic_bounds_emit_type_references(self) -> None:
@@ -837,9 +864,7 @@ enum Shade {
 
         result = extract_file(snapshot(raw, file="src/Contract.java"))
         member_types = {
-            item.name: item
-            for item in result.symbols
-            if item.name.startswith("Nested")
+            item.name: item for item in result.symbols if item.name.startswith("Nested")
         }
         shade_constructor = symbol(result, "Shade", SymbolKind.CONSTRUCTOR)
 
