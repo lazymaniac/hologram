@@ -119,7 +119,7 @@ def _subject(symbol_id: SymbolId) -> str:
     )
 
 
-def _validate_subject(subject: str) -> None:
+def _validated_subject(subject: str) -> SymbolId:
     try:
         value = json.loads(subject)
     except (TypeError, ValueError, json.JSONDecodeError) as error:
@@ -150,6 +150,7 @@ def _validate_subject(subject: str) -> None:
         raise ValueError("subject must be a canonical SymbolId") from error
     if _subject(symbol_id) != subject:
         raise ValueError("subject must be canonical compact JSON")
+    return symbol_id
 
 
 @dataclass(frozen=True)
@@ -171,7 +172,8 @@ class ObservedFact:
             raise TypeError("path must be a string")
         path = PurePosixPath(self.path)
         if (
-            not self.path
+            not self.path.strip()
+            or self.path == "."
             or not path.parts
             or path.is_absolute()
             or ".." in path.parts
@@ -188,7 +190,9 @@ class ObservedFact:
             raise ValueError("language must be canonical") from error
         if type(self.subject) is not str:
             raise TypeError("subject must be a string")
-        _validate_subject(self.subject)
+        subject = _validated_subject(self.subject)
+        if subject.file != self.path or subject.language.value != self.language:
+            raise ValueError("subject file and language must match fact metadata")
         if not isinstance(self.value, Mapping):
             raise TypeError("value must be a mapping")
         object.__setattr__(
