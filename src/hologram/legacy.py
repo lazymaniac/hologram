@@ -33,7 +33,7 @@ from .config import (
     load_config,
 )
 from .model import FileIR as CanonicalFileIR
-from .model import Language, SourceFile, SymbolKind, Visibility
+from .model import CallKind, Language, SourceFile, SymbolKind, Visibility
 from .parsers.api import extract_file as extract_canonical_file
 from .state import compute_state, read_digest_state
 
@@ -98,12 +98,6 @@ def strip_comments_and_strings(text: str) -> str:
     return text
 
 
-def _parse_throws(clause: str | None) -> list[str]:
-    if not clause:
-        return []
-    return [t.strip().split(".")[-1] for t in clause.split(",") if t.strip()]
-
-
 def _split_top_commas(raw: str, opens: str, closes: str) -> list[str]:
     """Split on commas that sit outside any bracket nesting."""
     parts, depth, cur = [], 0, ""
@@ -120,18 +114,6 @@ def _split_top_commas(raw: str, opens: str, closes: str) -> list[str]:
     if cur.strip():
         parts.append(cur)
     return parts
-
-
-def split_params(raw: str) -> list[str]:
-    """Split a Java parameter list on top-level commas, return declared types only."""
-    types = []
-    for p in _split_top_commas(raw, "<([", ">)]"):
-        p = re.sub(r"@\w+(\([^)]*\))?", "", p).strip()
-        p = re.sub(r"^final\s+", "", p)
-        tokens = p.rsplit(None, 1)
-        if tokens:
-            types.append(tight_type(tokens[0].strip()))
-    return types
 
 
 def tight_type(t: str) -> str:
@@ -259,172 +241,6 @@ def _ast_calls(body, own_name: str, call_kinds, entry_fn) -> list[str]:
 
 def _body_lines(body) -> int:
     return body.end_point[0] - body.start_point[0] + 1 if body is not None else 0
-
-
-# ---------------------------------------------------------------------------
-# Java extraction
-# ---------------------------------------------------------------------------
-
-_JAVA_TYPE_NODE_KINDS = {
-    "class_declaration": "class",
-    "interface_declaration": "interface",
-    "record_declaration": "record",
-    "enum_declaration": "enum",
-}
-
-
-def _ast_modifiers(node) -> str:
-    for c in node.children:
-        if c.type == "modifiers":
-            return _ast_text(c)
-    return ""
-
-
-def _ast_param_types(node) -> list[str]:
-    """Declared parameter types from a formal_parameters node."""
-    raw = _ast_text(node)
-    return split_params(raw[1:-1]) if raw.startswith("(") else split_params(raw)
-
-
-def _ast_vis(mods: str) -> str:
-    return "priv" if any(v in mods for v in ("private", "protected")) else "pub"
-
-
-def _java_call_entry(n) -> tuple[str, str]:
-    if n.type == "object_creation_expression":
-        entry = re.sub(r"<.*", "", _ast_text(_ast_field(n, "type")))
-        return entry, entry
-    name = _ast_text(_ast_field(n, "name"))
-    obj = _ast_field(n, "object")
-    entry = (f"{_ast_text(obj)}.{name}"
-             if obj is not None and obj.type == "identifier" else name)
-    return name, entry
-
-
-def _java_calls(body, own_name: str) -> list[str]:
-    return _ast_calls(body, own_name,
-                      ("method_invocation", "object_creation_expression"),
-                      _java_call_entry)
-
-
-def _java_param_bindings(params_node) -> dict[str, str]:
-    binds: dict[str, str] = {}
-    if params_node is None:
-        return binds
-    for p in params_node.children:
-        if p.type == "formal_parameter":
-            t, n = _ast_field(p, "type"), _ast_field(p, "name")
-            if t is not None and n is not None:
-                binds[_ast_text(n)] = _base_type(_ast_text(t))
-    return binds
-
-
-def _java_class_bindings(tn) -> dict[str, str]:
-    """Field and record-component types visible to every method of the type."""
-    binds = _java_param_bindings(_ast_field(tn, "parameters"))  # record components
-    body = _ast_field(tn, "body")
-    for f in (body.children if body is not None else ()):
-        if f.type == "field_declaration":
-            t = _ast_text(_ast_field(f, "type"))
-            for dec in f.children:
-                if dec.type == "variable_declarator":
-                    binds[_ast_text(_ast_field(dec, "name"))] = _base_type(t)
-    return binds
-
-
-def _java_local_bindings(body) -> dict[str, str]:
-    binds: dict[str, str] = {}
-    if body is None:
-        return binds
-    for d in _ast_collect(body, ("local_variable_declaration", "enhanced_for_statement")):
-        t = _ast_text(_ast_field(d, "type"))
-        if d.type == "enhanced_for_statement":
-            n = _ast_field(d, "name")
-            if n is not None and t != "var":
-                binds[_ast_text(n)] = _base_type(t)
-            continue
-        for dec in d.children:
-            if dec.type != "variable_declarator":
-                continue
-            name = _ast_text(_ast_field(dec, "name"))
-            if t == "var":
-                val = _ast_field(dec, "value")
-                if val is not None and val.type == "object_creation_expression":
-                    binds[name] = _base_type(_ast_text(_ast_field(val, "type")))
-            else:
-                binds[name] = _base_type(t)
-    return binds
-
-
-def _java_method_symbol(m, type_name: str, rel: str, class_binds: dict[str, str]) -> Symbol:
-    name = _ast_text(_ast_field(m, "name"))
-    params = _ast_param_types(_ast_field(m, "parameters"))
-    mods = _ast_modifiers(m)
-    body = _ast_field(m, "body")
-    binds = {**class_binds,
-             **_java_param_bindings(_ast_field(m, "parameters")),
-             **_java_local_bindings(body)}
-    throws = []
-    for c in m.children:
-        if c.type == "throws":
-            throws = _parse_throws(_ast_text(c).removeprefix("throws"))
-    if m.type == "constructor_declaration":
-        return Symbol(
-            name=name, kind="ctor", file=rel, line=m.start_point[0] + 1,
-            signature=f"{name}({','.join(params)})", params=params, returns=name,
-            visibility=_ast_vis(mods),
-            container=type_name, lang="java", raises=throws,
-            calls=_java_calls(body, name), bindings=binds, size=_body_lines(body),
-        )
-    returns = _ast_text(_ast_field(m, "type"))
-    ret_suffix = f":{returns}" if returns != "void" else ""
-    return Symbol(
-        name=name, kind="method", file=rel, line=m.start_point[0] + 1,
-        signature=f"{name}({','.join(params)}){ret_suffix}",
-        params=params, returns=returns,
-        visibility=_ast_vis(mods),
-        container=type_name, lang="java",
-        calls=_java_calls(body, name), raises=throws, bindings=binds,
-        size=_body_lines(body),
-    )
-
-
-def _extract_java(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["java"].parse(text.encode())
-    symbols: list[Symbol] = []
-    for tn in _ast_collect(tree.root_node, _JAVA_TYPE_NODE_KINDS):
-        kind = _JAVA_TYPE_NODE_KINDS[tn.type]
-        name = _ast_text(_ast_field(tn, "name"))
-        body = _ast_field(tn, "body")
-        header_end = body.start_byte if body is not None else tn.end_byte
-        header = text.encode()[tn.start_byte:header_end].decode(errors="replace")
-        supers, permits = _heritage(re.sub(r"\(.*?\)", "", header, flags=re.S))
-        mods = _ast_modifiers(tn)
-        params: list[str] = []
-        if kind == "record":
-            pnode = _ast_field(tn, "parameters")
-            params = _ast_param_types(pnode) if pnode is not None else []
-        elif kind == "enum" and body is not None:
-            params = [_ast_text(_ast_field(c, "name"))
-                      for c in body.children if c.type == "enum_constant"]
-        symbols.append(Symbol(
-            name=name, kind=kind, file=rel, line=tn.start_point[0] + 1,
-            signature=(f"sealed {kind} {name}" if "sealed" in mods else f"{kind} {name}"),
-            params=params,
-            visibility=_ast_vis(mods), lang="java",
-            supers=supers, permits=permits,
-        ))
-        if body is None:
-            continue
-        class_binds = _java_class_bindings(tn)
-        containers = list(body.children)
-        if kind == "enum":
-            containers = [c for c in body.children if c.type == "enum_body_declarations"]
-            containers = [gc for c in containers for gc in c.children] or list(body.children)
-        for c in containers:
-            if c.type in ("method_declaration", "constructor_declaration"):
-                symbols.append(_java_method_symbol(c, name, rel, class_binds))
-    return symbols
 
 
 # ---------------------------------------------------------------------------
@@ -1603,7 +1419,6 @@ def _extract_html(text: str, rel: str) -> list[Symbol]:
 
 
 EXTRACTORS = {
-    "java": _extract_java,
     "typescript": _extract_ts,
     "javascript": _extract_ts,
     "tsx": _extract_tsx,
@@ -1719,6 +1534,12 @@ def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
         owned = [call for call in file_ir.calls if call.caller == symbol.id]
     result: list[str] = []
     for call in owned:
+        if (
+            file_ir.source.language is Language.JAVA
+            and call.kind is CallKind.CONSTRUCT
+            and call.name in {"super", "this"}
+        ):
+            continue
         name = _legacy_call_name(call)
         if name == symbol.name or name in result:
             continue
@@ -1758,9 +1579,27 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                 params=list(symbol.params),
                 returns=symbol.returns,
                 visibility=(
-                    "pub" if symbol.visibility is Visibility.PUBLIC else "priv"
+                    "pub"
+                    if symbol.visibility is Visibility.PUBLIC
+                    or (
+                        file_ir.source.language is Language.JAVA
+                        and symbol.visibility is Visibility.INTERNAL
+                    )
+                    else "priv"
                 ),
-                container=symbol.container,
+                container=(
+                    None
+                    if file_ir.source.language is Language.JAVA
+                    and symbol.kind
+                    in {
+                        SymbolKind.CLASS,
+                        SymbolKind.ENUM,
+                        SymbolKind.INTERFACE,
+                        SymbolKind.RECORD,
+                        SymbolKind.TYPE,
+                    }
+                    else symbol.container
+                ),
                 lang=symbol.lang.value,
                 calls=_legacy_calls(file_ir, symbol),
                 supers=list(symbol.supers),
@@ -1788,7 +1627,11 @@ def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol
         except OSError:
             return []
     rel = path.relative_to(root).as_posix()
-    if lang in {Language.HELM.value, Language.PYTHON.value}:
+    if lang in {
+        Language.HELM.value,
+        Language.JAVA.value,
+        Language.PYTHON.value,
+    }:
         raw = text.encode("utf-8")
         source = SourceFile(
             path,

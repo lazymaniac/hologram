@@ -51,7 +51,6 @@ _LEGACY_COMPAT_NAMES = frozenset(
         "_PARSERS",
         "_dep_lines",
         "_digest_state",
-        "_extract_java",
         "_hook_python",
         "_missing_parser_langs",
         "_reduce_for_embed",
