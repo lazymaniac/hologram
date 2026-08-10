@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import inspect
 import unittest
+from pathlib import Path
 
 from benchmark import reporting
 from benchmark.reporting import (
@@ -11,6 +12,8 @@ from benchmark.reporting import (
     public_report,
     report,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _row(
@@ -522,6 +525,52 @@ class ReportDispatchTest(unittest.TestCase):
         public_report(rows)
         matched_pairs(rows)
         self.assertEqual(rows, frozen)
+
+
+class BenchmarkDocumentationTest(unittest.TestCase):
+    def test_current_runbook_and_historical_evidence_are_explicitly_qualified(
+        self,
+    ) -> None:
+        paths = (
+            PROJECT_ROOT / "README.md",
+            PROJECT_ROOT / "benchmark" / "README.md",
+            PROJECT_ROOT / "benchmark" / "results-spring-2026-08-08.md",
+        )
+        documents = {
+            path: path.read_text(encoding="utf-8").casefold() for path in paths
+        }
+        combined = "\n".join(documents.values())
+        for path, text in documents.items():
+            with self.subTest(path=path.name):
+                self.assertIn("legacy", text)
+                self.assertIn("pre-tier", text)
+
+        for phrase in (
+            "navigation acceptance was not automated",
+            "mutable model alias",
+            "no paid sessions are run by the implementation suite",
+            "external private results",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, combined)
+
+        runbook = documents[PROJECT_ROOT / "benchmark" / "README.md"]
+        for phrase in (
+            "codecompanion.json",
+            "b/c",
+            "claude-sonnet-5",
+            "2.1.224",
+            "--dry-run",
+            "prepare",
+            "report",
+            "748",
+            "103",
+            "33",
+            "three-run",
+        ):
+            with self.subTest(runbook_phrase=phrase):
+                self.assertIn(phrase, runbook)
+        self.assertNotIn("benchmark/tasks/spring.json", runbook)
 
 
 if __name__ == "__main__":

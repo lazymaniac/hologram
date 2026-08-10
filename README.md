@@ -224,19 +224,26 @@ unavailable, makes the build incomplete rather than silently shrinking the map.
 
 ## Benchmark status
 
-Historical condition A measured a legacy on-disk pull model. That archived evidence
-is legacy, exploratory, and pre-tier, with n=1 per cell. It used `sonnet`, which is a
-mutable model alias rather than a pinned model version. Those runs showed no outcome
-improvement and sometimes higher token cost; they remain evidence, not an active
-harness mode.
+The current public benchmark is the frozen
+[`codecompanion.json`](benchmark/tasks/codecompanion.json) matrix: condition B has
+no Hologram context, while condition C receives the managed canonical v2 map from
+turn zero. It pins `claude-sonnet-5`, Claude Code `2.1.224`, a 40-turn limit, one
+repetition, one seed, four task capabilities, and exact answer verifiers. Acceptance
+requires both terminal success and verifier success; navigation answers are
+automatically checked. Public reports compare provenance-matched B/C pairs and
+partition them by model/version, tier, and capability. Private manifests, corpora,
+assets, and external private results stay outside this repository and private
+reports expose condition totals only. No paid sessions are run by the implementation
+suite.
 
-The current benchmark compares condition B (no Hologram context) with condition C
-(the managed canonical v2 map present from turn zero). The harness decodes before
-and after maps structurally when checking reuse. Results are directional and must be
-reported with corpus, model, task, and sample-size caveats; a name-similarity verdict
-still requires manual review. Reuse acceptance commands often verify only that a
-change occurred, navigation correctness is not automated (`true`), and the 40-turn
-ceiling is not outcome-gated. See [benchmark/README.md](benchmark/README.md).
+Historical condition A measured a legacy on-disk pull model. Its Spring figures are
+legacy, exploratory, pre-tier evidence with n=1 per cell. That experiment used
+`sonnet`, a mutable model alias, pooled task metrics, change-only reuse checks, and
+did not gate turn-limit errors; navigation acceptance was not automated. Its token,
+navigation, reuse, and duplication figures are historical observations only and
+cannot be compared with future v2 reports or used to validate the hardened harness.
+See the [current runbook](benchmark/README.md) for preparation, zero-cost dry runs,
+static thresholds, privacy boundaries, and manual paid-run instructions.
 
 ## Tests
 

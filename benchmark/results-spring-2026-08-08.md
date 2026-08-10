@@ -1,12 +1,19 @@
 # Benchmark run: spring-framework, 2026-08-08
 
+> [!CAUTION]
+> This report is legacy, exploratory, pre-tier historical evidence. It predates
+> the hardened B/C protocol, used a mutable model alias, and cannot validate or be
+> compared numerically with a current v2 benchmark report. Navigation acceptance
+> was not automated. No paid sessions are run by the implementation suite today;
+> the paid sessions summarized here were a separate historical experiment.
+
 **Setup.** Corpus: spring-projects/spring-framework @ da4b31c (1.54M LOC, 9,240 Java
 files; digest = 563k tokens, 28s build). Model: sonnet, `--max-turns 40`, headless
 `claude -p`. 7 tasks (4 reuse-bait, 3 navigation) × conditions A (digest +
 instructions) / B (control) × 1 rep = 14 sessions, 12.6M tokens total. Detector
-verdicts hand-reviewed per the runbook.
+verdicts were hand-reviewed under the retired protocol.
 
-## Result: no benefit on this corpus — a real cost instead
+## Historical observation: no benefit on this corpus — a real cost instead
 
 | condition | reuse achieved | duplication | nav turns (mean) | total tokens |
 |---|---|---|---|---|
@@ -37,21 +44,33 @@ codebases the model has never seen, where the control condition has no memory to
 back on. It cleanly measures the opposite corner, and the answer there is: skip the
 digest.
 
-## What this run establishes
+## What this run historically observed
 
-1. The harness works end to end and the instrumentation is trustworthy
-   (digest_hits separates "had the digest" from "used the digest").
-2. **Honest negative:** on large, famous, well-structured OSS corpora, the digest
-   adds cost and no measurable benefit. The README should and does say this.
+1. The retired harness emitted complete rows and a `digest_hits` counter. That
+   counter and these rows do not establish that the hardened harness is correct.
+2. In this one historical matrix, the legacy digest added cost and no observed
+   benefit on a large, famous, well-structured OSS corpus.
 3. The duplication failure mode did not reproduce on Spring at all (n=4 tasks) —
    against a memorized, conventions-rich codebase, sonnet reuses existing APIs
    unprompted.
 4. The decisive experiment is the same matrix on a private codebase where
    training-data memory can't answer for the control. That remains unrun.
 
-## Caveats
+## Legacy protocol caveats
 
-n=1 per cell; one model; acceptance commands verified only "made a change" for reuse
-tasks (outcome quality came from transcript review); the automated reuse judge
-undercounts when the agent picks a valid API not on the expect list — review its
-verdicts, as the runbook says.
+- There was one repetition per cell and one model, identified by `sonnet`, a
+  mutable model alias rather than a pinned model version.
+- The experiment predates simple/complex tiers and capability partitions; it
+  pooled task metrics.
+- Reuse acceptance commands often verified only that a change occurred. Outcome
+  quality depended on transcript review, and the change-only judge could miss a
+  valid API outside its expected-name list.
+- Navigation acceptance was not automated: those commands returned `true`, so
+  correctness depended on manual transcript review.
+- The 40-turn ceiling did not gate `error_max_turns`; a timed-out run could still
+  be mixed into the observations.
+
+The obsolete active task manifest was removed because it predates the hardened
+terminal-success and answer-verifier contract. Any ignored local legacy archive is
+outside Git and must not be inspected, summarized, copied, or cited in tracked
+documentation. The numerical observations above remain only as historical context.
