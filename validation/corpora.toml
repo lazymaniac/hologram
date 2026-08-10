@@ -1,0 +1,39 @@
+[census]
+expected_files = 748
+expected_ordinary_yaml_exclusions = 3
+outside_candidate_extensions = [".scala", ".sh"]
+
+[[corpora]]
+name = "hologram"
+url = "https://github.com/lazymaniac/hologram.git"
+revision = "6604cfac743466f56bf4b7b4ea68ce6dae3c4d18"
+path_env = "HOLOGRAM_VALIDATION_HOLOGRAM"
+sample_files = 9
+
+[[corpora]]
+name = "codecompanion"
+url = "https://github.com/olimorris/codecompanion.nvim.git"
+revision = "2b959b2bf5fdb13e3b333c078ba549996e477b7c"
+path_env = "HOLOGRAM_VALIDATION_CODECOMPANION"
+sample_files = 24
+
+[[corpora]]
+name = "cypress"
+url = "https://github.com/cypress-io/cypress-realworld-app.git"
+revision = "c2d37e6ff38232a386525265e8ef6e3c6a4d62a9"
+path_env = "HOLOGRAM_VALIDATION_CYPRESS"
+sample_files = 38
+
+[[corpora]]
+name = "kafka-streams-examples"
+url = "https://github.com/confluentinc/kafka-streams-examples.git"
+revision = "9df6d342cc754926673d2ed6c41952616f3ad879"
+path_env = "HOLOGRAM_VALIDATION_KAFKA_STREAMS_EXAMPLES"
+sample_files = 26
+
+[[corpora]]
+name = "jdb"
+url = "https://github.com/brunoborges/jdb-agentic-debugger.git"
+revision = "213939fcb92ccb910ff1d93a4a1a07631b34b779"
+path_env = "HOLOGRAM_VALIDATION_JDB"
+sample_files = 6
