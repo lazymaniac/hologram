@@ -699,6 +699,30 @@ class ImportResolutionTest(unittest.TestCase):
         )
         self.assertEqual(resolve_project(raw).calls[0].target, included.id)
 
+    def test_c_relative_include_prefers_the_source_directory_over_project_root(
+        self,
+    ) -> None:
+        root_fetch = symbol("api.h", Language.C, "fetch")
+        local_fetch = symbol("src/api.h", Language.C, "fetch")
+        owner = symbol("src/main.c", Language.C, "run")
+        raw = project(
+            file_ir(root_fetch.file, Language.C, module=None, symbols=(root_fetch,)),
+            file_ir(local_fetch.file, Language.C, module=None, symbols=(local_fetch,)),
+            file_ir(
+                owner.file,
+                Language.C,
+                module=None,
+                symbols=(owner,),
+                imports=(
+                    ImportRef(span(owner.file, 2), "./api.h", None, None),
+                ),
+                calls=(call(owner, "fetch"),),
+            ),
+        )
+        result = resolve_project(raw)
+        self.assertEqual(result.imports[0].target_files, (local_fetch.file,))
+        self.assertEqual(result.calls[0].target, local_fetch.id)
+
     def test_ambiguous_namespace_import_cannot_be_upgraded_by_one_member(self) -> None:
         fetch = symbol("api.ts", Language.TYPESCRIPT, "fetch")
         decoy = symbol("api.js", Language.JAVASCRIPT, "other")
@@ -1613,6 +1637,49 @@ class CallResolutionTest(unittest.TestCase):
         self.assertEqual(resolved.candidates, (resolved.target,))
         self.assertEqual(resolved.display_name, "Client.fetch")
 
+    def test_imported_overload_is_narrowed_by_arity(self) -> None:
+        api = symbol("lib/Api.java", Language.JAVA, "Api", kind=SymbolKind.CLASS)
+        unary = symbol(
+            api.file,
+            Language.JAVA,
+            "fetch",
+            kind=SymbolKind.METHOD,
+            container=("Api",),
+            params=("int",),
+        )
+        binary = symbol(
+            api.file,
+            Language.JAVA,
+            "fetch",
+            kind=SymbolKind.METHOD,
+            container=("Api",),
+            params=("int", "int"),
+        )
+        owner = symbol("app/App.java", Language.JAVA, "run", kind=SymbolKind.METHOD)
+        raw = project(
+            file_ir(
+                api.file,
+                Language.JAVA,
+                module="lib",
+                symbols=(api, unary, binary),
+            ),
+            file_ir(
+                owner.file,
+                Language.JAVA,
+                module="app",
+                symbols=(owner,),
+                imports=(
+                    ImportRef(span(owner.file, 2), "lib.Api", "fetch", None),
+                ),
+                calls=(call(owner, "fetch", arity=1),),
+            ),
+        )
+        result = resolve_project(raw)
+        self.assertEqual(result.imports[0].status, ResolutionStatus.AMBIGUOUS)
+        self.assertEqual(result.calls[0].status, ResolutionStatus.RESOLVED)
+        self.assertEqual(result.calls[0].target, unary.id)
+        self.assertEqual(result.calls[0].candidates, (unary.id,))
+
     def test_same_name_without_import_stays_ambiguous(self) -> None:
         owner = symbol("app.py", Language.PYTHON, "run")
         left = symbol("a.py", Language.PYTHON, "fetch")
@@ -1712,6 +1779,78 @@ class CallResolutionTest(unittest.TestCase):
         self.assertEqual(result[1].status, ResolutionStatus.UNRESOLVED)
         self.assertEqual(result[1].candidates, ())
         self.assertEqual(result[2].target, gadget.id)
+
+    def test_type_namespace_is_not_shadowed_by_a_value_binding(self) -> None:
+        client = symbol(
+            "app.java", Language.JAVA, "Client", kind=SymbolKind.CLASS
+        )
+        owner = symbol(
+            "app.java",
+            Language.JAVA,
+            "make",
+            kind=SymbolKind.METHOD,
+            container=("App",),
+            bindings=(Binding("Client", "int"),),
+        )
+        type_reference = reference(
+            owner.file,
+            "Client",
+            owner=owner,
+            kind=ReferenceKind.TYPE,
+            context=ReferenceContext.TYPE,
+        )
+        raw = project(
+            file_ir(
+                owner.file,
+                Language.JAVA,
+                module="app",
+                symbols=(client, owner),
+                calls=(
+                    call(
+                        owner,
+                        "Client",
+                        kind=CallKind.CONSTRUCT,
+                        arity=0,
+                    ),
+                ),
+                references=(type_reference,),
+            )
+        )
+        result = resolve_project(raw)
+        self.assertEqual(result.calls[0].target, client.id)
+        self.assertEqual(result.references[0].target, client.id)
+
+    def test_fully_qualified_constructor_uses_exact_project_type(self) -> None:
+        client = symbol(
+            "lib/Client.java", Language.JAVA, "Client", kind=SymbolKind.CLASS
+        )
+        owner = symbol("app/App.java", Language.JAVA, "run", kind=SymbolKind.METHOD)
+        raw = project(
+            file_ir(
+                client.file,
+                Language.JAVA,
+                module="lib",
+                symbols=(client,),
+            ),
+            file_ir(
+                owner.file,
+                Language.JAVA,
+                module="app",
+                symbols=(owner,),
+                calls=(
+                    call(
+                        owner,
+                        "lib.Client",
+                        kind=CallKind.CONSTRUCT,
+                        arity=0,
+                    ),
+                ),
+            ),
+        )
+        resolved = resolve_project(raw).calls[0]
+        self.assertEqual(resolved.status, ResolutionStatus.RESOLVED)
+        self.assertEqual(resolved.target, client.id)
+        self.assertEqual(resolved.candidates, (client.id,))
 
     def test_explicit_constructor_for_one_type_keeps_other_implicit_type_candidate(
         self,

@@ -535,8 +535,8 @@ class _Resolver:
     ) -> tuple[str, tuple[str, ...], dict[str, set[SymbolId]]]:
         key = _import_module(file_ir, raw)
         family = _family(file_ir.source.language)
-        files = tuple(sorted(self.module_files.get((family, key), ())))
-        if not files and file_ir.source.language in {Language.C, Language.CPP}:
+        files: tuple[str, ...] = ()
+        if file_ir.source.language in {Language.C, Language.CPP}:
             parent = PurePosixPath(file_ir.source.file).parent.as_posix()
             relative = posixpath.normpath(posixpath.join(parent, raw))
             relative = relative.removeprefix("./")
@@ -548,6 +548,8 @@ class _Resolver:
             if relative_files:
                 key = relative
                 files = relative_files
+        if not files:
+            files = tuple(sorted(self.module_files.get((family, key), ())))
         exports = self.exports.get((family, key), {})
         return key, files, exports
 
@@ -899,9 +901,18 @@ class _Resolver:
             file_ir = self.file_by_name[item.source_file]
             fact = item.fact
             key, _, exports = self._module_scope(file_ir, fact.module)
+            family = _family(file_ir.source.language)
+            named_evidence = (
+                self.export_evidence.get(
+                    (family, key, fact.name),
+                    self.export_evidence.get((family, key, "*")),
+                )
+                if fact.name is not None
+                else None
+            )
             namespace_targets = (
                 self.namespace_reexports.get(
-                    (_family(file_ir.source.language), key, fact.name),
+                    (family, key, fact.name),
                     set(),
                 )
                 if fact.name is not None
@@ -909,7 +920,7 @@ class _Resolver:
             )
             namespace_status = (
                 self.namespace_reexport_evidence.get(
-                    (_family(file_ir.source.language), key, fact.name)
+                    (family, key, fact.name)
                 )
                 if fact.name is not None
                 else None
@@ -1012,7 +1023,6 @@ class _Resolver:
             if local:
                 target_symbols = self._symbols(item.target_symbols)
                 alias_module_keys = set(namespace_targets)
-                family = _family(file_ir.source.language)
                 separator = "/" if file_ir.source.language is Language.RUST else "."
                 for target_symbol in target_symbols:
                     if target_symbol.kind is not SymbolKind.MODULE:
@@ -1064,7 +1074,8 @@ class _Resolver:
                         tuple(sorted(alias_module_keys)) or (key,),
                         namespace,
                         item.status is ResolutionStatus.EXTERNAL
-                        or namespace_status is ResolutionStatus.EXTERNAL,
+                        or namespace_status is ResolutionStatus.EXTERNAL
+                        or named_evidence is ResolutionStatus.EXTERNAL,
                         item.status is ResolutionStatus.UNRESOLVED
                         or namespace_status is ResolutionStatus.UNRESOLVED,
                     ),
@@ -1301,7 +1312,8 @@ class _Resolver:
                     return ResolutionStatus.UNRESOLVED, ()
         terminal = (
             ResolutionStatus.AMBIGUOUS
-            if alias.status is ResolutionStatus.AMBIGUOUS
+            if alias.namespace
+            and alias.status is ResolutionStatus.AMBIGUOUS
             or values
             and (alias.external or alias.unresolved)
             else None
@@ -1346,8 +1358,24 @@ class _Resolver:
             else {}
         )
 
-        if qualifier is None and name in bindings:
+        if (
+            qualifier is None
+            and name in bindings
+            and kind in {CallKind.CALL, ReferenceKind.NAME}
+        ):
             return ResolutionStatus.UNRESOLVED, ()
+
+        if (
+            qualifier is None
+            and kind is CallKind.CONSTRUCT
+            and ("." in name or "::" in name)
+        ):
+            exact_types = self._filtered(self._types_named(file_ir, name), kind)
+            return (
+                (None, exact_types)
+                if exact_types
+                else (ResolutionStatus.UNRESOLVED, ())
+            )
 
         if qualifier in {"this", "self", "cls"} and owner is not None:
             direct = self._filtered(

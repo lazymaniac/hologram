@@ -22,6 +22,7 @@ from hologram.model import (
 )
 from hologram.parsers.api import extract_file, extract_project
 from hologram.parsers.common import validate_body_events
+from hologram.resolve import ResolutionStatus, resolve_project
 from tests.parser_assertions import assert_body_fact_events
 
 CSHARP_SOURCE = b"""\
@@ -499,7 +500,7 @@ class KotlinParserTest(unittest.TestCase):
                 for item in result.imports
             ],
             [
-                ("shop.engine.PricingEngine", None, "Engine", False),
+                ("shop.engine", "PricingEngine", "Engine", False),
                 ("shop.ids", None, None, True),
             ],
         )
@@ -526,6 +527,35 @@ class KotlinParserTest(unittest.TestCase):
             symbol(result, "RATE", SymbolKind.CONSTANT).id.container_path,
             ("Outer", "Companion"),
         )
+
+    def test_aliased_top_level_import_keeps_package_and_imported_name(self) -> None:
+        library = snapshot(
+            b"package p\nfun fetch(): Int = 1\n",
+            Language.KOTLIN,
+            "src/p/Lib.kt",
+        )
+        app = snapshot(
+            b"package q\nimport p.fetch as load\nfun run(): Int = load()\n",
+            Language.KOTLIN,
+            "src/q/App.kt",
+        )
+        project = extract_project(Path("/repo"), (library, app))
+        result = next(file for file in project.files if file.source.file == app.file)
+
+        self.assertEqual(
+            [
+                (item.module, item.name, item.alias, item.wildcard)
+                for item in result.imports
+            ],
+            [("p", "fetch", "load", False)],
+        )
+        call = next(
+            item
+            for item in resolve_project(project).calls
+            if item.fact.name == "load"
+        )
+        self.assertEqual(call.status, ResolutionStatus.RESOLVED)
+        self.assertEqual(call.target.name if call.target else None, "fetch")
 
     def test_constructors_calls_bindings_modifiers_bodies_and_ids_are_complete(
         self,

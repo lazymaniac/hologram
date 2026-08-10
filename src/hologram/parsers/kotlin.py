@@ -970,7 +970,7 @@ def _imports(source: SourceFile, root: object) -> tuple[ImportRef, ...]:
                 None,
             )
             alias = ast_text(alias_node) or None
-        if alias is not None or wildcard:
+        if wildcard:
             module, name = raw, None
         else:
             module, separator, name = raw.rpartition(".")
