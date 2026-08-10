@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from hologram.model import (
     Language,
     ReferenceConfidence,
     ReferenceContext,
+    ReferenceKind,
     SourceFile,
     SourceRole,
     SymbolKind,
@@ -168,7 +170,7 @@ class PythonParserTest(unittest.TestCase):
         )
         self.assertEqual(quote.id.signature_key, "(Oid)")
         self.assertEqual(on_ready.annotations, ('register("on_ready")',))
-        self.assertEqual(len(result.bodies), 2)
+        self.assertEqual(len(result.bodies), 3)
         callbacks = [
             reference for reference in result.references if reference.name == "on_ready"
         ]
@@ -216,10 +218,15 @@ class PythonParserTest(unittest.TestCase):
 
         self.assertEqual(package.module, "pkg")
         self.assertEqual(original.module, "pkg.tool")
-        self.assertEqual(original.symbols[0].id, shifted.symbols[0].id)
-        self.assertEqual(original.symbols[0].span.start_line, 1)
-        self.assertEqual(shifted.symbols[0].span.start_line, 2)
-        self.assertEqual(forward.symbols[0].id.signature_key, "(OrderId)")
+        original_run = next(
+            symbol for symbol in original.symbols if symbol.name == "run"
+        )
+        shifted_run = next(symbol for symbol in shifted.symbols if symbol.name == "run")
+        typed = next(symbol for symbol in forward.symbols if symbol.name == "typed")
+        self.assertEqual(original_run.id, shifted_run.id)
+        self.assertEqual(original_run.span.start_line, 1)
+        self.assertEqual(shifted_run.span.start_line, 2)
+        self.assertEqual(typed.id.signature_key, "(OrderId)")
         forward_reference = next(
             reference for reference in forward.references if reference.name == "OrderId"
         )
@@ -271,6 +278,7 @@ class PythonParserTest(unittest.TestCase):
         self.assertEqual(
             [(symbol.name, symbol.span.start_line) for symbol in result.symbols],
             [
+                ("declarations", 1),
                 ("Color", 3),
                 ("RED", 4),
                 ("GREEN", 5),
@@ -290,7 +298,8 @@ class PythonParserTest(unittest.TestCase):
         result = extract_file(
             snapshot(PYTHON_BODY, file="body.py", language=Language.PYTHON)
         )
-        body = result.bodies[0]
+        analyze = next(symbol for symbol in result.symbols if symbol.name == "analyze")
+        body = next(body for body in result.bodies if body.owner == analyze.id)
         validate_body_events(body.events)
         kinds = {event.kind for event in body.events}
         self.assertTrue(
@@ -381,6 +390,202 @@ class PythonParserTest(unittest.TestCase):
         self.assertEqual(
             legacy_bulk.calls,
             ["ItemId", "price_order", "range", "OrderId"],
+        )
+
+    def test_recognized_dynamic_strings_join_name_events_and_keep_literals(
+        self,
+    ) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+def wire(service):
+    register("registered")
+    configure(callback="configured")
+    getattr(service, "reflected")
+""",
+                file="callbacks.py",
+                language=Language.PYTHON,
+            )
+        )
+
+        dynamic = [
+            reference
+            for reference in result.references
+            if reference.name in {"configured", "reflected", "registered"}
+        ]
+        self.assertEqual(
+            [(reference.name, reference.context) for reference in dynamic],
+            [
+                ("registered", ReferenceContext.REFLECTION),
+                ("configured", ReferenceContext.CONFIG),
+                ("reflected", ReferenceContext.REFLECTION),
+            ],
+        )
+        wire = next(symbol for symbol in result.symbols if symbol.name == "wire")
+        body = next(body for body in result.bodies if body.owner == wire.id)
+        for dynamic_reference in dynamic:
+            self.assertEqual(dynamic_reference.kind, ReferenceKind.NAME)
+            matching = [
+                event.kind
+                for event in body.events
+                if event.span == dynamic_reference.span
+            ]
+            self.assertEqual(
+                matching,
+                [BodyEventKind.LITERAL, BodyEventKind.NAME],
+            )
+        assert_body_fact_events(self, result)
+
+    def test_exception_handler_types_are_type_references_with_exact_events(
+        self,
+    ) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+def handle():
+    try:
+        target()
+    except ValueError:
+        recover()
+    except (pkg.Error, OtherError):
+        fallback()
+""",
+                file="exceptions.py",
+                language=Language.PYTHON,
+            )
+        )
+
+        references = [
+            reference
+            for reference in result.references
+            if reference.name in {"Error", "OtherError", "ValueError", "pkg"}
+        ]
+        self.assertEqual(
+            [reference.name for reference in references],
+            ["ValueError", "pkg", "Error", "OtherError"],
+        )
+        handle = next(symbol for symbol in result.symbols if symbol.name == "handle")
+        body = next(body for body in result.bodies if body.owner == handle.id)
+        body_events = {(event.kind, event.span) for event in body.events}
+        for exception_reference in references:
+            self.assertEqual(exception_reference.kind, ReferenceKind.TYPE)
+            self.assertEqual(exception_reference.context, ReferenceContext.TYPE)
+            self.assertIn(
+                (BodyEventKind.TYPE, exception_reference.span),
+                body_events,
+            )
+        assert_body_fact_events(self, result)
+
+    def test_module_symbol_owns_direct_facts_and_module_lambda_body(self) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+target()
+service.start()
+callback = lambda value: module_target(value)
+
+def declared():
+    nested_only()
+""",
+                file="pkg/app.py",
+                language=Language.PYTHON,
+            )
+        )
+
+        module = next(
+            symbol for symbol in result.symbols if symbol.kind is SymbolKind.MODULE
+        )
+        self.assertEqual(module.name, "pkg.app")
+        self.assertEqual(module.id.container_path, ())
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == module.id],
+            ["target", "start", "module_target"],
+        )
+        self.assertFalse(
+            any(
+                call.name == "nested_only" and call.caller == module.id
+                for call in result.calls
+            )
+        )
+        module_body = next(body for body in result.bodies if body.owner == module.id)
+        self.assertTrue(
+            any(
+                event.kind is BodyEventKind.PARAM and event.text == "value"
+                for event in module_body.events
+            )
+        )
+        assert_body_fact_events(self, result)
+
+    def test_nested_lambdas_keep_owner_facts_events_and_no_symbols(self) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+def outer(items, flag):
+    nested = lambda value: (lambda: inner(value))
+    mapped = list(map(lambda item: transform(item), items))
+    chosen = (lambda: left()) if flag else (lambda: right())
+    return nested, mapped, chosen
+""",
+                file="lambdas.py",
+                language=Language.PYTHON,
+            )
+        )
+
+        outer = next(symbol for symbol in result.symbols if symbol.name == "outer")
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == outer.id],
+            ["inner", "list", "map", "transform", "left", "right"],
+        )
+        self.assertEqual(
+            [symbol.name for symbol in result.symbols],
+            ["lambdas", "outer"],
+        )
+        body = next(body for body in result.bodies if body.owner == outer.id)
+        self.assertEqual(
+            [event.text for event in body.events if event.kind is BodyEventKind.PARAM],
+            ["items", "flag", "value", "item"],
+        )
+        self.assertEqual(
+            [
+                (event.kind, event.text)
+                for event in body.events
+                if event.kind
+                in {BodyEventKind.CONTROL_ENTER, BodyEventKind.CONTROL_EXIT}
+            ],
+            [
+                (BodyEventKind.CONTROL_ENTER, "if"),
+                (BodyEventKind.CONTROL_EXIT, "if"),
+            ],
+        )
+        self.assertEqual(
+            len([call for call in result.calls if call.caller == outer.id]),
+            6,
+        )
+        assert_body_fact_events(self, result)
+
+    def test_legacy_projection_aggregates_nested_python_calls_in_ast_walk_order(
+        self,
+    ) -> None:
+        raw = b"""\
+def outer():
+    def inner():
+        nested_call()
+    class Local:
+        def method(self):
+            class_call()
+    callback = lambda: lambda_call()
+    direct_call()
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "nested.py"
+            path.write_bytes(raw)
+            projected = legacy.extract_file(path, root)
+
+        outer = next(symbol for symbol in projected if symbol.name == "outer")
+        self.assertEqual(
+            outer.calls,
+            ["direct_call", "nested_call", "lambda_call", "class_call"],
         )
 
 
@@ -610,6 +815,140 @@ class HelmParserTest(unittest.TestCase):
         )
 
         self.assertEqual([symbol.size for symbol in projected], [0, 0])
+
+    def test_action_scanner_ignores_comments_and_keeps_quoted_delimiters(
+        self,
+    ) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+{{- define "scanner" -}}
+{{/* include "fake.comment" . */}}
+{{ printf "}}" `raw }}` '}' }}
+{{ include "real.target" . }}
+{{- end }}
+""",
+                file="chart/templates/scanner.tpl",
+                language=Language.HELM,
+            )
+        )
+
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual([call.name for call in result.calls], ["real.target"])
+        body = result.bodies[0]
+        self.assertEqual(
+            [
+                event.text
+                for event in body.events
+                if event.kind is BodyEventKind.LITERAL
+            ],
+            ["<string>", "<string>", "<string>", "<string>"],
+        )
+        self.assertFalse(any("fake" in event.text for event in body.events))
+        assert_body_fact_events(self, result)
+
+    def test_unterminated_helm_actions_strings_and_comments_are_errors(self) -> None:
+        malformed = (
+            b'{{- define "broken" -}}\n{{ printf "unterminated }}\n{{- end }}\n',
+            b"{{/* unterminated comment\n",
+            b'{{ printf "ok"\n',
+        )
+        for index, raw in enumerate(malformed):
+            with self.subTest(index=index):
+                source = snapshot(
+                    raw,
+                    file=f"chart/templates/broken-{index}.tpl",
+                    language=Language.HELM,
+                )
+                result = extract_file(source)
+                project = extract_project(Path("/repo"), (source,))
+                self.assertTrue(
+                    any(
+                        diagnostic.code == "helm-syntax-error"
+                        and diagnostic.severity is DiagnosticSeverity.ERROR
+                        for diagnostic in result.diagnostics
+                    )
+                )
+                self.assertFalse(project.complete)
+                assert_body_fact_events(self, result)
+
+    def test_helm_structure_validation_rejects_invalid_actions(self) -> None:
+        malformed = (
+            b"{{ else }}\n",
+            b"{{ end }}\n",
+            b'{{ define "outer" }}{{ define "nested" }}{{ end }}{{ end }}\n',
+            b"{{ if .Values.enabled }}\n",
+        )
+        for index, raw in enumerate(malformed):
+            with self.subTest(index=index):
+                result = extract_file(
+                    snapshot(
+                        raw,
+                        file=f"chart/templates/structure-{index}.tpl",
+                        language=Language.HELM,
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        diagnostic.code == "helm-syntax-error"
+                        for diagnostic in result.diagnostics
+                    )
+                )
+                assert_body_fact_events(self, result)
+
+    def test_valid_helm_else_if_and_all_control_kinds_are_balanced(self) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+{{ if .Values.first }}{{ else if .Values.second }}{{ end }}
+{{ range .Values.items }}{{ else }}{{ end }}
+{{ with .Values.context }}{{ end }}
+{{ block "outside" . }}{{ end }}
+{{ define "inside" }}
+{{ if .Values.first }}{{ else if .Values.second }}{{ end }}
+{{ range .Values.items }}{{ else }}{{ end }}
+{{ with .Values.context }}{{ end }}
+{{ block "nested" . }}{{ end }}
+{{ end }}
+""",
+                file="chart/templates/controls.tpl",
+                language=Language.HELM,
+            )
+        )
+
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(len(result.bodies), 1)
+        validate_body_events(result.bodies[0].events)
+        self.assertEqual(
+            [
+                event.text
+                for event in result.bodies[0].events
+                if event.kind is BodyEventKind.CONTROL_ENTER
+            ],
+            ["if", "loop", "if"],
+        )
+        assert_body_fact_events(self, result)
+
+    def test_values_yaml_preserves_unicode_word_keys_and_byte_spans(self) -> None:
+        raw = "foó: 1\nplain: 2\n".encode()
+        result = extract_file(
+            snapshot(
+                raw,
+                file="chart/values.yaml",
+                language=Language.HELM,
+            )
+        )
+
+        self.assertEqual([symbol.name for symbol in result.symbols], ["foó", "plain"])
+        self.assertEqual(result.symbols[0].span.start_column, 0)
+        self.assertEqual(result.symbols[0].span.end_column, len("foó".encode()))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "chart/values.yaml"
+            path.parent.mkdir()
+            path.write_bytes(raw)
+            projected = legacy.extract_file(path, root)
+        self.assertEqual([symbol.name for symbol in projected], ["foó", "plain"])
 
 
 if __name__ == "__main__":

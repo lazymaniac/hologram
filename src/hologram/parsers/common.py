@@ -384,7 +384,7 @@ class _AstBodyEventWalker:
             yield node
             if isinstance(
                 node,
-                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
             ):
                 continue
             stack.extend(reversed(tuple(ast.iter_child_nodes(node))))
@@ -678,27 +678,7 @@ class _AstBodyEventWalker:
     def walk(self) -> tuple[BodyEvent, ...]:
         arguments = getattr(self.callable_node, "args", None)
         if isinstance(arguments, ast.arguments):
-            positional = [*arguments.posonlyargs, *arguments.args]
-            positional_defaults: list[ast.expr | None] = [None] * (
-                len(positional) - len(arguments.defaults)
-            )
-            positional_defaults.extend(arguments.defaults)
-            for parameter, default in zip(
-                positional,
-                positional_defaults,
-                strict=True,
-            ):
-                self.visit_parameter(parameter, default)
-            if arguments.vararg is not None:
-                self.visit_parameter(arguments.vararg, None, prefix="*")
-            for parameter, default in zip(
-                arguments.kwonlyargs,
-                arguments.kw_defaults,
-                strict=True,
-            ):
-                self.visit_parameter(parameter, default)
-            if arguments.kwarg is not None:
-                self.visit_parameter(arguments.kwarg, None, prefix="**")
+            self.visit_arguments(arguments)
         returns = getattr(self.callable_node, "returns", None)
         if returns is not None:
             self.visit_annotation(returns)
@@ -711,6 +691,29 @@ class _AstBodyEventWalker:
         result = tuple(self.events)
         validate_body_events(result)
         return result
+
+    def visit_arguments(self, arguments: ast.arguments) -> None:
+        positional = [*arguments.posonlyargs, *arguments.args]
+        positional_defaults: list[ast.expr | None] = [None] * (
+            len(positional) - len(arguments.defaults)
+        )
+        positional_defaults.extend(arguments.defaults)
+        for parameter, default in zip(
+            positional,
+            positional_defaults,
+            strict=True,
+        ):
+            self.visit_parameter(parameter, default)
+        if arguments.vararg is not None:
+            self.visit_parameter(arguments.vararg, None, prefix="*")
+        for parameter, default in zip(
+            arguments.kwonlyargs,
+            arguments.kw_defaults,
+            strict=True,
+        ):
+            self.visit_parameter(parameter, default)
+        if arguments.kwarg is not None:
+            self.visit_parameter(arguments.kwarg, None, prefix="**")
 
     def visit_parameter(
         self,
@@ -760,6 +763,8 @@ class _AstBodyEventWalker:
             self.binding_event(node.name, node)
             return
         if isinstance(node, ast.Lambda):
+            self.visit_arguments(node.args)
+            self.visit(node.body)
             return
         if isinstance(node, ast.If):
             self.control("if", node, lambda: self._visit_if(node))
@@ -1041,12 +1046,16 @@ class _AstBodyEventWalker:
 def ast_body_events(
     source: SourceFile, callable_node: ast.AST
 ) -> tuple[BodyEvent, ...]:
-    """Emit facts from one stdlib-AST callable without entering nested callables."""
+    """Emit one Python scope's events without entering named declarations.
+
+    Anonymous lambdas are expressions owned by the nearest named or module scope,
+    so their parameters, defaults, and bodies are traversed in place.
+    """
     if not isinstance(
         callable_node,
-        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda),
+        (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.Module),
     ):
-        raise TypeError("callable_node must be a Python function or lambda")
+        raise TypeError("callable_node must be a Python module, function, or lambda")
     return _AstBodyEventWalker(source, callable_node).walk()
 
 

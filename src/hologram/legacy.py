@@ -1687,23 +1687,34 @@ def _legacy_python_call_spans(
 def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
     if symbol.kind not in _LEGACY_CALLABLE_KINDS:
         return []
-    owned = [call for call in file_ir.calls if call.caller == symbol.id]
     if file_ir.source.language is Language.PYTHON:
         ranks = {
             span: rank
             for rank, span in enumerate(_legacy_python_call_spans(file_ir, symbol))
         }
+        owned = [
+            call
+            for call in file_ir.calls
+            if (
+                call.span.start_line,
+                call.span.start_column,
+                call.span.end_line,
+                call.span.end_column,
+            )
+            in ranks
+        ]
         owned.sort(
-            key=lambda call: ranks.get(
+            key=lambda call: ranks[
                 (
                     call.span.start_line,
                     call.span.start_column,
                     call.span.end_line,
                     call.span.end_column,
-                ),
-                len(ranks),
-            )
+                )
+            ]
         )
+    else:
+        owned = [call for call in file_ir.calls if call.caller == symbol.id]
     result: list[str] = []
     for call in owned:
         name = _legacy_call_name(call)

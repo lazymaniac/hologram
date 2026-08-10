@@ -22,12 +22,12 @@ from hologram.model import (
 
 from .common import symbol_id, validate_body_events
 
-_ACTION_RE = re.compile(rb"\{\{(?P<body>.*?)\}\}", re.DOTALL)
 _CHART_NAME_RE = re.compile(rb"(?m)^name:\s*(\S+)")
-_VALUE_RE = re.compile(rb"(?m)^([A-Za-z_][\w-]*):")
+_VALUE_RE = re.compile(r"(?m)^([A-Za-z_][\w-]*):")
 _TOKEN_RE = re.compile(
     rb'"(?:\\.|[^"\\])*"'
     rb"|`[^`]*`"
+    rb"|'(?:\\.|[^'\\])*'"
     rb"|\$?[A-Za-z_][A-Za-z0-9_.-]*"
     rb"|\.[A-Za-z_][A-Za-z0-9_.-]*"
     rb"|\."
@@ -37,7 +37,7 @@ _TOKEN_RE = re.compile(
 )
 _CONTROL_ACTIONS = {b"if": "if", b"range": "loop", b"with": "if"}
 _NON_EVENT_BLOCKS = frozenset({b"block"})
-_KEYWORDS = frozenset({b"else"})
+_KEYWORDS = frozenset({b"else", b"if"})
 _OPERATORS = frozenset(
     {
         b"!=",
@@ -67,20 +67,44 @@ class _Token:
     end: int
 
 
+@dataclass(frozen=True, slots=True)
+class _Action:
+    start: int
+    end: int
+    body_start: int
+    body_end: int
+    comment: bool = False
+
+
 @dataclass(slots=True)
 class _Definition:
     name: str
     open_start: int
     content_start: int
-    stack: list[tuple[str, SourceSpan | None]]
     events: list[BodyEvent] = field(default_factory=list)
     calls: list[CallRef] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _Frame:
+    keyword: bytes
+    definition: _Definition | None
+    span: SourceSpan
+    control: str | None = None
+    final_else: bool = False
 
 
 def _line_starts(raw: bytes) -> tuple[int, ...]:
     starts = [0]
     starts.extend(match.end() for match in re.finditer(rb"\r\n|\r|\n", raw))
     return tuple(starts)
+
+
+def _utf8_offsets(text: str) -> tuple[int, ...]:
+    offsets = [0]
+    for character in text:
+        offsets.append(offsets[-1] + len(character.encode("utf-8")))
+    return tuple(offsets)
 
 
 def _position(starts: tuple[int, ...], offset: int) -> tuple[int, int]:
@@ -105,9 +129,138 @@ def _span(
     )
 
 
-def _action_tokens(match: re.Match[bytes]) -> tuple[_Token, ...]:
-    body = match.group("body")
-    body_start = match.start("body")
+def _syntax_diagnostic(
+    source: SourceFile,
+    starts: tuple[int, ...],
+    message: str,
+    start: int,
+    end: int,
+) -> Diagnostic:
+    return Diagnostic(
+        "helm-syntax-error",
+        DiagnosticSeverity.ERROR,
+        f"{source.file}: {message}",
+        _span(source, starts, start, end),
+    )
+
+
+def _comment_opener(raw: bytes, body_start: int) -> int | None:
+    cursor = body_start
+    if raw[cursor : cursor + 1] == b"-":
+        cursor += 1
+    while raw[cursor : cursor + 1].isspace():
+        cursor += 1
+    return cursor if raw[cursor : cursor + 2] == b"/*" else None
+
+
+def _scan_actions(
+    source: SourceFile,
+    starts: tuple[int, ...],
+) -> tuple[tuple[_Action, ...], tuple[Diagnostic, ...]]:
+    raw = source.raw
+    actions: list[_Action] = []
+    diagnostics: list[Diagnostic] = []
+    cursor = 0
+    while True:
+        action_start = raw.find(b"{{", cursor)
+        if action_start < 0:
+            break
+        body_start = action_start + 2
+        comment_start = _comment_opener(raw, body_start)
+        if comment_start is not None:
+            comment_end = raw.find(b"*/", comment_start + 2)
+            if comment_end < 0:
+                diagnostics.append(
+                    _syntax_diagnostic(
+                        source,
+                        starts,
+                        "unterminated template comment",
+                        action_start,
+                        len(raw),
+                    )
+                )
+                break
+            tail = comment_end + 2
+            while raw[tail : tail + 1].isspace():
+                tail += 1
+            if raw[tail : tail + 1] == b"-":
+                tail += 1
+                while raw[tail : tail + 1].isspace():
+                    tail += 1
+            if raw[tail : tail + 2] != b"}}":
+                delimiter = raw.find(b"}}", tail)
+                diagnostic_end = len(raw) if delimiter < 0 else delimiter + 2
+                diagnostics.append(
+                    _syntax_diagnostic(
+                        source,
+                        starts,
+                        "unexpected content after template comment",
+                        action_start,
+                        diagnostic_end,
+                    )
+                )
+                if delimiter < 0:
+                    break
+                tail = delimiter
+            action_end = tail + 2
+            actions.append(
+                _Action(
+                    action_start,
+                    action_end,
+                    body_start,
+                    tail,
+                    comment=True,
+                )
+            )
+            cursor = action_end
+            continue
+
+        quote: int | None = None
+        escaped = False
+        index = body_start
+        while index < len(raw):
+            byte = raw[index]
+            if quote is not None:
+                if quote != ord("`") and escaped:
+                    escaped = False
+                elif quote != ord("`") and byte == ord("\\"):
+                    escaped = True
+                elif byte == quote:
+                    quote = None
+                index += 1
+                continue
+            if byte in {ord('"'), ord("'"), ord("`")}:
+                quote = byte
+                index += 1
+                continue
+            if raw[index : index + 2] == b"}}":
+                action_end = index + 2
+                actions.append(_Action(action_start, action_end, body_start, index))
+                cursor = action_end
+                break
+            index += 1
+        else:
+            message = (
+                "unterminated template string"
+                if quote is not None
+                else "unterminated template action"
+            )
+            diagnostics.append(
+                _syntax_diagnostic(
+                    source,
+                    starts,
+                    message,
+                    action_start,
+                    len(raw),
+                )
+            )
+            break
+    return tuple(actions), tuple(diagnostics)
+
+
+def _action_tokens(action: _Action, raw: bytes) -> tuple[_Token, ...]:
+    body = raw[action.body_start : action.body_end]
+    body_start = action.body_start
     left = 0
     right = len(body)
     while left < right and body[left : left + 1].isspace():
@@ -136,14 +289,32 @@ def _action_tokens(match: re.Match[bytes]) -> tuple[_Token, ...]:
 def _string_value(raw: bytes) -> str | None:
     if len(raw) < 2 or raw[:1] not in {b'"', b"`"}:
         return None
-    text = raw[1:-1].decode("utf-8")
-    if raw[:1] == b'"':
-        text = text.replace(r"\"", '"').replace(r"\\", "\\")
-    return text
+    if raw[:1] == b"`":
+        return raw[1:-1].decode("utf-8")
+    content = raw[1:-1]
+    decoded = bytearray()
+    escapes = {
+        ord('"'): ord('"'),
+        ord("\\"): ord("\\"),
+        ord("n"): ord("\n"),
+        ord("r"): ord("\r"),
+        ord("t"): ord("\t"),
+    }
+    index = 0
+    while index < len(content):
+        byte = content[index]
+        if byte != ord("\\") or index + 1 == len(content):
+            decoded.append(byte)
+            index += 1
+            continue
+        following = content[index + 1]
+        decoded.append(escapes.get(following, following))
+        index += 2
+    return decoded.decode("utf-8")
 
 
 def _literal_text(raw: bytes) -> str | None:
-    if raw[:1] in {b'"', b"`"}:
+    if raw[:1] in {b'"', b"'", b"`"}:
         return "<string>"
     if re.fullmatch(rb"-?\d+(?:\.\d+)?", raw):
         return "<number>"
@@ -186,24 +357,36 @@ def _chart_symbols(
     base = source.file.rsplit("/", 1)[-1]
     symbols: list[Symbol] = []
     if base == "Chart.yaml":
-        match = _CHART_NAME_RE.search(source.raw)
-        if match is not None:
-            name = match.group(1).decode("utf-8")
+        chart_match = _CHART_NAME_RE.search(source.raw)
+        if chart_match is not None:
+            name = chart_match.group(1).decode("utf-8")
             symbols.append(
                 Symbol(
                     symbol_id(source, (), SymbolKind.CLASS, name),
-                    _span(source, starts, match.start(), match.end()),
+                    _span(
+                        source,
+                        starts,
+                        chart_match.start(),
+                        chart_match.end(),
+                    ),
                     Visibility.PUBLIC,
                     f"chart {name}",
                 )
             )
     elif base == "values.yaml":
-        for match in _VALUE_RE.finditer(source.raw):
-            name = match.group(1).decode("utf-8")
+        text = source.text
+        offsets = _utf8_offsets(text)
+        for value_match in _VALUE_RE.finditer(text):
+            name = value_match.group(1)
             symbols.append(
                 Symbol(
                     symbol_id(source, (), SymbolKind.FUNCTION, name),
-                    _span(source, starts, match.start(1), match.end(1)),
+                    _span(
+                        source,
+                        starts,
+                        offsets[value_match.start(1)],
+                        offsets[value_match.end(1)],
+                    ),
                     Visibility.PRIVATE,
                     name,
                 )
@@ -300,16 +483,14 @@ def _finish_definition(
     *,
     body_end: int,
     symbol_end: int,
-    partial: bool,
+    open_controls: tuple[str, ...] = (),
 ) -> tuple[Symbol, BodyIR, tuple[CallRef, ...]]:
-    if partial:
+    if open_controls:
         eof_span = _span(source, starts, symbol_end, symbol_end)
-        while len(definition.stack) > 1:
-            control, _ = definition.stack.pop()
-            if control:
-                definition.events.append(
-                    BodyEvent(BodyEventKind.CONTROL_EXIT, control, eof_span)
-                )
+        for control in reversed(open_controls):
+            definition.events.append(
+                BodyEvent(BodyEventKind.CONTROL_EXIT, control, eof_span)
+            )
     validate_body_events(definition.events)
     symbol = _definition_symbol(source, starts, definition, symbol_end)
     body = BodyIR(
@@ -343,103 +524,164 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
     symbols = _chart_symbols(source, starts)
     bodies: list[BodyIR] = []
     calls: list[CallRef] = []
-    diagnostics: list[Diagnostic] = []
+    actions, scan_diagnostics = _scan_actions(source, starts)
+    diagnostics = list(scan_diagnostics)
     definition: _Definition | None = None
+    stack: list[_Frame] = []
 
-    for match in _ACTION_RE.finditer(source.raw):
-        tokens = _action_tokens(match)
+    for action in actions:
+        if action.comment:
+            continue
+        tokens = _action_tokens(action, source.raw)
         if not tokens:
             continue
         keyword = tokens[0].raw
-        if definition is None:
-            if keyword != b"define" or len(tokens) < 2:
-                continue
-            name = _string_value(tokens[1].raw)
-            if name is None:
+        action_span = _span(source, starts, action.start, action.end)
+
+        if keyword == b"define":
+            if definition is not None or stack:
                 diagnostics.append(
-                    Diagnostic(
-                        "helm-syntax-error",
-                        DiagnosticSeverity.ERROR,
-                        f"{source.file}: template definition name must be a string",
-                        _span(source, starts, match.start(), match.end()),
+                    _syntax_diagnostic(
+                        source,
+                        starts,
+                        "nested template definition",
+                        action.start,
+                        action.end,
                     )
                 )
                 continue
-            definition = _Definition(
-                name,
-                match.start(),
-                match.end(),
-                [("", _span(source, starts, match.start(), match.end()))],
-            )
+            name = _string_value(tokens[1].raw) if len(tokens) >= 2 else None
+            if name is None:
+                diagnostics.append(
+                    _syntax_diagnostic(
+                        source,
+                        starts,
+                        "template definition name must be a string",
+                        action.start,
+                        action.end,
+                    )
+                )
+                continue
+            definition = _Definition(name, action.start, action.end)
+            stack.append(_Frame(b"define", definition, action_span))
             continue
 
         if keyword in _CONTROL_ACTIONS:
             control = _CONTROL_ACTIONS[keyword]
-            control_span = _span(source, starts, match.start(), match.end())
-            definition.events.append(
-                BodyEvent(BodyEventKind.CONTROL_ENTER, control, control_span)
-            )
-            definition.stack.append((control, control_span))
-            _action_events(source, starts, definition, tokens[1:])
+            if definition is not None:
+                definition.events.append(
+                    BodyEvent(BodyEventKind.CONTROL_ENTER, control, action_span)
+                )
+                _action_events(source, starts, definition, tokens[1:])
+            stack.append(_Frame(keyword, definition, action_span, control=control))
             continue
+
         if keyword in _NON_EVENT_BLOCKS:
-            definition.stack.append(("", None))
-            _action_events(source, starts, definition, tokens[1:])
+            if definition is not None:
+                _action_events(source, starts, definition, tokens[1:])
+            stack.append(_Frame(keyword, definition, action_span))
             continue
-        if keyword == b"end":
-            if not definition.stack:
+
+        if keyword == b"else":
+            if not stack or stack[-1].keyword not in _CONTROL_ACTIONS:
                 diagnostics.append(
-                    Diagnostic(
-                        "helm-syntax-error",
-                        DiagnosticSeverity.ERROR,
-                        f"{source.file}: unexpected template end",
-                        _span(source, starts, match.start(), match.end()),
+                    _syntax_diagnostic(
+                        source,
+                        starts,
+                        "unexpected template else",
+                        action.start,
+                        action.end,
                     )
                 )
                 continue
-            control, _ = definition.stack.pop()
-            if control:
-                definition.events.append(
-                    BodyEvent(
-                        BodyEventKind.CONTROL_EXIT,
-                        control,
-                        _span(source, starts, match.start(), match.end()),
+            frame = stack[-1]
+            else_if = len(tokens) > 1 and tokens[1].raw == b"if"
+            if frame.final_else:
+                diagnostics.append(
+                    _syntax_diagnostic(
+                        source,
+                        starts,
+                        "unexpected template else after final else",
+                        action.start,
+                        action.end,
                     )
                 )
-            if not definition.stack:
+                continue
+            frame.final_else = not else_if
+            if definition is not None:
+                _action_events(source, starts, definition, tokens)
+            continue
+
+        if keyword == b"end":
+            if not stack:
+                diagnostics.append(
+                    _syntax_diagnostic(
+                        source,
+                        starts,
+                        "unexpected template end",
+                        action.start,
+                        action.end,
+                    )
+                )
+                continue
+            frame = stack.pop()
+            if frame.control is not None and frame.definition is not None:
+                frame.definition.events.append(
+                    BodyEvent(BodyEventKind.CONTROL_EXIT, frame.control, action_span)
+                )
+            if frame.keyword == b"define" and frame.definition is not None:
                 symbol, body, owned_calls = _finish_definition(
                     source,
                     starts,
-                    definition,
-                    body_end=match.start(),
-                    symbol_end=match.end(),
-                    partial=False,
+                    frame.definition,
+                    body_end=action.start,
+                    symbol_end=action.end,
                 )
                 symbols.append(symbol)
                 bodies.append(body)
                 calls.extend(owned_calls)
                 definition = None
             continue
-        _action_events(source, starts, definition, tokens)
+
+        if definition is not None:
+            _action_events(source, starts, definition, tokens)
 
     if definition is not None:
+        open_controls = tuple(
+            frame.control
+            for frame in stack
+            if frame.definition is definition and frame.control is not None
+        )
         symbol, body, owned_calls = _finish_definition(
             source,
             starts,
             definition,
             body_end=len(source.raw),
             symbol_end=len(source.raw),
-            partial=True,
+            open_controls=open_controls,
         )
         symbols.append(symbol)
         bodies.append(body)
         calls.extend(owned_calls)
         diagnostics.append(
+            _syntax_diagnostic(
+                source,
+                starts,
+                f"unclosed template definition {definition.name!r}",
+                definition.open_start,
+                len(source.raw),
+            )
+        )
+
+    for frame in stack:
+        if frame.keyword == b"define":
+            continue
+        diagnostics.append(
             Diagnostic(
                 "helm-syntax-error",
                 DiagnosticSeverity.ERROR,
-                f"{source.file}: unclosed template definition {definition.name!r}",
-                symbol.span,
+                (f"{source.file}: unclosed template {frame.keyword.decode('ascii')}"),
+                frame.span,
             )
         )
 

@@ -61,6 +61,10 @@ def _module_name(file: str) -> str | None:
     return ".".join(parts) or None
 
 
+def _module_symbol_name(source: SourceFile, module: str | None) -> str:
+    return module or PurePosixPath(source.file).stem
+
+
 def _visibility(name: str) -> Visibility:
     return Visibility.PRIVATE if name.startswith("_") else Visibility.PUBLIC
 
@@ -474,7 +478,7 @@ class _OwnedFactVisitor(ast.NodeVisitor):
         return
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
-        return
+        self.generic_visit(node)
 
     def _visit_in_context(
         self,
@@ -645,6 +649,12 @@ class _OwnedFactVisitor(ast.NodeVisitor):
         if node.value is not None:
             self.visit(node.value)
 
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        if node.type is not None:
+            self._visit_in_context(node.type, ReferenceContext.TYPE)
+        for statement in node.body:
+            self.visit(statement)
+
 
 def _facts_for_callable(
     source: SourceFile,
@@ -674,6 +684,18 @@ def _facts_for_callable(
     if node.returns is not None:
         visitor._visit_in_context(node.returns, ReferenceContext.TYPE)
     for statement in node.body:
+        visitor.visit(statement)
+    return tuple(visitor.calls), tuple(visitor.references)
+
+
+def _facts_for_module(
+    source: SourceFile,
+    symbol: Symbol,
+    tree: ast.Module,
+    events: tuple[BodyEvent, ...],
+) -> tuple[tuple[CallRef, ...], tuple[ReferenceRef, ...]]:
+    visitor = _OwnedFactVisitor(source, symbol.id, events)
+    for statement in tree.body:
         visitor.visit(statement)
     return tuple(visitor.calls), tuple(visitor.references)
 
@@ -747,6 +769,67 @@ def _syntax_diagnostic(source: SourceFile, error: SyntaxError) -> Diagnostic:
     )
 
 
+def _scope_span(source: SourceFile, body: list[ast.stmt]) -> SourceSpan:
+    if not body:
+        return SourceSpan(source.file, 1, 0, 1, 0)
+    first = ast_span(source, body[0])
+    last = ast_span(source, body[-1])
+    return SourceSpan(
+        source.file,
+        first.start_line,
+        first.start_column,
+        last.end_line,
+        last.end_column,
+    )
+
+
+def _module_symbol(
+    source: SourceFile,
+    module: str | None,
+    tree: ast.Module,
+) -> Symbol:
+    name = _module_symbol_name(source, module)
+    span = _scope_span(source, tree.body)
+    return Symbol(
+        symbol_id(source, (), SymbolKind.MODULE, name),
+        span,
+        Visibility.PUBLIC,
+        f"module {name}",
+        body_lines=span.end_line - span.start_line + 1 if tree.body else 0,
+    )
+
+
+def _join_reference_events(
+    events: tuple[BodyEvent, ...],
+    references: tuple[ReferenceRef, ...],
+) -> tuple[BodyEvent, ...]:
+    required = {
+        (reference.span, reference.name)
+        for reference in references
+        if reference.kind is ReferenceKind.NAME
+        and reference.confidence is ReferenceConfidence.POSSIBLE
+    }
+    existing = {
+        (event.span, event.text) for event in events if event.kind is BodyEventKind.NAME
+    }
+    joined: list[BodyEvent] = []
+    for event in events:
+        joined.append(event)
+        key = next(
+            (
+                candidate
+                for candidate in required
+                if candidate[0] == event.span and candidate not in existing
+            ),
+            None,
+        )
+        if event.kind is not BodyEventKind.LITERAL or key is None:
+            continue
+        joined.append(BodyEvent(BodyEventKind.NAME, key[1], event.span))
+        existing.add(key)
+    return tuple(joined)
+
+
 def extract(source: SourceFile, parser: object | None) -> FileIR:
     del parser
     module = _module_name(source.file)
@@ -759,23 +842,34 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
 
     declarations = _DeclarationVisitor(source)
     declarations.visit(tree)
-    symbols = tuple(sorted(declarations.symbols, key=lambda item: item.span))
+    module_symbol = _module_symbol(source, module, tree)
+    symbols = (
+        module_symbol,
+        *sorted(declarations.symbols, key=lambda item: item.span),
+    )
     bodies: list[BodyIR] = []
     calls: list[CallRef] = []
     references: list[ReferenceRef] = []
+
+    module_events = ast_body_events(source, tree)
+    module_calls, module_references = _facts_for_module(
+        source,
+        module_symbol,
+        tree,
+        module_events,
+    )
+    module_events = _join_reference_events(module_events, module_references)
+    bodies.append(BodyIR(module_symbol.id, module_symbol.span, module_events))
+    calls.extend(module_calls)
+    references.extend(module_references)
+
     for symbol, node in declarations.callables:
         events = ast_body_events(source, node)
-        body_span = SourceSpan(
-            source.file,
-            node.body[0].lineno,
-            node.body[0].col_offset,
-            node.body[-1].end_lineno or node.body[-1].lineno,
-            node.body[-1].end_col_offset or node.body[-1].col_offset,
-        )
-        bodies.append(BodyIR(symbol.id, body_span, events))
         owned_calls, owned_references = _facts_for_callable(
             source, symbol, node, events
         )
+        events = _join_reference_events(events, owned_references)
+        bodies.append(BodyIR(symbol.id, _scope_span(source, node.body), events))
         calls.extend(owned_calls)
         references.extend(owned_references)
     for symbol, class_node in declarations.classes:
