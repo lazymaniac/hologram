@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import os
 import stat
@@ -7,11 +8,13 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import NoReturn
 
 from . import pipeline
 from .analysis import AnalyzedProject, analyze_project
 from .config import (
     ALLOWED_AGENTS,
+    CONFIG_NAME,
     ConfigError,
     ProjectConfig,
     canonical_config_bytes,
@@ -65,6 +68,11 @@ class BuildArtifact:
 
 class _DeliveryUsageError(ValueError):
     pass
+
+
+class _CommandParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise _DeliveryUsageError(message)
 
 
 class _ArtifactError(RuntimeError):
@@ -503,15 +511,130 @@ def command_init(
     return EXIT_OK
 
 
+def build_parser() -> argparse.ArgumentParser:
+    """Build the strict Hologram v2 lifecycle command parser."""
+
+    common = _CommandParser(add_help=False, allow_abbrev=False)
+    common.add_argument(
+        "--root",
+        type=Path,
+        default=Path("."),
+        help="project root (default: current directory)",
+    )
+    common.add_argument(
+        "--config",
+        type=Path,
+        default=Path(CONFIG_NAME),
+        help=f"schema-2 configuration path (default: {CONFIG_NAME})",
+    )
+    common.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress successful command output",
+    )
+
+    parser = _CommandParser(
+        prog="hologram",
+        description="Build and deliver canonical Hologram v2 project maps.",
+        allow_abbrev=False,
+    )
+    commands = parser.add_subparsers(
+        dest="command",
+        required=True,
+        metavar="{init,build,check,diff}",
+    )
+
+    init = commands.add_parser(
+        "init",
+        parents=(common,),
+        help="initialize managed contexts and an optional pre-commit check",
+        allow_abbrev=False,
+    )
+    init.add_argument(
+        "--agent",
+        action="append",
+        choices=tuple(AGENT_PATHS),
+        help="select an agent context (repeatable)",
+    )
+    init.add_argument(
+        "--no-hook",
+        action="store_true",
+        help="do not install or migrate Git hooks",
+    )
+
+    commands.add_parser(
+        "build",
+        parents=(common,),
+        help="build and atomically deliver the canonical map",
+        allow_abbrev=False,
+    )
+    commands.add_parser(
+        "check",
+        parents=(common,),
+        help="check managed outputs without writing",
+        allow_abbrev=False,
+    )
+    diff = commands.add_parser(
+        "diff",
+        parents=(common,),
+        help="compare the current model with a committed revision",
+        allow_abbrev=False,
+    )
+    diff.add_argument("rev", nargs="?", default="HEAD~1", metavar="REV")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Parse and dispatch one Hologram v2 lifecycle command."""
+
+    try:
+        arguments = build_parser().parse_args(argv)
+    except _DeliveryUsageError as error:
+        _diagnose(error)
+        return EXIT_USAGE
+    except SystemExit as error:
+        if error.code == EXIT_OK:
+            return EXIT_OK
+        raise
+
+    root = Path(os.path.abspath(os.fspath(arguments.root)))
+    config_path: Path = arguments.config
+    if not config_path.is_absolute():
+        config_path = Path(os.path.abspath(os.fspath(root / config_path)))
+
+    if arguments.command == "init":
+        return command_init(
+            root,
+            config_path,
+            agents=tuple(arguments.agent or ()),
+            no_hook=arguments.no_hook,
+            quiet=arguments.quiet,
+        )
+    if arguments.command == "build":
+        return command_build(root, config_path, quiet=arguments.quiet)
+    if arguments.command == "check":
+        return command_check(root, config_path, quiet=arguments.quiet)
+    if arguments.command == "diff":
+        return command_diff(
+            root,
+            config_path,
+            arguments.rev,
+            quiet=arguments.quiet,
+        )
+    raise AssertionError(f"unsupported parsed command: {arguments.command!r}")
+
+
 __all__ = [
     "EXIT_INCOMPLETE",
     "EXIT_OK",
     "EXIT_STALE",
     "EXIT_USAGE",
     "BuildArtifact",
+    "build_parser",
     "command_build",
     "command_check",
     "command_diff",
     "command_init",
     "create_artifact",
+    "main",
 ]

@@ -1,9 +1,8 @@
-import importlib.metadata
 import subprocess
 import sys
+import tomllib
 import unittest
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,18 +25,17 @@ class PackageLayoutTest(unittest.TestCase):
             cwd=ROOT,
             capture_output=True,
             text=True,
+            check=False,
         )
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage: hologram", result.stdout)
 
-    def test_console_script_targets_legacy_cli(self):
-        scripts = {
-            entry_point.name: entry_point.value
-            for entry_point in importlib.metadata.entry_points(group="console_scripts")
-        }
+    def test_console_script_source_targets_v2_cli(self):
+        with (ROOT / "pyproject.toml").open("rb") as stream:
+            project = tomllib.load(stream)["project"]
 
-        self.assertEqual(scripts["hologram"], "hologram.legacy:run_cli")
+        self.assertEqual(project["scripts"], {"hologram": "hologram.cli:main"})
 
     def test_editable_install_metadata_is_ignored(self):
         result = subprocess.run(

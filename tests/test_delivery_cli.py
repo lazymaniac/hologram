@@ -22,11 +22,13 @@ from hologram.cli import (
     EXIT_STALE,
     EXIT_USAGE,
     BuildArtifact,
+    build_parser,
     command_build,
     command_check,
     command_diff,
     command_init,
     create_artifact,
+    main,
 )
 from hologram.config import (
     CONFIG_NAME,
@@ -156,11 +158,13 @@ class BuildCheckServiceTest(unittest.TestCase):
                 "EXIT_STALE",
                 "EXIT_USAGE",
                 "BuildArtifact",
+                "build_parser",
                 "command_build",
                 "command_check",
                 "command_diff",
                 "command_init",
                 "create_artifact",
+                "main",
             ],
         )
         self.assertIn("command_init", cli_module.__all__)
@@ -168,6 +172,8 @@ class BuildCheckServiceTest(unittest.TestCase):
             tuple(inspect.signature(create_artifact).parameters),
             ("root", "config"),
         )
+        self.assertEqual(tuple(inspect.signature(build_parser).parameters), ())
+        self.assertEqual(tuple(inspect.signature(main).parameters), ("argv",))
         for command in (command_build, command_check):
             signature = inspect.signature(command)
             self.assertEqual(
@@ -972,6 +978,200 @@ class BuildCheckServiceTest(unittest.TestCase):
         self.assertEqual(after.analyzed, before.analyzed)
         self.assertEqual(after.render_ir, before.render_ir)
         self.assertEqual(after.rendered, before.rendered)
+
+
+class CliContractTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name)
+
+    def test_parser_exposes_only_the_v2_command_surface(self) -> None:
+        parser = build_parser()
+
+        build = parser.parse_args(
+            ["build", "--root", "project", "--config", "nested/map.toml", "--quiet"]
+        )
+        self.assertEqual(build.command, "build")
+        self.assertEqual(build.root, Path("project"))
+        self.assertEqual(build.config, Path("nested/map.toml"))
+        self.assertTrue(build.quiet)
+
+        init = parser.parse_args(
+            [
+                "init",
+                "--agent",
+                "gemini",
+                "--agent",
+                "claude",
+                "--no-hook",
+            ]
+        )
+        self.assertEqual(init.command, "init")
+        self.assertEqual(init.agent, ["gemini", "claude"])
+        self.assertTrue(init.no_hook)
+
+        diff = parser.parse_args(["diff"])
+        self.assertEqual(diff.command, "diff")
+        self.assertEqual(diff.rev, "HEAD~1")
+        for argv in (["build", "--conf", "x"], ["init", "--ag", "claude"]):
+            with (
+                self.subTest(argv=argv),
+                self.assertRaises(cli_module._DeliveryUsageError),
+            ):
+                parser.parse_args(argv)
+
+    def test_main_dispatches_exact_arguments_and_returns_command_codes(self) -> None:
+        root = self.base / "dispatch"
+        relative_config = Path("config") / "hologram.toml"
+        selected_config = root / relative_config
+        absolute_config = self.base / "external.toml"
+        with (
+            mock.patch.object(cli_module, "command_build", return_value=10) as build,
+            mock.patch.object(cli_module, "command_check", return_value=11) as check,
+            mock.patch.object(cli_module, "command_diff", return_value=12) as diff,
+            mock.patch.object(cli_module, "command_init", return_value=13) as init,
+        ):
+            self.assertEqual(
+                main(
+                    [
+                        "build",
+                        "--root",
+                        str(root),
+                        "--config",
+                        str(relative_config),
+                        "--quiet",
+                    ]
+                ),
+                10,
+            )
+            self.assertEqual(
+                main(
+                    [
+                        "check",
+                        "--root",
+                        str(root),
+                        "--config",
+                        str(absolute_config),
+                    ]
+                ),
+                11,
+            )
+            self.assertEqual(main(["diff", "--root", str(root)]), 12)
+            self.assertEqual(
+                main(
+                    [
+                        "init",
+                        "--root",
+                        str(root),
+                        "--agent",
+                        "gemini",
+                        "--agent",
+                        "claude",
+                        "--no-hook",
+                        "--quiet",
+                    ]
+                ),
+                13,
+            )
+
+        build.assert_called_once_with(root, selected_config, quiet=True)
+        check.assert_called_once_with(root, absolute_config, quiet=False)
+        diff.assert_called_once_with(
+            root,
+            root / CONFIG_NAME,
+            "HEAD~1",
+            quiet=False,
+        )
+        init.assert_called_once_with(
+            root,
+            root / CONFIG_NAME,
+            agents=("gemini", "claude"),
+            no_hook=True,
+            quiet=True,
+        )
+
+    def test_main_normalizes_relative_root_before_joining_relative_config(
+        self,
+    ) -> None:
+        working = self.base / "working"
+        working.mkdir()
+        with (
+            contextlib.chdir(working),
+            mock.patch.object(cli_module, "command_build", return_value=17) as build,
+        ):
+            expected_root = Path(os.path.abspath("project"))
+            expected_config = expected_root / "nested" / "map.toml"
+            code = main(
+                [
+                    "build",
+                    "--root",
+                    "project",
+                    "--config",
+                    "nested/map.toml",
+                ]
+            )
+
+        self.assertEqual(code, 17)
+        build.assert_called_once_with(expected_root, expected_config, quiet=False)
+
+    def test_help_exits_zero_and_invalid_syntax_exits_two(self) -> None:
+        for argv in (["--help"], ["build", "--help"], ["diff", "--help"]):
+            with self.subTest(argv=argv):
+                stdout = io.StringIO()
+                with contextlib.redirect_stdout(stdout):
+                    self.assertEqual(main(argv), EXIT_OK)
+                self.assertIn("usage: hologram", stdout.getvalue())
+
+        invalid: tuple[list[str], ...] = (
+            [],
+            ["unknown"],
+            ["build", "--agent", "claude"],
+            ["check", "--no-hook"],
+            ["diff", "--agent", "codex"],
+            ["init", "--agent", "unknown"],
+            ["build", "--roo", "project"],
+        )
+        with (
+            mock.patch.object(cli_module, "command_build") as build,
+            mock.patch.object(cli_module, "command_check") as check,
+            mock.patch.object(cli_module, "command_diff") as diff,
+            mock.patch.object(cli_module, "command_init") as init,
+        ):
+            for argv in invalid:
+                with self.subTest(argv=argv):
+                    stderr = io.StringIO()
+                    with contextlib.redirect_stderr(stderr):
+                        self.assertEqual(main(argv), EXIT_USAGE)
+                    self.assertTrue(stderr.getvalue().startswith("hologram: "))
+                    self.assertNotIn("usage:", stderr.getvalue())
+            for command in (build, check, diff, init):
+                command.assert_not_called()
+
+    def test_all_seven_removed_legacy_flags_are_usage_errors(self) -> None:
+        removed = (
+            ["build", "--embed"],
+            ["build", "--embed-max-tokens", "1"],
+            ["build", "--out", "map.md"],
+            ["build", "--lang", "python"],
+            ["build", "--private"],
+            ["build", "--behaviors"],
+            ["build", "--if-stale"],
+        )
+        with (
+            mock.patch.object(cli_module, "command_build") as build,
+            mock.patch.object(cli_module, "command_check") as check,
+            mock.patch.object(cli_module, "command_diff") as diff,
+            mock.patch.object(cli_module, "command_init") as init,
+        ):
+            for argv in removed:
+                with (
+                    self.subTest(argv=argv),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(main(argv), EXIT_USAGE)
+            for command in (build, check, diff, init):
+                command.assert_not_called()
 
 
 class InitTest(unittest.TestCase):

@@ -42,7 +42,7 @@ dev = [
 ]
 
 [project.scripts]
-hologram = "hologram.legacy:run_cli"
+hologram = "hologram.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
