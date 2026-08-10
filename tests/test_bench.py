@@ -1,5 +1,7 @@
 import dataclasses
+import inspect
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -740,7 +742,7 @@ class RunOneTest(unittest.TestCase):
                 expect_reuse=("normalize",))
 
             def fake_runner(
-                prompt: str, ws: Path, model: str, max_turns: int
+                prompt: str, ws: Path, model: str, max_turns: int, *, config_dir: Path
             ) -> ProcessResult:
                 # the "agent" appends a function that calls normalize
                 (ws / "svc.py").write_text(
@@ -771,7 +773,7 @@ class RunOneTest(unittest.TestCase):
                 accept_cmd="git -C {ws} diff --stat | grep -q .",
                 expect_reuse=("normalize",))
 
-            def fake_runner(prompt, ws, model, max_turns):
+            def fake_runner(prompt, ws, model, max_turns, *, config_dir):
                 (ws / "helper.py").write_text("def helper() -> int:\n    return 1\n")
                 return ProcessResult(TRANSCRIPT, "", 0)
 
@@ -809,7 +811,7 @@ class RunOneTest(unittest.TestCase):
                 answer="Partial edit only.",
             )
 
-            def fake_runner(prompt, ws, model, max_turns):
+            def fake_runner(prompt, ws, model, max_turns, *, config_dir):
                 (ws / "svc.py").write_text(
                     (ws / "svc.py").read_text()
                     + "\ndef partial() -> None:\n    pass\n"
@@ -871,6 +873,187 @@ class RunOneTest(unittest.TestCase):
         self.assertEqual(row["tier"], "simple")
         self.assertEqual(row["capability"], "orientation")
         self.assertEqual(row["visibility"], "public")
+
+
+class RunnerIsolationTest(unittest.TestCase):
+    def test_runner_api_signatures_are_exact(self):
+        self.assertEqual(
+            tuple(inspect.signature(bench.claude_version).parameters),
+            ("run",),
+        )
+        self.assertEqual(
+            tuple(inspect.signature(bench.claude_runner).parameters),
+            ("prompt", "workspace", "model", "max_turns", "config_dir"),
+        )
+
+    def test_version_is_normalized_and_invocation_is_argv_only(self):
+        completed = subprocess.CompletedProcess(
+            ["claude", "--version"],
+            0,
+            "2.1.224 (Claude Code)\n",
+            "",
+        )
+        run = mock.Mock(return_value=completed)
+        self.assertEqual(bench.claude_version(run=run), "2.1.224")
+        self.assertEqual(run.call_args.args[0], ["claude", "--version"])
+        self.assertFalse(run.call_args.kwargs.get("shell", False))
+
+        run.return_value = subprocess.CompletedProcess(
+            ["claude", "--version"], 9, "", "broken"
+        )
+        with self.assertRaises(ValueError):
+            bench.claude_version(run=run)
+
+    def test_runner_pins_arguments_and_isolates_only_child_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            config = root / "config"
+            config.mkdir()
+            completed = subprocess.CompletedProcess([], 0, TRANSCRIPT, "warning")
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"BENCH_CREDENTIAL_SENTINEL": "inherited"},
+                    clear=False,
+                ),
+                mock.patch.object(bench.subprocess, "run", return_value=completed) as run,
+            ):
+                result = bench.claude_runner(
+                    "Do the task",
+                    workspace,
+                    MODEL,
+                    40,
+                    config_dir=config,
+                )
+            self.assertEqual(result, ProcessResult(TRANSCRIPT, "warning", 0))
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[0:3], ["claude", "-p", "Do the task"])
+            self.assertEqual(argv[argv.index("--model") + 1], MODEL)
+            self.assertEqual(argv[argv.index("--max-turns") + 1], "40")
+            self.assertEqual(run.call_args.kwargs["cwd"], workspace)
+            child_env = run.call_args.kwargs["env"]
+            self.assertEqual(child_env["BENCH_CREDENTIAL_SENTINEL"], "inherited")
+            self.assertEqual(child_env["CLAUDE_CONFIG_DIR"], str(config.resolve()))
+            self.assertEqual(
+                child_env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1"
+            )
+            self.assertNotIn("CLAUDE_CONFIG_DIR", os.environ)
+            self.assertEqual(tuple(config.iterdir()), ())
+
+    def test_timeout_preserves_partial_stdout_and_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            config = root / "config"
+            workspace.mkdir()
+            config.mkdir()
+            timeout = subprocess.TimeoutExpired(
+                ["claude"],
+                1800,
+                output=b"partial stdout",
+                stderr="partial stderr",
+            )
+            with mock.patch.object(bench.subprocess, "run", side_effect=timeout):
+                result = bench.claude_runner(
+                    "Do the task",
+                    workspace,
+                    MODEL,
+                    40,
+                    config_dir=config,
+                )
+        self.assertEqual(result.stdout, "partial stdout")
+        self.assertEqual(result.stderr, "partial stderr")
+        self.assertEqual(result.returncode, 124)
+        self.assertTrue(result.timed_out)
+
+    def test_pair_members_receive_distinct_fresh_config_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            results = root / "results"
+            task = bench.Task(
+                id="isolated", tier="simple", capability="implementation",
+                kind="reuse", visibility="public", prompt="Inspect isolation.",
+                accept_cmd="test -d {ws}", expect_reuse=("normalize",),
+            )
+            seen: list[Path] = []
+
+            def runner(prompt, workspace, model, max_turns, *, config_dir):
+                seen.append(config_dir)
+                self.assertTrue(config_dir.is_dir())
+                self.assertEqual(tuple(config_dir.iterdir()), ())
+                return ProcessResult(TRANSCRIPT, "", 0)
+
+            for condition in ("B", "C"):
+                bench.run_one(
+                    repo,
+                    task,
+                    condition,
+                    rep=0,
+                    results_dir=results,
+                    model=MODEL,
+                    max_turns=40,
+                    runner=runner,
+                )
+            self.assertEqual(len(seen), 2)
+            self.assertNotEqual(seen[0], seen[1])
+            self.assertTrue(all(path.is_relative_to(results) for path in seen))
+
+    def test_run_rejects_nonempty_results_and_incomplete_pair_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            taskfile = root / "tasks.json"
+            _write_tiered_taskfile(taskfile)
+            results = root / "results"
+            results.mkdir()
+            (results / "prior.jsonl").write_text("old\n")
+            with (
+                mock.patch.object(bench, "run_one") as run,
+                self.assertRaises(ValueError),
+            ):
+                bench.main(
+                    [
+                        "run", str(taskfile), "--corpus", str(repo),
+                        "--results", str(results), "--dry-run",
+                    ]
+                )
+            run.assert_not_called()
+
+            (results / "prior.jsonl").unlink()
+            with (
+                mock.patch.object(bench, "run_one") as run,
+                self.assertRaises(ValueError),
+            ):
+                bench.main(
+                    [
+                        "run", str(taskfile), "--corpus", str(repo),
+                        "--results", str(results), "--conditions", "B",
+                        "--dry-run",
+                    ]
+                )
+            run.assert_not_called()
+
+    def test_paid_matrix_requires_exact_cli_version_before_any_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            taskfile = root / "tasks.json"
+            _write_tiered_taskfile(taskfile)
+            with (
+                mock.patch.object(bench, "claude_version", return_value="2.1.223"),
+                mock.patch.object(bench, "run_one") as run,
+                self.assertRaises(ValueError),
+            ):
+                bench.main(
+                    [
+                        "run", str(taskfile), "--corpus", str(repo),
+                        "--results", str(root / "results"),
+                    ]
+                )
+            run.assert_not_called()
 
 
 class ReportTest(unittest.TestCase):
@@ -1005,14 +1188,14 @@ class CliTest(unittest.TestCase):
             code = bench.main(["run", str(taskfile),
                                "--corpus", str(repo),
                                "--results", str(results),
-                               "--conditions", "C", "--reps", "1",
+                               "--reps", "1",
                                "--only", "noop-simple",
                                "--dry-run"])
             self.assertEqual(code, 0)
             rows = [json.loads(l) for l in
                     (results / "runs.jsonl").read_text().splitlines()]
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["condition"], "C")
+            self.assertEqual(len(rows), 2)
+            self.assertEqual({row["condition"] for row in rows}, {"B", "C"})
 
             code = bench.main(["report", "--results", str(results)])
             self.assertEqual(code, 0)

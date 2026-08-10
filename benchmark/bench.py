@@ -237,20 +237,72 @@ def drop_workspace(corpus: Path, ws: Path) -> None:
     shutil.rmtree(ws, ignore_errors=True)
 
 
+def claude_version(run=subprocess.run) -> str:
+    completed = run(
+        ["claude", "--version"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ValueError(
+            f"claude --version failed: {(completed.stderr or '').strip()}"
+        )
+    raw = (completed.stdout or completed.stderr or "").strip()
+    match = re.fullmatch(
+        r"(?:Claude Code\s+)?(\d+\.\d+\.\d+)(?:\s+\(Claude Code\))?",
+        raw,
+    )
+    if match is None:
+        raise ValueError(f"unrecognized claude --version output: {raw!r}")
+    return match.group(1)
+
+
+def _timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def claude_runner(
     prompt: str,
-    ws: Path,
+    workspace: Path,
     model: str,
     max_turns: int,
+    *,
+    config_dir: Path,
 ) -> ProcessResult:
     """The only function that spends tokens. Runs claude headless in the
     workspace; returns the raw stream-json transcript."""
-    r = subprocess.run(
-        ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
-         "--max-turns", str(max_turns), "--model", model,
-         "--dangerously-skip-permissions"],
-        cwd=ws, capture_output=True, text=True, timeout=1800, check=False)
-    return ProcessResult(r.stdout, r.stderr, r.returncode)
+    selected_config = config_dir.resolve()
+    if not selected_config.is_dir() or any(selected_config.iterdir()):
+        raise ValueError("Claude configuration directory must be fresh and empty")
+    child_environment = os.environ.copy()
+    child_environment["CLAUDE_CONFIG_DIR"] = str(selected_config)
+    child_environment["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    try:
+        completed = subprocess.run(
+            ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
+             "--max-turns", str(max_turns), "--model", model,
+             "--dangerously-skip-permissions"],
+            cwd=workspace,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+            env=child_environment,
+        )
+    except subprocess.TimeoutExpired as error:
+        return ProcessResult(
+            _timeout_text(error.stdout),
+            _timeout_text(error.stderr),
+            124,
+            timed_out=True,
+        )
+    return ProcessResult(completed.stdout, completed.stderr, completed.returncode)
 
 
 def _digest_of(ws: Path) -> str:
@@ -286,7 +338,15 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
     make_workspace(corpus, ws, condition)
     try:
         before = _digest_of(ws)
-        process = runner(task.prompt, ws, model, max_turns)
+        config_dir = results_dir / f"{task.id}-{condition}-{rep}.claude-config"
+        config_dir.mkdir(mode=0o700)
+        process = runner(
+            task.prompt,
+            ws,
+            model,
+            max_turns,
+            config_dir=config_dir,
+        )
         if type(process) is not ProcessResult:
             raise TypeError("benchmark runner must return ProcessResult")
         transcript_path = results_dir / f"{task.id}-{condition}-{rep}.jsonl"
@@ -381,6 +441,8 @@ def _dry_runner(
     ws: Path,
     model: str,
     max_turns: int,
+    *,
+    config_dir: Path,
 ) -> ProcessResult:
     """Zero-cost runner for harness testing: touches nothing, returns a
     minimal valid transcript."""
@@ -398,6 +460,16 @@ def _dry_runner(
         )
     )
     return ProcessResult(transcript, "", 0)
+
+
+def _empty_results_directory(path: Path) -> Path:
+    selected = path.resolve()
+    selected.mkdir(parents=True, exist_ok=True)
+    if not selected.is_dir():
+        raise ValueError(f"results path is not a directory: {selected}")
+    if any(selected.iterdir()):
+        raise ValueError(f"results directory must be empty: {selected}")
+    return selected
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -443,25 +515,61 @@ def main(argv: list[str] | None = None) -> int:
         corpus_override=args.corpus,
         environ=os.environ,
     )
-    runner = _dry_runner if args.dry_run else claude_runner
-    runs_path = args.results / "runs.jsonl"
-    args.results.mkdir(parents=True, exist_ok=True)
+    results_dir = _empty_results_directory(args.results)
     tasks = [t for t in cfg.tasks if args.only is None or t.id in args.only]
-    total = len(tasks) * len(args.conditions) * args.reps
-    done = 0
-    for task_index, task in enumerate(tasks):
-        for cond in args.conditions:
-            for rep in range(args.reps):
-                done += 1
-                print(f"[{done}/{total}] {task.id} {cond} rep{rep}", flush=True)
-                row = run_one(corpus, task, cond, rep, args.results,
-                              cfg.model, cfg.max_turns, runner=runner,
-                              claude_code_version=cfg.claude_code_version,
-                              corpus_revision=cfg.corpus.revision,
-                              seed=cfg.seed,
-                              pair_index=task_index * args.reps + rep)
-                with runs_path.open("a") as fh:
-                    fh.write(json.dumps(row) + "\n")
+    if not tasks:
+        raise ValueError("benchmark selection contains no tasks")
+    conditions = tuple(args.conditions)
+    if len(conditions) != 2 or set(conditions) != {"B", "C"}:
+        raise ValueError("benchmark runs require one B and one C condition")
+    if args.reps != cfg.reps:
+        raise ValueError(f"benchmark reps must equal manifest reps {cfg.reps}")
+    planned = tuple(
+        (task_index, task, condition, rep)
+        for task_index, task in enumerate(tasks)
+        for condition in conditions
+        for rep in range(args.reps)
+    )
+    identities = tuple((task.id, condition, rep) for _, task, condition, rep in planned)
+    pair_keys = {(task.id, rep) for _, task, _, rep in planned}
+    complete_pairs = {
+        pair
+        for pair in pair_keys
+        if {
+            condition
+            for _, task, condition, rep in planned
+            if (task.id, rep) == pair
+        }
+        == {"B", "C"}
+    }
+    expected_runs = len(tasks) * args.reps * 2
+    expected_pairs = len(tasks) * args.reps
+    if (
+        len(planned) != expected_runs
+        or len(set(identities)) != expected_runs
+        or len(complete_pairs) != expected_pairs
+    ):
+        raise ValueError("benchmark schedule is not a complete unique B/C matrix")
+    if not args.dry_run:
+        installed_version = claude_version()
+        if installed_version != cfg.claude_code_version:
+            raise ValueError(
+                f"Claude Code {cfg.claude_code_version} required; "
+                f"found {installed_version}"
+            )
+    runner = _dry_runner if args.dry_run else claude_runner
+    runs_path = results_dir / "runs.jsonl"
+    total = len(planned)
+    for done, (task_index, task, condition, rep) in enumerate(planned, start=1):
+        print(f"[{done}/{total}] {task.id} {condition} rep{rep}", flush=True)
+        row = run_one(corpus, task, condition, rep, results_dir,
+                      cfg.model, cfg.max_turns, runner=runner,
+                      claude_code_version=cfg.claude_code_version,
+                      corpus_revision=cfg.corpus.revision,
+                      seed=cfg.seed,
+                      pair_index=task_index * args.reps + rep)
+        with runs_path.open("a") as fh:
+            fh.write(json.dumps(row) + "\n")
     return 0
 
 
