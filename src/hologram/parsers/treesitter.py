@@ -191,9 +191,10 @@ _ast_collect = ast_collect
 
 
 def _point(point: object) -> tuple[int, int]:
-    if hasattr(point, "row") and hasattr(point, "column"):
-        return int(point.row), int(point.column)
-    return int(point[0]), int(point[1])  # type: ignore[index]
+    try:
+        return int(point[0]), int(point[1])  # type: ignore[index]
+    except (IndexError, KeyError, TypeError):
+        return int(cast(Any, point).row), int(cast(Any, point).column)
 
 
 def node_span(source: SourceFile, node: object) -> SourceSpan:
@@ -1160,6 +1161,16 @@ def _child_field(node: object, index: int) -> str | None:
     return str(value) if value is not None else None
 
 
+def _indexed_children(node: object) -> Iterable[tuple[int, object]]:
+    child_at = getattr(node, "child", None)
+    if not callable(child_at):
+        raise TypeError("Tree-sitter traversal requires Node.child()")
+    for index in range(int(getattr(node, "child_count", 0))):
+        child = child_at(index)
+        if child is not None:
+            yield index, child
+
+
 def _child_roots(node: object, kinds: Iterable[str]) -> tuple[object, ...]:
     selected = frozenset(kinds)
     return tuple(
@@ -1170,14 +1181,23 @@ def _child_roots(node: object, kinds: Iterable[str]) -> tuple[object, ...]:
 
 
 def _walk_owned(root: object, boundary_kinds: frozenset[str]) -> Iterable[object]:
-    stack = [root]
+    yield root
+    stack = [(root, 0)]
     while stack:
-        node = stack.pop()
-        yield node
-        children = getattr(node, "children", ())
-        for child in reversed(children):
-            if str(getattr(child, "type", "")) not in boundary_kinds:
-                stack.append(child)
+        parent, index = stack[-1]
+        child_count = int(getattr(parent, "child_count", 0))
+        if index >= child_count:
+            stack.pop()
+            continue
+        stack[-1] = (parent, index + 1)
+        child_at = getattr(parent, "child", None)
+        if not callable(child_at):
+            raise TypeError("Tree-sitter traversal requires Node.child()")
+        child = child_at(index)
+        if child is None or str(getattr(child, "type", "")) in boundary_kinds:
+            continue
+        yield child
+        stack.append((child, 0))
 
 
 def _parameter_parts(source: SourceFile, callable_node: object) -> tuple[object, ...]:
@@ -1480,19 +1500,29 @@ def _anonymous_callables(
     boundaries = _OWNED_BOUNDARIES_BY_LANGUAGE[source.language] - anonymous_kinds
     found: list[object] = []
     for body in bodies:
-        stack = [body]
+        body_key = _node_key(body)
+        if body_key[2] in anonymous_kinds:
+            found.append(body)
+        stack = [(body, 0)]
         while stack:
-            node = stack.pop()
+            parent, index = stack[-1]
+            child_count = int(getattr(parent, "child_count", 0))
+            if index >= child_count:
+                stack.pop()
+                continue
+            stack[-1] = (parent, index + 1)
+            child_at = getattr(parent, "child", None)
+            if not callable(child_at):
+                raise TypeError("Tree-sitter traversal requires Node.child()")
+            node = child_at(index)
+            if node is None:
+                continue
             key = _node_key(node)
-            if key in owned_boundaries and node is not body:
+            if key in owned_boundaries or key[2] in boundaries:
                 continue
             if key[2] in anonymous_kinds:
                 found.append(node)
-            for child in reversed(tuple(getattr(node, "children", ()))):
-                child_key = _node_key(child)
-                if child_key in owned_boundaries or child_key[2] in boundaries:
-                    continue
-                stack.append(child)
+            stack.append((node, 0))
     return tuple(found)
 
 
@@ -1746,7 +1776,7 @@ class _TreeSitterBodyEventWalker:
             ):
                 self.event(BodyEventKind.OPERATOR, text, node)
 
-        for index, child in enumerate(getattr(node, "children", ())):
+        for index, child in _indexed_children(node):
             self.visit(
                 child,
                 node,
@@ -1805,19 +1835,32 @@ def owned_nodes(
     context = _resolve_ownership(ownership, owned_boundaries, include_anonymous)
     roots = (*_parameter_parts(source, callable_node), *_body_parts(source, callable_node))
     found: list[Any] = []
-    stack = list(reversed(roots))
     root_keys = frozenset(_node_key(root) for root in roots)
-    while stack:
-        node = stack.pop()
-        if _node_key(node) not in root_keys and _owned_boundary(
-            source,
-            node,
-            context.boundary_keys,
-            include_anonymous=context.include_anonymous,
-        ):
-            continue
-        found.append(node)
-        stack.extend(reversed(tuple(getattr(node, "children", ()))))
+    for root in roots:
+        found.append(root)
+        stack = [(root, 0)]
+        while stack:
+            parent, index = stack[-1]
+            child_count = int(getattr(parent, "child_count", 0))
+            if index >= child_count:
+                stack.pop()
+                continue
+            stack[-1] = (parent, index + 1)
+            child_at = getattr(parent, "child", None)
+            if not callable(child_at):
+                raise TypeError("Tree-sitter traversal requires Node.child()")
+            node = child_at(index)
+            if node is None:
+                continue
+            if _node_key(node) not in root_keys and _owned_boundary(
+                source,
+                node,
+                context.boundary_keys,
+                include_anonymous=context.include_anonymous,
+            ):
+                continue
+            found.append(node)
+            stack.append((node, 0))
     return tuple(found)
 
 

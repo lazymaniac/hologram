@@ -285,8 +285,12 @@ def body_lines(body: object | None) -> int:
     if hasattr(body, "start_point") and hasattr(body, "end_point"):
         start = body.start_point
         end = body.end_point
-        start_row = start.row if hasattr(start, "row") else start[0]
-        end_row = end.row if hasattr(end, "row") else end[0]
+        try:
+            start_row = start[0]
+            end_row = end[0]
+        except (IndexError, KeyError, TypeError):
+            start_row = start.row
+            end_row = end.row
         return end_row - start_row + 1
     start_line = getattr(body, "lineno", None)
     end_line = getattr(body, "end_lineno", None)

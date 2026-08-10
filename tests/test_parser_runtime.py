@@ -32,6 +32,7 @@ from hologram.model import (
 from hologram.parsers import api as api_runtime
 from hologram.parsers import common as common_runtime
 from hologram.parsers import treesitter as treesitter_runtime
+from hologram.parsers._treesitter_common import walk_all, walk_owned
 from hologram.parsers.api import (
     EXTRACTOR_VERSIONS,
     ParserRegistry,
@@ -138,6 +139,62 @@ class _DiscoveryGate:
         self.entered.set()
         if not self.release.wait(5):
             raise AssertionError("discovery gate timed out")
+
+
+class _CursorNode:
+    def __init__(self, kind: str, *children: "_CursorNode") -> None:
+        self.type = kind
+        self._children = children
+
+    def walk(self) -> "_FakeTreeCursor":
+        return _FakeTreeCursor(self)
+
+
+class _FakeTreeCursor:
+    def __init__(self, root: _CursorNode) -> None:
+        self._path = [(root, 0)]
+
+    @property
+    def node(self) -> _CursorNode:
+        return self._path[-1][0]
+
+    def goto_first_child(self) -> bool:
+        if not self.node._children:
+            return False
+        self._path.append((self.node._children[0], 0))
+        return True
+
+    def goto_next_sibling(self) -> bool:
+        if len(self._path) == 1:
+            return False
+        parent = self._path[-2][0]
+        next_index = self._path[-1][1] + 1
+        if next_index == len(parent._children):
+            return False
+        self._path[-1] = (parent._children[next_index], next_index)
+        return True
+
+    def goto_parent(self) -> bool:
+        if len(self._path) == 1:
+            return False
+        self._path.pop()
+        return True
+
+
+class _SequencePoint:
+    def __init__(self, row: int, column: int) -> None:
+        self._values = (row, column)
+
+    def __getitem__(self, index: int) -> int:
+        return self._values[index]
+
+    @property
+    def row(self) -> int:
+        raise AssertionError("row attribute must not be read")
+
+    @property
+    def column(self) -> int:
+        raise AssertionError("column attribute must not be read")
 
 
 class ParserRuntimeTest(unittest.TestCase):
@@ -520,6 +577,75 @@ if parsers.ParserRegistry is not hologram.parsers.ParserRegistry:
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_task_five_extractors_handle_five_hundred_calls_in_subprocess(
+        self,
+    ) -> None:
+        languages = (
+            Language.GO,
+            Language.RUST,
+            Language.CSHARP,
+            Language.KOTLIN,
+        )
+        registry = ParserRegistry()
+        available = tuple(
+            language.value for language in languages if registry.has_parser(language)
+        )
+        if Language.GO.value not in available:
+            self.skipTest("tree-sitter-go not installed")
+        code = r'''
+import hashlib
+from pathlib import Path
+
+from hologram.model import Language, SourceFile, SourceRole
+from hologram.parsers.api import ParserRegistry, extract_file
+
+cases = (
+    (Language.GO, "stress.go", b"package p\nfunc run() {\n", b"    ping()\n", b"}\n"),
+    (Language.RUST, "stress.rs", b"fn run() {\n", b"    ping();\n", b"}\n"),
+    (Language.CSHARP, "Stress.cs", b"class Stress { void Run() {\n", b"    Ping();\n", b"} }\n"),
+    (Language.KOTLIN, "Stress.kt", b"fun run() {\n", b"    ping()\n", b"}\n"),
+)
+registry = ParserRegistry()
+completed = []
+for language, file, prefix, call, suffix in cases:
+    if not registry.has_parser(language):
+        continue
+    raw = prefix + call * 500 + suffix
+    source = SourceFile(
+        Path("/repo") / file,
+        file,
+        language,
+        SourceRole.PRODUCTION,
+        raw,
+        hashlib.sha256(raw).hexdigest(),
+    )
+    result = extract_file(source, registry=registry)
+    if result.diagnostics or len(result.calls) != 500:
+        raise SystemExit(
+            f"{language.value}: calls={len(result.calls)} "
+            f"diagnostics={result.diagnostics!r}"
+        )
+    completed.append(language.value)
+if "go" not in completed:
+    raise SystemExit("Go stress case did not run")
+print(",".join(completed))
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"stdout={result.stdout!r}\nstderr={result.stderr!r}",
+        )
+        self.assertEqual(result.stdout.strip(), ",".join(available))
+
     def test_parser_success_and_absence_are_cached_per_language(self) -> None:
         calls: list[str] = []
         java_capsule = object()
@@ -870,6 +996,56 @@ if parsers.ParserRegistry is not hologram.parsers.ParserRegistry:
 
 
 class ParserHelperTest(unittest.TestCase):
+    def test_cursor_walk_is_exact_preorder(self) -> None:
+        root = _CursorNode(
+            "root",
+            _CursorNode("left", _CursorNode("left_leaf")),
+            _CursorNode("middle", _CursorNode("middle_leaf")),
+            _CursorNode("right"),
+        )
+
+        self.assertEqual(
+            [node.type for node in walk_all(root)],
+            ["root", "left", "left_leaf", "middle", "middle_leaf", "right"],
+        )
+
+    def test_cursor_walk_owned_preserves_root_and_prunes_boundaries(self) -> None:
+        root = _CursorNode(
+            "boundary",
+            _CursorNode("left", _CursorNode("left_leaf")),
+            _CursorNode("boundary", _CursorNode("hidden")),
+            _CursorNode(
+                "right",
+                _CursorNode("boundary", _CursorNode("also_hidden")),
+                _CursorNode("right_leaf"),
+            ),
+        )
+
+        self.assertEqual(
+            [node.type for node in walk_owned(root, {"boundary"})],
+            ["boundary", "left", "left_leaf", "right", "right_leaf"],
+        )
+        self.assertEqual(
+            [
+                node.type
+                for node in walk_owned(root, {"boundary"}, include_root=False)
+            ],
+            ["left", "left_leaf", "right", "right_leaf"],
+        )
+
+    def test_tree_sitter_points_use_sequence_coordinates_above_row_256(self) -> None:
+        snapshot = source(Language.GO, file="wide.go", raw=b"package wide\n")
+        node = SimpleNamespace(
+            start_point=_SequencePoint(300, 2),
+            end_point=_SequencePoint(599, 7),
+        )
+
+        self.assertEqual(
+            node_span(snapshot, node),
+            SourceSpan("wide.go", 301, 2, 600, 7),
+        )
+        self.assertEqual(body_lines(node), 300)
+
     def test_identity_and_stable_text_helpers(self) -> None:
         snapshot = source(Language.JAVA, file="Price.java", raw=b"class Price {}\n")
 

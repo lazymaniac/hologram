@@ -80,14 +80,48 @@ def same_node(left: object | None, right: object | None) -> bool:
     )
 
 
+def _next_preorder(
+    cursor: Any,
+    boundary_kinds: frozenset[str],
+) -> Any | None:
+    if cursor.goto_first_child():
+        node = cursor.node
+        if node.type not in boundary_kinds:
+            return node
+    while True:
+        if cursor.goto_next_sibling():
+            node = cursor.node
+            if node.type not in boundary_kinds:
+                return node
+        elif not cursor.goto_parent():
+            return None
+
+
+def _walk_cursor(
+    root: object,
+    boundary_kinds: frozenset[str],
+    *,
+    include_root: bool,
+) -> Iterable[Any]:
+    walk = getattr(root, "walk", None)
+    if not callable(walk):
+        raise TypeError("Tree-sitter traversal requires Node.walk()")
+    cursor = walk()
+    del root
+    if include_root:
+        yield cursor.node
+    while True:
+        node = _next_preorder(cursor, boundary_kinds)
+        if node is None:
+            return
+        yield node
+        node = None
+
+
 def walk_all(root: object | None) -> Iterable[Any]:
     if root is None:
         return
-    stack = [root]
-    while stack:
-        node = stack.pop()
-        yield node
-        stack.extend(reversed(children(node)))
+    yield from _walk_cursor(root, frozenset(), include_root=True)
 
 
 def walk_owned(
@@ -99,16 +133,11 @@ def walk_owned(
     if root is None:
         return
     boundary_kinds = frozenset(boundaries)
-    stack = [root]
-    first = True
-    while stack:
-        node = stack.pop()
-        if include_root or not first:
-            yield node
-        first = False
-        for child in reversed(children(node)):
-            if child.type not in boundary_kinds:
-                stack.append(child)
+    yield from _walk_cursor(
+        root,
+        boundary_kinds,
+        include_root=include_root,
+    )
 
 
 def binding_tuple(bindings: Iterable[Binding]) -> tuple[Binding, ...]:
