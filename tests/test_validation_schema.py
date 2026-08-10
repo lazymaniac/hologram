@@ -157,6 +157,7 @@ class ValidationSchemaTest(unittest.TestCase):
             "./src/source.py",
             "src/\x00source.py",
             "",
+            " \t",
             ".",
         ):
             with (

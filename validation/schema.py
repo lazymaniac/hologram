@@ -80,7 +80,7 @@ def _validate_path(path: object) -> None:
         raise TypeError("path must be a string")
     pure = PurePosixPath(path)
     if (
-        not path
+        not path.strip()
         or path == "."
         or not pure.parts
         or pure.is_absolute()
