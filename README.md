@@ -1,94 +1,198 @@
 # hologram
 
-hologram reads your codebase and writes one small markdown file that describes all of
-it: every type, every signature, every relationship, and who calls what. Give that
-file to an LLM agent and it knows the shape of your project without grepping through
-it first.
+Hologram builds a deterministic, whole-codebase map for coding agents. The map
+records files, symbols, signatures, relationships, resolved project calls,
+dependencies, tests, reachability evidence, and conservative duplicate candidates.
+It is generated entirely from source analysis; no LLM is involved.
 
-It's an installable Python package, and git hooks keep the output up to date after
-every commit. Generation is fully deterministic — no LLM involved — so the same code
-always produces the same digest, and a digest diff always means the code changed.
+Canonical v2 maps are complete inventories. Hologram does not rank, omit, budget,
+degrade, or truncate the map to fit a context window.
 
-The name: like a hologram, every fragment of the output carries the shape of the
-whole. For scale: a real 77,000-line Java project with 727 files compresses to about
-20,000 tokens — small enough to hand an agent whole.
+## Install
 
-## What it's for
-
-- **Feature planning** — plan against the real surface of the code: what already
-  exists, which module the new thing belongs in, which family of types it should
-  extend. Plans written this way survive contact with the codebase.
-- **Implementation** — the agent (or you) finds the existing helper before writing a
-  second one, follows the house conventions, and places code where it belongs.
-- **Code review** — `hologram diff` shows a pull request's API drift on one screen,
-  including the near-duplicate helpers that sneak in quietly.
-- **Refactoring** — `×N` fan-in marks show a symbol's blast radius, and the
-  `· deps` lines show which modules are coupled, before you start pulling threads.
-- **Debugging** — call chains, private-name lists, and `⋮N` body-size marks point at
-  the right file before you open a single one.
-- **Onboarding** — a new teammate, human or agent, reads one file and knows the
-  territory: the modules, the vocabulary, the patterns.
-
-## What the output looks like
-
-The digest of a small Java fixture:
-
-```
-# javamini @30ab133 2026-08-08 · 200 LOC · state ca50854aec7c · regen: hologram build
-· legend: (C)lass (R)ecord (I)nterface (E)num (F)n (T)ype-alias · (R: …)=components · …
-· deps .→ids | engine→ids
-src
- App(C)
-  main(String[]) > PricingEngine,PricingEngine.evaluate,OrderId.of,ItemId.of
- delta
-  AddOp,RemoveOp(R: String) : DeltaOp
-   weight():int
- engine
-  OrderStatus(E: NEW,PAID,SHIPPED)
-  PricingEngine(C: Map<ItemId,Long>) : PricePort
-   evaluate(OrderId,List<ItemId>):Quote !UnknownItem > UnknownItemException,Quote
- ids
-  ItemId,OrderId,UserId(R: String)
-   of(String):⟨X⟩ > ⟨X⟩
+```bash
+python3 -m pip install -e '.[parsers]'
 ```
 
-Reading it is easier than it looks, and the legend on line 2 teaches the notation to
-any LLM:
+The `parsers` extra installs every supported tree-sitter grammar. Python extraction
+uses the standard library and works without the extra.
 
-- **The tree** mirrors your directory layout, shared path prefixes stated once.
-- **Types** say what they are and what they're made of.
-  `PricingEngine(C: Map<ItemId,Long>) : PricePort` is a class, constructed from that
-  map, implementing `PricePort`. Records list components (`R:`), enums their values
-  (`E:`), type aliases their target (`T:`), sealed interfaces their permitted
-  subtypes.
-- **Call chains** follow the `>`: what a function calls, in order. Variables resolve
-  to their declared types (`PricingEngine.evaluate`, not `engine.evaluate`), standard
-  library calls are dropped, and chains are transitively reduced — if `a > b` and
-  `b > c`, then `a`'s line doesn't repeat `c`.
-- **Same-shape types group.** `ItemId,OrderId,UserId(R: String)` is a family in one
-  entry; `⟨X⟩` stands for each member's own name in the methods they share.
-- **Markers**: `✓` = the name appears in the test suite · `⋮120` = the body is 120
-  lines · `×N` = referenced from N other files · `!UnknownItem` = throws
-  (`Exception` suffix implied) · no `:Ret` = returns void · `» index.ts: A,B` =
-  barrel re-exports.
-- **Private members** appear as packed name lists: `- rebalance,evict,writeThrough`
-  under a class. Names alone reveal a lot of the internals at a fraction of the cost;
-  `--private` upgrades them to full signatures.
-- **`· deps a→b`** = module `a` uses types from module `b`: the import architecture
-  without reading imports.
-- **`state`** in the header is a hash of the exact sources the digest was built from —
-  the freshness mechanism described below.
+## Quick start
 
-### Canonical v2 analysis maps (library phase)
+In a repository that already has one or more agent context files:
 
-The tree-shaped digest above is the current legacy CLI and embed format. The
-canonical v2 map is currently available through the library phase API only;
-`hologram build`, `--out`, `--embed`, and existing managed blocks continue to use
-the legacy representation until the delivery phase switches them over.
+```bash
+hologram init --root /path/to/repo
+```
 
-The six lazy root exports are `AnalyzedProject`, `analyze_project`, `RenderIR`,
-`project_render_ir`, `render_project`, and `decode_render`. They compose with the
-existing snapshot pipeline without rereading source files:
+`init` detects regular `CLAUDE.md`, `AGENTS.md`, and `GEMINI.md` files, writes a
+strict `.hologram.toml`, delivers the first complete map, and installs a read-only
+pre-commit check. If none of those files exists, select at least one target:
+
+```bash
+hologram init --root /path/to/repo --agent claude --agent codex
+```
+
+Use `--no-hook` when a hook is unwanted or the existing pre-commit hook cannot be
+safely managed.
+
+## Configuration
+
+Hologram reads schema-2 TOML. Unknown keys and invalid values are errors. This is the
+canonical default configuration:
+
+```toml
+schema_version = 2
+agents = ["claude", "codex", "gemini"]
+languages = []
+include = ["**/*"]
+exclude = ["**/.git/**", "**/.venv/**", "**/__pycache__/**", "**/bin/**", "**/build/**", "**/dist/**", "**/generated/**", "**/node_modules/**", "**/obj/**", "**/out/**", "**/target/**", "**/vendor/**"]
+hot_threshold = 10
+output = "PROJECT_DIGEST.md"
+```
+
+The keys are:
+
+- `schema_version`: exactly `2`.
+- `agents`: any unique subset of `claude`, `codex`, and `gemini`.
+- `languages`: supported language names; an empty list auto-detects languages.
+- `include` and `exclude`: root-relative POSIX glob patterns.
+- `hot_threshold`: a positive integer controlling the `×N` marker threshold.
+- `output`: an optional root-relative standalone map. Omit it to deliver only to
+  agent contexts.
+
+An empty `agents = []` is valid only when `output` is set. That is useful for CI,
+benchmarks, and repositories that want a standalone canonical map without creating
+agent instruction files.
+
+Agent names map to root files as follows:
+
+| Agent | Managed target |
+|---|---|
+| `claude` | `CLAUDE.md` |
+| `codex` | `AGENTS.md` |
+| `gemini` | `GEMINI.md` |
+
+An explicit `--config PATH` may be supplied to every command. A relative path is
+interpreted relative to `--root`; an absolute configuration may live elsewhere.
+Hook installation requires a root-relative configuration, so use `--no-hook` with
+an external config.
+
+## Commands
+
+The complete command surface is:
+
+```text
+hologram init [--root PATH] [--config PATH] [--quiet]
+              [--agent claude|codex|gemini ...] [--no-hook]
+hologram build [--root PATH] [--config PATH] [--quiet]
+hologram check [--root PATH] [--config PATH] [--quiet]
+hologram diff [REV] [--root PATH] [--config PATH] [--quiet]
+```
+
+`diff` defaults to `HEAD~1`. `--quiet` suppresses success output only; diagnostics
+remain visible on stderr.
+
+| Exit | Meaning |
+|---:|---|
+| `0` | init/build success, fresh check, or a completed advisory diff |
+| `1` | missing, stale, malformed, or noncanonical managed output |
+| `2` | usage, configuration, unsafe path, or unsupported-hook error |
+| `3` | incomplete scan/extraction/state or invalid/incomplete revision |
+
+## Managed delivery and freshness
+
+Agent maps live between full-line `hologram:v2:start` and `hologram:v2:end`
+markers. Authored bytes outside the managed pair are preserved exactly, including
+CRLF and bytes that are not valid UTF-8. A fresh build is idempotent and does not
+replace a target, so its inode, mode, and modification time remain unchanged.
+
+Build creates one immutable source snapshot, requires it to be complete, analyzes
+and renders that snapshot without rereading sources, then preflights every target
+before committing any write. Atomic replacement is per target, not across the set
+of independent context files. A failed later replacement does not roll back an
+earlier completed target; `check` detects any interrupted multi-target delivery.
+
+`check` runs the complete pipeline and compares every configured or retained managed
+target. It never writes, creates directories, bootstraps configuration, installs a
+hook, or changes permissions. It returns `0` only when every expected byte is fresh.
+
+## Pre-commit check
+
+`init` can install one managed block immediately after the shebang in an executable
+`sh`, `bash`, or `zsh` pre-commit hook. The block resolves the worktree root at
+execution time and runs:
+
+```text
+python -B -m hologram check --root ... --config ... --quiet
+```
+
+The hook is read-only. Stale output blocks the commit with exit `1`; usage and unsafe
+hook states return `2`; incomplete extraction or state returns `3`. Authored hook
+bytes outside the managed block are preserved. Use `hologram init --no-hook` to skip
+all Git and hook work.
+
+## Canonical map
+
+The renderer emits explicit file leaves and source positions. A small fragment looks
+like this:
+
+```text
+# hologram:2 state=0000000000000000000000000000000000000000000000000000000000000000 · regen: hologram build
+· deps ["app→core"]
+@ "src/core.py" "python" "production" "core"
+  :4:0 [[],"fn","public_surface","(int)"] "pub"
+    signature "public_surface(int):int"
+    param ["int"]
+    return "int"
+    body 2
+    mark ["×0?"]
+```
+
+`decode_render()` strictly validates canonical spelling, structure, ordering, intern
+tables, ownership, and a byte-for-byte rerender.
+
+Markers are evidence, not verdicts:
+
+- `×N`: resolved references from `N` other files.
+- `×0`: strong static zero-reference candidate.
+- `×0?`: reachability is uncertain or may be external.
+- `✓`: referenced from test code.
+- `≈N`: `N` conservative duplicate peers.
+
+## Semantic revision diff
+
+```bash
+hologram diff HEAD~3 --root .
+```
+
+Diff builds the current artifact first, reads the selected revision through Git's
+object database, and compares canonical models rather than rendered Markdown. It
+reports symbol fields, file topology, and dependency changes. For newly introduced
+symbols it reports strong `×0`, uncertain `×0?`, and all broad duplicate-candidate
+matches. Findings are advisory and still return `0`.
+
+Static evidence cannot prove semantic deadness or authorize deletion. Read the
+source, runtime registration, framework conventions, and tests before removing or
+consolidating anything.
+
+## Migration from v1
+
+The schema and CLI are intentionally breaking. Exact old managed context marker
+pairs are migrated to canonical v2 blocks, and `init` removes only exact generated
+Hologram post-commit, post-merge, and post-checkout command lines. Authored text,
+near-matches, and unrelated hooks are preserved.
+
+The removed flags `--embed`, `--embed-max-tokens`, `--out`, `--lang`, `--private`,
+`--behaviors`, and `--if-stale` are not supported and have no aliases. Put language,
+agent, and standalone-output choices in `.hologram.toml`; canonical delivery always
+includes full symbol, body-size, and behavior evidence.
+
+## Library API
+
+`hologram.__version__` reports the package version. The six lazy canonical phase
+exports are `AnalyzedProject`, `analyze_project`, `RenderIR`, `project_render_ir`,
+`render_project`, and `decode_render`:
 
 ```python
 snapshot = hologram.build_project(root, config).require_complete()
@@ -106,214 +210,39 @@ text = hologram.render_project(render_ir)
 assert hologram.decode_render(text) == render_ir
 ```
 
-Canonical text uses explicit file leaves and source positions, so every symbol has
-exact provenance rather than belonging to a compressed cross-file group:
-
-```text
-# hologram:2 state=0000000000000000000000000000000000000000000000000000000000000000 · regen: hologram build
-· deps ["app→core"]
-@ "src/core.py" "python" "production" "core"
-  :4:0 [[],"fn","public_surface","(int)"] "pub"
-    signature "public_surface(int):int"
-    param ["int"]
-    return "int"
-    body 2
-    mark ["×0?"]
-```
-
-The v2 advisory markers are deliberately conservative:
-
-- `×0` is a strong static candidate, not proof that code is semantically dead.
-- `×0?` means reachability is uncertain or may be external; never propose deletion
-  from the map alone.
-- `✓` records a reference from test code, not proof of correctness or coverage.
-- `≈N` counts conservative duplicate peers; inspect the bodies before consolidating.
-
-Canonical v2 maps are complete inventories: they are never budget-truncated or
-ranked. That completeness statement applies to this library format, not to the
-current legacy embed degradation tiers described below.
+The v2 CLI orchestration, atomic writers, hook helpers, and semantic-diff internals
+are not package-root exports. A temporary legacy library compatibility surface,
+including `run_cli`, remains available during migration; it is not the v2 CLI API.
 
 ## Languages
 
-| Language | What you get |
-|---|---|
-| Java, C#, TypeScript/JS, TSX/JSX | the full treatment: types, signatures, relations, resolved call chains, constructor deps, privates, type aliases, object-literal APIs, barrel re-exports |
-| Python | same, via the standard library's `ast` — zero dependencies |
-| Kotlin | classes, data classes, enums, interfaces, constructor deps, supers, calls |
-| Go, Rust, C, C++ | types, traits, structs, signatures, calls, receiver bindings |
-| Vue, Svelte | the component plus everything in its `<script>` block |
-| Lua | functions and methods with call chains (params by name — it's untyped) |
-| HTML | element ids and custom-element tags, names only |
-| Helm | template `define` names, `values.yaml` keys, chart name |
+Hologram supports Java, Python, TypeScript, JavaScript, TSX, JSX, Vue, Svelte, C#,
+Kotlin, C, C++, Go, Lua, Rust, HTML, and Helm. Extraction depth follows what each
+language can state honestly. Unsupported candidates are excluded.
+A supported source that cannot be read or parsed, or whose required parser is
+unavailable, makes the build incomplete rather than silently shrinking the map.
 
-## Getting started
+## Benchmark status
 
-Clone it anywhere, install it with the optional parsers, and point it at a repo:
+Historical condition A measured a legacy on-disk pull model. That archived evidence
+is legacy, exploratory, and pre-tier, with n=1 per cell. It used `sonnet`, which is a
+mutable model alias rather than a pinned model version. Those runs showed no outcome
+improvement and sometimes higher token cost; they remain evidence, not an active
+harness mode.
 
-```bash
-python3 -m pip install -e '.[parsers]'
-hologram init --root /path/to/repo
-```
-
-That installs git hooks, adds a `.gitignore` entry, and writes the first
-`PROJECT_DIGEST.md` at the repo root. From then on the hooks rebuild it after every
-commit, merge, and checkout. You never touch it again.
-
-The `parsers` extra installs every supported tree-sitter grammar. Python-only repos
-can omit it because the standard library is enough.
-
-Everything it can do:
-
-```bash
-hologram build --root .                                 # manual rebuild
-hologram build --root . --lang java --out DIGEST.md     # limit languages, pick the filename
-hologram build --root . --private                       # full signatures for private members
-hologram build --root . --behaviors                     # include test names as behavior specs
-hologram build --root . --if-stale                      # rebuild only if the code changed
-hologram check --root .                                 # is the digest current? exit 0 yes / 1 no
-hologram diff HEAD~3 --root .                           # how did the API change since then?
-```
-
-## Staying fresh
-
-A stale digest is worse than none — an agent trusting a description of deleted code
-is confidently wrong. Three commands make freshness a non-issue:
-
-- `check` recomputes the header's `state` hash in milliseconds, without parsing
-  anything, and answers yes or no. Wire it into CI or an agent harness.
-- `build --if-stale` uses the same probe, so "rebuild just in case" costs nothing
-  when nothing changed.
-- `diff <rev>` points the same machinery backwards: it rebuilds the digest as it
-  looked at an older revision and prints the difference — a pull request's API drift
-  on one screen.
-
-## Putting it in front of your agent
-
-There are two delivery modes, and the difference matters more than anything else
-about this tool.
-
-**Embed it (recommended) — the holistic view, always in context:**
-
-```bash
-hologram init --root /path/to/repo --embed
-```
-
-This injects the digest directly into `CLAUDE.md` between managed markers, and
-the git hooks keep the block fresh. Every agent session now *starts* with the
-complete map in its context window — no retrieval decision, no "should I look at
-the file", no attention gamble. That is the point of hologram: the model sees
-the whole system at once, so placement, reuse, and planning decisions are made
-against the full picture rather than whatever grep happened to surface. Repos
-whose digest exceeds the embed budget (`--embed-max-tokens`, default 30k)
-degrade gracefully: call chains drop first, then method lines, keeping the
-system's shape.
-
-**Or keep it on disk** — the digest stays a file the agent queries when it
-chooses to. Weaker (the benchmark below showed agents mostly don't choose to),
-but free of context cost. If you use this mode, teach the query patterns — copy
-this into `CLAUDE.md` / `AGENTS.md`:
-
-```markdown
-## Project index: PROJECT_DIGEST.md
-
-`PROJECT_DIGEST.md` at the repo root indexes this codebase: every signature,
-type relation, and resolved call chain, one line per symbol. Line 2 is the
-legend. **Query it with grep — never read it linearly.** Unlike grepping
-source, each hit is a complete symbol line (signature, resolved callers,
-markers) with no comment or test noise.
-
-The queries and when to run them:
-- **Who calls X** (before changing or removing X):
-  `grep "> .*X" PROJECT_DIGEST.md` — one line per caller, receivers resolved
-  to types. Source grep cannot answer this.
-- **Does something like this already exist** (before writing ANY new helper):
-  grep concept synonyms over the inventory, e.g.
-  `grep -i "trim\|blank\|strip" PROJECT_DIGEST.md` — then reuse what you find.
-- **Which candidate is canonical**: prefer lines marked `✓` (referenced from
-  tests) and `×N` (used from N files).
-- **Where does new code belong**: the tree shows packages, `· deps a→b` shows
-  module coupling, grouped families (`AId,BId(R: UUID)`) are the house
-  conventions — extend a family, don't invent a parallel one.
-- **Where does behavior live** (debugging): a class's `- name,name` line lists
-  its private internals and `⋮N` marks heavy bodies — open those files first.
-
-Rules:
-- It says what exists, not what works — read the source before wiring anything
-  critical. `✓` means a test names the symbol, nothing more.
-- Freshness: rerun the header's regen command with `--if-stale` (instant when
-  fresh), or `check` for exit 0/1.
-```
-
-## Does it actually help? An honest take
-
-hologram exists because of one specific failure: an agent lands in a repo with no
-map, greps its way to a partial picture, and writes code that already exists.
-
-**The good.** An agent normally burns thousands of tokens re-discovering project
-structure every single session, and most of what it reads gets discarded. The digest
-replaces that exploration with one file it consults when needed. Duplication gets a
-real counterweight: "does this already exist?" becomes something the agent answers by
-reading, instead of something it only catches by grepping the exact right word. And
-because the digest shows your conventions — all your ID types are one-field records,
-your services take dependencies through constructors — a model tends to extend the
-patterns it sees rather than invent parallel ones. Private-name lists and `⋮` weight
-marks tell it which file to open first when debugging. All of this arrives at around
-20k tokens for a mid-sized codebase, paid only when the agent actually reads the file.
-
-**The caveats.** None of this is enforced. The digest competes for the model's
-attention like everything else in context, and an agent can ignore it and reimplement
-a helper anyway — it shifts the odds, it is not a guardrail. Function bodies stay
-invisible: a 500-line algorithm and a one-liner expose the same signature, so the
-digest tells an agent what exists, never how well it's built. `✓` means a test
-mentions the function, not that the function is correct. If your naming is misleading,
-the digest compresses and transmits the misleading names with perfect fidelity. Depth
-varies by language — the table above is honest about which ones get the full
-treatment.
-
-**What's been measured — and it's a negative.** Two controlled runs
-(34 headless agent sessions, n=1 per cell, sonnet + Claude Code tooling):
-[spring-framework](benchmark/results-spring-2026-08-08.md) — 1.5M LOC, memorized
-from training — showed identical outcomes at **+80% token cost** for the digest
-condition. The decisive run, a private 133k-LOC codebase
-the model had never seen (results withheld — private corpus), showed **A ≈ B on every metric**: same reuse (3/4 tasks
-both conditions), zero duplicated helpers anywhere, identical navigation turns.
-Control agents found the right existing APIs in 2–3 greps; the map couldn't beat
-three greps. The duplication failure mode this tool was designed against did not
-reproduce in 18 scored bait sessions.
-
-Those two runs tested the **pull model** — digest on disk, agent instructed to
-consult it. It mostly didn't, and when it did, it paid retrieval costs. The pull
-model is measured-false at these scales.
-
-The **push model** — `--embed`, the whole map in context from turn zero — was
-then run as its own condition on the private corpus (10 sessions vs the same
-baselines, transcript-reviewed): **outcomes stayed equal while effort dropped
-~36% in turns and ~55% in searches, with navigation tasks 40% faster — one
-answered in 4 turns with zero file reads, straight from the embedded map. Total
-tokens came out level: the embed's per-turn cost was fully offset by fewer
-turns.** That is the holistic thesis doing what it was supposed to do — the map
-in context replaces exploration — and it's why `--embed` is the recommended
-delivery. Caveats stay honest: n=1 per cell, one model, one corpus; duplication
-was zero in every condition, so embed's win here is orientation speed, not
-duplication prevention; and larger-repo tiers, weaker models, and chat-only
-contexts remain unmeasured.
-
-## How it works
-
-One file, one pipeline: scan (only git-tracked files when inside a repo), extract,
-render. Each language has its own small extractor and they all produce the same
-`Symbol` records, so everything downstream — receiver resolution, transitive
-reduction, shape grouping, the final tree — is language-neutral and written once.
-Formatting decisions were measured with a real tokenizer (o200k), not guessed.
+The current benchmark compares condition B (no Hologram context) with condition C
+(the managed canonical v2 map present from turn zero). The harness decodes before
+and after maps structurally when checking reuse. Results are directional and must be
+reported with corpus, model, task, and sample-size caveats; a name-similarity verdict
+still requires manual review. Reuse acceptance commands often verify only that a
+change occurred, navigation correctness is not automated (`true`), and the 40-turn
+ceiling is not outcome-gated. See [benchmark/README.md](benchmark/README.md).
 
 ## Tests
 
 ```bash
 .venv/bin/python -m unittest discover -s tests
 ```
-
-Runs under plain `python3` too — tests for languages whose grammar isn't installed
-just skip.
 
 ## License
 

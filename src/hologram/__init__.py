@@ -45,6 +45,8 @@ from .state import (
     read_digest_state,
 )
 
+__version__ = "0.2.0"
+
 _LEGACY_COMPAT_NAMES = frozenset(
     {
         "Symbol",
@@ -145,6 +147,7 @@ __all__ = [
     "SymbolId",
     "SymbolKind",
     "Visibility",
+    "__version__",
     "analyze_project",
     "build_digest",
     "build_project",

@@ -19,6 +19,7 @@ from hologram import (
     render_config,
     run_cli,
 )
+from hologram.cli import command_build, command_check
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -463,7 +464,65 @@ class MarkerEndToEndTest(unittest.TestCase):
         self.assertEqual(by_name["_comment_decoy"], ("×0",))
 
 
+class CanonicalDeliveryFreshnessTest(unittest.TestCase):
+    def test_managed_context_is_fresh_then_stale_without_touching_authored_bytes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "project"
+            root.mkdir()
+            source = root / "app.py"
+            source.write_text("def answer() -> int:\n    return 42\n", encoding="utf-8")
+            authored = b"# Project rules\r\nPreserve this exactly.\r\n"
+            context_path = root / "CLAUDE.md"
+            context_path.write_bytes(authored)
+            config = replace(
+                default_config(),
+                agents=("claude",),
+                languages=(hologram.Language.PYTHON,),
+                include=("**/*.py",),
+                exclude=(),
+                output=None,
+            )
+            config_path = root / CONFIG_NAME
+            config_path.write_text(render_config(config), encoding="utf-8")
+
+            self.assertEqual(
+                command_build(root, config_path, quiet=True),
+                0,
+            )
+            delivered = context_path.read_bytes()
+            self.assertTrue(delivered.startswith(authored))
+            self.assertIn(b"hologram:v2:start", delivered)
+            self.assertIn(b"# hologram:2 state=", delivered)
+            self.assertFalse((root / "PROJECT_DIGEST.md").exists())
+            self.assertEqual(
+                command_check(root, config_path, quiet=True),
+                0,
+            )
+
+            source.write_text("def answer() -> int:\n    return 43\n", encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(
+                    command_check(root, config_path, quiet=True),
+                    1,
+                )
+            self.assertEqual(context_path.read_bytes(), delivered)
+
+
 class PhasePublicApiTest(unittest.TestCase):
+    def test_package_version_is_public_without_delivery_root_exports(self):
+        self.assertEqual(hologram.__version__, "0.2.0")
+        self.assertIn("__version__", hologram.__all__)
+        for name in (
+            "main",
+            "EXIT_OK",
+            "EXIT_STALE",
+            "EXIT_USAGE",
+            "EXIT_INCOMPLETE",
+        ):
+            self.assertNotIn(name, hologram.__all__)
+
     def test_exact_phase_exports_are_lazy_and_identity_preserving(self):
         expected = {
             "AnalyzedProject",

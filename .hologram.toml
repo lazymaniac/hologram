@@ -1,0 +1,7 @@
+schema_version = 2
+agents = []
+languages = []
+include = ["**/*"]
+exclude = ["**/.git/**", "**/.venv/**", "**/__pycache__/**", "**/bin/**", "**/build/**", "**/dist/**", "**/generated/**", "**/node_modules/**", "**/obj/**", "**/out/**", "**/target/**", "**/vendor/**"]
+hot_threshold = 10
+output = "PROJECT_DIGEST.md"

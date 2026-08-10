@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """bench: measure agents with vs without a hologram digest.
 
 Subcommands: run (execute the task matrix headlessly), report (aggregate results).
@@ -13,14 +12,24 @@ import difflib
 import json
 import re
 import shutil
+import stat
 import statistics
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
-from pathlib import Path
+import tomllib
+from dataclasses import dataclass, field, replace
+from pathlib import Path, PurePosixPath
 
-from hologram.config import create_default_manifest
+from hologram.config import CONFIG_NAME, canonical_config_bytes, default_config
+from hologram.context import (
+    AGENT_PATHS,
+    ContextStatus,
+    inspect_managed_block,
+    read_target_bytes,
+    render_managed_block,
+)
+from hologram.render import RenderSymbol, decode_render
 
 
 def _hologram_command(*args: str) -> list[str]:
@@ -70,11 +79,10 @@ def parse_transcript(text: str) -> dict:
     """Tool-call counts and usage from a claude stream-json transcript.
     Agents search/read through Bash as often as through dedicated tools, so
     Bash commands are classified too. tokens_in sums fresh input + cache
-    creation + cache reads — the actual context consumption. digest_hits
-    counts tool calls that touch PROJECT_DIGEST.md (did the agent actually
-    consult the digest?). Tolerant of non-JSON noise lines."""
-    m = {"reads": 0, "searches": 0, "edits": 0, "digest_hits": 0,
-         "turns": 0, "tokens_in": 0, "tokens_out": 0}
+    creation + cache reads — the actual context consumption. Tolerant of
+    non-JSON noise lines."""
+    m = {"reads": 0, "searches": 0, "edits": 0, "turns": 0,
+         "tokens_in": 0, "tokens_out": 0}
     for line in text.splitlines():
         try:
             ev = json.loads(line)
@@ -85,9 +93,6 @@ def parse_transcript(text: str) -> dict:
                 if block.get("type") != "tool_use":
                     continue
                 name = block.get("name", "")
-                blob = json.dumps(block.get("input", {}))
-                if "PROJECT_DIGEST" in blob:
-                    m["digest_hits"] += 1
                 if name in _READ_TOOLS:
                     m["reads"] += 1
                 elif name in _SEARCH_TOOLS:
@@ -110,106 +115,178 @@ def parse_transcript(text: str) -> dict:
     return m
 
 
-def _sig_lines(digest: str) -> list[str]:
-    out = []
-    for ln in digest.splitlines():
-        s = ln.strip()
-        if s and not s.startswith(("#", "·", "-", "»", "?")) and "(" in s:
-            out.append(s)
-    return out
+def _symbols(rendered: str) -> tuple[RenderSymbol, ...]:
+    return tuple(
+        symbol
+        for file_ir in decode_render(rendered).files
+        for symbol in file_ir.symbols
+    )
 
 
-def _fn_name(sig_line: str) -> str:
-    return sig_line.split("(", 1)[0].strip().lstrip("-").split(",")[-1]
-
-
-def _chain(sig_line: str) -> list[str]:
-    if " > " not in sig_line:
-        return []
-    return [c.strip() for c in sig_line.split(" > ", 1)[1].split(",")]
+def _short_display_name(value: str) -> str:
+    return value.split("|", 1)[0].rsplit(".", 1)[-1].rsplit(":", 1)[-1].lower()
 
 
 def judge_reuse(before: str, after: str, expect_reuse: list[str]) -> dict:
-    """Compare digests around a run. reused = expected symbols named in a new
-    line's call chain. duplicated = new functions name-similar to an expected
-    symbol that do NOT call it."""
-    old = set(_sig_lines(before))
-    new_lines = [ln for ln in _sig_lines(after) if ln not in old]
+    """Compare decoded canonical maps around one benchmark run."""
+
+    old_ids = frozenset(symbol.symbol_id for symbol in _symbols(before))
+    new_symbols = [
+        symbol for symbol in _symbols(after) if symbol.symbol_id not in old_ids
+    ]
     reused: list[str] = []
     duplicated: list[str] = []
     for target in expect_reuse:
         tshort = target.rsplit(".", 1)[-1].lower()
-        hit = any(tshort in (c.rsplit(".", 1)[-1].lower() for c in _chain(ln))
-                  for ln in new_lines)
+        hit = any(
+            tshort == _short_display_name(call)
+            for symbol in new_symbols
+            for call in symbol.ordered_calls
+        )
         if hit:
             reused.append(target)
             continue
-        for ln in new_lines:
-            name = _fn_name(ln)
+        for symbol in new_symbols:
+            name = symbol.symbol_id.name
             sim = difflib.SequenceMatcher(None, name.lower(), tshort).ratio()
             if sim >= 0.6 and name.lower() != tshort:
                 duplicated.append(name)
                 break
-    return {"new_lines": new_lines,
+    return {"new_lines": new_symbols,
             "reused": sorted(set(reused)),
             "duplicated": sorted(set(duplicated))}
 
-
-_AGENT_SNIPPET = """## Project index: PROJECT_DIGEST.md
-
-`PROJECT_DIGEST.md` at the repo root indexes this codebase, one line per symbol.
-**Query it with grep — never read it linearly.** Each hit is a complete symbol
-line (signature, resolved callers, markers), with no comment/test noise.
-
-- Who calls X (before changing X): `grep "> .*X" PROJECT_DIGEST.md` — one line
-  per caller, receivers resolved to types; source grep cannot answer this.
-- Does something like X exist (before writing ANY new helper): grep concept
-  synonyms over it (`grep -i "trim\\|blank\\|strip" PROJECT_DIGEST.md`), reuse
-  what you find.
-- Canonical choice: prefer `✓` (tested) and `×N` (widely used) lines.
-- Placement: the tree + `· deps a→b` + grouped families show where code belongs.
-- Debugging: a class's `- name,name` line lists private internals; `⋮N` marks
-  heavy bodies. Open those files first.
-"""
 
 _BASE_CLAUDE_MD = """# Working notes
 
 Complete the requested task directly. Keep changes minimal and idiomatic.
 """
+_EMPTY_MANAGED_BLOCK = render_managed_block("")
+
+
+def _declared_corpus_output(ws: Path) -> Path | None:
+    manifest = ws / CONFIG_NAME
+    try:
+        manifest_stat = manifest.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(manifest_stat.st_mode):
+        return None
+
+    raw = read_target_bytes(manifest)
+    if raw is None:
+        return None
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    schema = data.get("schema_version")
+    output = data.get("output")
+    if (
+        isinstance(schema, bool)
+        or not isinstance(schema, int)
+        or schema != 2
+        or not isinstance(output, str)
+    ):
+        return None
+
+    relative = PurePosixPath(output)
+    if (
+        not output
+        or not relative.parts
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or "\\" in output
+        or re.match(r"^[A-Za-z]:", output)
+        or output != relative.as_posix()
+        or relative.suffix != ".md"
+        or any(character in output for character in "*?[]")
+    ):
+        return None
+    return ws.joinpath(*relative.parts)
+
+
+def _benchmark_claude_bytes(ws: Path) -> bytes:
+    claude = b""
+    for agent, relative in AGENT_PATHS.items():
+        existing = read_target_bytes(ws / relative)
+        if existing is None:
+            continue
+        if inspect_managed_block(existing, _EMPTY_MANAGED_BLOCK) is not ContextStatus.MISSING:
+            raise ValueError(f"preexisting Hologram context in {relative}")
+        if agent == "claude":
+            claude = existing
+
+    standalone = ws / "PROJECT_DIGEST.md"
+    try:
+        standalone.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise ValueError("preexisting Hologram standalone map in PROJECT_DIGEST.md")
+
+    declared_output = _declared_corpus_output(ws)
+    if (
+        declared_output is not None
+        and read_target_bytes(declared_output, root=ws) is not None
+    ):
+        raise ValueError(f"preexisting Hologram standalone map in {declared_output}")
+    return claude
+
+
+def _append_benchmark_instructions(authored: bytes) -> bytes:
+    instructions = _BASE_CLAUDE_MD.encode("utf-8")
+    if not authored:
+        return instructions
+    separator = b"\n" if authored.endswith((b"\n", b"\r")) else b"\n\n"
+    return authored + separator + instructions
 
 
 def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
     """Detached git worktree of the corpus, prepared for one condition.
-    A = digest on disk + query instructions (pull model); B = control;
-    C = digest embedded directly into CLAUDE.md (push model — the whole map is
-    in context from turn zero, the tool's actual thesis). The corpus's own
+    B = control; C = a managed canonical map in CLAUDE.md. The corpus's own
     CLAUDE.md is preserved, and the setup is committed in the detached worktree
     so that any later `git diff` shows exactly what the agent changed."""
+    if condition not in {"B", "C"}:
+        raise ValueError("benchmark condition must be one of conditions B and C")
     subprocess.run(["git", "-C", str(corpus), "worktree", "add", "--detach",
                     "-f", str(ws), "HEAD"], check=True, capture_output=True)
-    create_default_manifest(ws)
-    claude_path = ws / "CLAUDE.md"
-    existing = claude_path.read_text() if claude_path.exists() else ""
-    claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
-    if condition == "A":
-        subprocess.run(_hologram_command("build")
-                       + ["--root", str(ws), "--quiet"], check=True)
-        claude_md += "\n" + _AGENT_SNIPPET
-    claude_path.write_text(claude_md)
-    if condition == "C":
-        subprocess.run(_hologram_command("build")
-                       + ["--root", str(ws), "--embed", "--quiet"], check=True)
-    subprocess.run(["git", "-C", str(ws), "add", "-A"],
-                   check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",
-                    "-c", "user.name=bench", "commit", "-qm", "bench setup"],
-                   check=True, capture_output=True)
-    return ws
+    try:
+        claude_path = ws / "CLAUDE.md"
+        authored = _benchmark_claude_bytes(ws)
+        claude_path.write_bytes(_append_benchmark_instructions(authored))
+        if condition == "C":
+            config = replace(default_config(), agents=("claude",), output=None)
+            with tempfile.TemporaryDirectory(
+                prefix="hologram-bench-condition-"
+            ) as temporary:
+                config_path = Path(temporary) / CONFIG_NAME
+                config_path.write_bytes(canonical_config_bytes(config))
+                subprocess.run(
+                    _hologram_command("build")
+                    + [
+                        "--root",
+                        str(ws),
+                        "--config",
+                        str(config_path),
+                        "--quiet",
+                    ],
+                    check=True,
+                )
+        subprocess.run(["git", "-C", str(ws), "add", "-A"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",
+                        "-c", "user.name=bench", "commit", "-qm", "bench setup"],
+                       check=True, capture_output=True)
+        return ws
+    except BaseException:
+        drop_workspace(corpus, ws)
+        raise
 
 
 def drop_workspace(corpus: Path, ws: Path) -> None:
     subprocess.run(["git", "-C", str(corpus), "worktree", "remove", "--force",
-                    str(ws)], capture_output=True)
+                    str(ws)], capture_output=True, check=False)
     shutil.rmtree(ws, ignore_errors=True)
 
 
@@ -220,17 +297,31 @@ def claude_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
         ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
          "--max-turns", str(max_turns), "--model", model,
          "--dangerously-skip-permissions"],
-        cwd=ws, capture_output=True, text=True, timeout=1800)
+        cwd=ws, capture_output=True, text=True, timeout=1800, check=False)
     return r.stdout
 
 
 def _digest_of(ws: Path) -> str:
     out = ws / ".bench-digest.md"
-    subprocess.run(_hologram_command("build")
-                   + ["--root", str(ws), "--out", str(out), "--quiet"], check=True)
-    text = out.read_text()
-    out.unlink()
-    return text
+    config = replace(default_config(), agents=(), output=out.name)
+    with tempfile.TemporaryDirectory(prefix="hologram-bench-config-") as temporary:
+        config_path = Path(temporary) / CONFIG_NAME
+        config_path.write_bytes(canonical_config_bytes(config))
+        try:
+            subprocess.run(
+                _hologram_command("build")
+                + [
+                    "--root",
+                    str(ws),
+                    "--config",
+                    str(config_path),
+                    "--quiet",
+                ],
+                check=True,
+            )
+            return out.read_text(encoding="utf-8")
+        finally:
+            out.unlink(missing_ok=True)
 
 
 def run_one(corpus: Path, task: Task, condition: str, rep: int,
@@ -247,10 +338,10 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
         verdict = judge_reuse(before, after, task.expect_reuse)
         # intent-to-add so brand-new files show up in `git diff`-based acceptance
         subprocess.run(["git", "-C", str(ws), "add", "-N", "."],
-                       capture_output=True)
+                       capture_output=True, check=False)
         accepted = subprocess.run(
             task.accept_cmd.format(ws=ws), shell=True,
-            capture_output=True).returncode == 0
+            capture_output=True, check=False).returncode == 0
         metrics = parse_transcript(transcript)
         return {"task": task.id, "kind": task.kind, "condition": condition,
                 "rep": rep, "accepted": accepted,
@@ -263,9 +354,9 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
 def report(rows: list[dict]) -> str:
     if not rows:
         return "no runs recorded\n"
-    lines = ["| condition | runs | accepted | duplication (reuse tasks) | "
-             "reads | searches | digest hits | turns | tokens in | tokens out |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+    lines = [("| condition | runs | accepted | duplication (reuse tasks) | "
+              "reads | searches | turns | tokens in | tokens out |"),
+             "|---|---|---|---|---|---|---|---|---|"]
     for cond in sorted({r["condition"] for r in rows}):
         rs = [r for r in rows if r["condition"] == cond]
         reuse = [r for r in rs if r["kind"] == "reuse"]
@@ -273,13 +364,12 @@ def report(rows: list[dict]) -> str:
                     if reuse else 0)
         acc = 100 * sum(1 for r in rs if r["accepted"]) / len(rs)
 
-        def mean(key):
-            return statistics.fmean(r[key] for r in rs)
+        def mean(key, samples=rs):
+            return statistics.fmean(r[key] for r in samples)
 
-        dh = statistics.fmean(r.get("digest_hits", 0) for r in rs)
         lines.append(
             f"| {cond} | {len(rs)} | {acc:.0f}% | {dup_rate:.0f}% | "
-            f"{mean('reads'):.1f} | {mean('searches'):.1f} | {dh:.1f} | "
+            f"{mean('reads'):.1f} | {mean('searches'):.1f} | "
             f"{mean('turns'):.1f} | {mean('tokens_in'):,.0f} | "
             f"{mean('tokens_out'):,.0f} |")
     lines.append("")
@@ -306,7 +396,12 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("taskfile", type=Path)
     p_run.add_argument("--results", type=Path,
                        default=Path(__file__).parent / "results")
-    p_run.add_argument("--conditions", nargs="+", default=["A", "B"])
+    p_run.add_argument(
+        "--conditions",
+        nargs="+",
+        choices=("B", "C"),
+        default=["B", "C"],
+    )
     p_run.add_argument("--reps", type=int, default=1)
     p_run.add_argument("--only", nargs="*", default=None,
                        help="task ids to run (default: all)")

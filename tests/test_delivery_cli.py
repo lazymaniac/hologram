@@ -36,6 +36,7 @@ from hologram.config import (
     canonical_config_bytes,
     default_config,
     load_config,
+    render_config,
 )
 from hologram.context import (
     AGENT_PATHS,
@@ -1172,6 +1173,41 @@ class CliContractTest(unittest.TestCase):
                     self.assertEqual(main(argv), EXIT_USAGE)
             for command in (build, check, diff, init):
                 command.assert_not_called()
+
+
+class SelfConfigTest(unittest.TestCase):
+    def test_tracked_self_config_is_canonical_digest_only_config(self) -> None:
+        expected = dataclasses.replace(default_config(), agents=())
+        path = Path(__file__).resolve().parents[1] / CONFIG_NAME
+
+        self.assertEqual(path.read_bytes(), render_config(expected).encode("utf-8"))
+        self.assertEqual(load_config(path.parent, path), expected)
+        self.assertEqual(expected.output, "PROJECT_DIGEST.md")
+
+    def test_readme_documents_the_complete_v2_delivery_contract(self) -> None:
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+            encoding="utf-8"
+        )
+
+        for text in (
+            "## Configuration",
+            "CLAUDE.md",
+            "AGENTS.md",
+            "GEMINI.md",
+            "hologram init",
+            "hologram build",
+            "hologram check",
+            "hologram diff",
+            "Atomic replacement is per target",
+            "Static evidence cannot prove semantic deadness or authorize deletion",
+            "`--embed`",
+            "not supported",
+            "supported source that cannot be read",
+            "v2 CLI orchestration",
+            "temporary legacy library compatibility",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, readme)
 
 
 class InitTest(unittest.TestCase):

@@ -1,13 +1,38 @@
+import dataclasses
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmark"))
 
-import bench  # noqa: E402
-from hologram import CONFIG_NAME, default_config, render_config  # noqa: E402
+import bench
+
+from hologram import (
+    CONFIG_NAME,
+    Language,
+    SourceRole,
+    SymbolId,
+    SymbolKind,
+    canonical_config_bytes,
+    default_config,
+)
+from hologram.context import (
+    CONTEXT_START,
+    LEGACY_END,
+    LEGACY_START,
+    AtomicWriteError,
+    render_managed_block,
+)
+from hologram.render import (
+    RenderFile,
+    RenderIR,
+    RenderSymbol,
+    render_project,
+)
 
 
 class TaskLoaderTest(unittest.TestCase):
@@ -85,7 +110,7 @@ class TranscriptMetricsTest(unittest.TestCase):
         self.assertEqual(m["reads"], 3)      # Read ×2 + bash sed -n
         self.assertEqual(m["searches"], 3)   # Grep + bash grep ×2
         self.assertEqual(m["edits"], 2)      # Edit + Write
-        self.assertEqual(m["digest_hits"], 2)  # bash grep on digest + Read digest
+        self.assertNotIn("digest_hits", m)
         self.assertEqual(m["turns"], 7)
         self.assertEqual(m["tokens_in"], 91000 + 30000 + 500000)
         self.assertEqual(m["tokens_out"], 4200)
@@ -93,29 +118,66 @@ class TranscriptMetricsTest(unittest.TestCase):
     def test_empty_transcript_gives_zeroes(self):
         m = bench.parse_transcript("")
         self.assertEqual(m, {"reads": 0, "searches": 0, "edits": 0,
-                             "digest_hits": 0, "turns": 0,
-                             "tokens_in": 0, "tokens_out": 0})
+                             "turns": 0, "tokens_in": 0, "tokens_out": 0})
 
 
-BEFORE_DIGEST = """# corpus @x 2026-08-08 · 100 LOC · state aaa · regen: x
-· legend: …
-src
- math
-  MathOps(C)
-   add(Fraction,Fraction):Fraction
-   normalize(List<Fraction>):List<Fraction> > add
-"""
+def _render_symbol(name: str, calls: tuple[str, ...] = ()) -> RenderSymbol:
+    return RenderSymbol(
+        SymbolId(Language.PYTHON, "svc.py", (), SymbolKind.FUNCTION, name, "()"),
+        1,
+        0,
+        "pub",
+        f"{name}()",
+        (),
+        None,
+        (),
+        (),
+        (),
+        (),
+        (),
+        calls,
+        (),
+        (),
+        2,
+        (),
+    )
 
-AFTER_REUSED = BEFORE_DIGEST + """\
-  Averages(C)
-   weightedAverage(List<Fraction>):Fraction > MathOps.add,normalize
-"""
 
-AFTER_DUPLICATED = BEFORE_DIGEST + """\
-  Averages(C)
-   normalizeWeights(List<Fraction>):List<Fraction>
-   weightedAverage(List<Fraction>):Fraction > normalizeWeights
-"""
+def _canonical_map(*symbols: RenderSymbol) -> str:
+    ordered = tuple(sorted(symbols, key=lambda symbol: symbol.symbol_id.name))
+    return render_project(
+        RenderIR(
+            2,
+            "a" * 64,
+            (),
+            (),
+            (
+                RenderFile(
+                    "svc.py",
+                    Language.PYTHON.value,
+                    SourceRole.PRODUCTION.value,
+                    "svc",
+                    (),
+                    ordered,
+                ),
+            ),
+        )
+    )
+
+
+NORMALIZE = _render_symbol("normalize")
+ADD = _render_symbol("add")
+WEIGHTED = _render_symbol("weightedAverage", ("add", "normalize"))
+NORMALIZE_WEIGHTS = _render_symbol("normalizeWeights")
+WEIGHTED_DUPLICATE = _render_symbol("weightedAverage", ("normalizeWeights",))
+BEFORE_DIGEST = _canonical_map(ADD, NORMALIZE)
+AFTER_REUSED = _canonical_map(ADD, NORMALIZE, WEIGHTED)
+AFTER_DUPLICATED = _canonical_map(
+    ADD,
+    NORMALIZE,
+    NORMALIZE_WEIGHTS,
+    WEIGHTED_DUPLICATE,
+)
 
 
 class DuplicationDetectorTest(unittest.TestCase):
@@ -131,14 +193,30 @@ class DuplicationDetectorTest(unittest.TestCase):
 
     def test_new_lines_listed(self):
         v = bench.judge_reuse(BEFORE_DIGEST, AFTER_REUSED, [])
-        self.assertTrue(any("weightedAverage" in ln for ln in v["new_lines"]))
+        self.assertEqual(
+            [symbol.symbol_id.name for symbol in v["new_lines"]],
+            ["weightedAverage"],
+        )
 
     def test_no_change_is_clean(self):
         v = bench.judge_reuse(BEFORE_DIGEST, BEFORE_DIGEST, ["normalize"])
         self.assertEqual(v, {"new_lines": [], "reused": [], "duplicated": []})
 
+    def test_changed_existing_symbol_is_not_new(self):
+        changed = dataclasses.replace(
+            NORMALIZE,
+            signature="normalize(value)",
+            parameters=("value",),
+            body_lines=9,
+        )
 
-import subprocess  # noqa: E402
+        verdict = bench.judge_reuse(
+            BEFORE_DIGEST,
+            _canonical_map(ADD, changed),
+            ["normalize"],
+        )
+
+        self.assertEqual(verdict, {"new_lines": [], "reused": [], "duplicated": []})
 
 
 def _mini_corpus(tmp: Path) -> Path:
@@ -155,11 +233,11 @@ def _mini_corpus(tmp: Path) -> Path:
 
 
 class WorkspaceTest(unittest.TestCase):
-    def test_all_conditions_get_exact_canonical_manifest(self):
+    def test_active_conditions_have_exact_controlled_configuration(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             repo = _mini_corpus(tmp_path)
-            for condition in ("A", "B", "C"):
+            for condition in ("B", "C"):
                 with self.subTest(condition=condition):
                     ws = bench.make_workspace(
                         repo,
@@ -167,10 +245,7 @@ class WorkspaceTest(unittest.TestCase):
                         condition,
                     )
                     try:
-                        self.assertEqual(
-                            (ws / CONFIG_NAME).read_text(encoding="utf-8"),
-                            render_config(default_config()),
-                        )
+                        self.assertFalse((ws / CONFIG_NAME).exists())
                     finally:
                         bench.drop_workspace(repo, ws)
 
@@ -199,9 +274,14 @@ class WorkspaceTest(unittest.TestCase):
                 cwd=repo,
                 check=True,
             )
-            ws = bench.make_workspace(repo, tmp_path / "wsA", "A")
+            ws = bench.make_workspace(repo, tmp_path / "wsC", "C")
             try:
+                self.assertEqual((repo / CONFIG_NAME).read_bytes(), provided)
                 self.assertEqual((ws / CONFIG_NAME).read_bytes(), provided)
+                self.assertIn(
+                    b"hologram:v2:start",
+                    (ws / "CLAUDE.md").read_bytes(),
+                )
             finally:
                 bench.drop_workspace(repo, ws)
 
@@ -226,29 +306,226 @@ class WorkspaceTest(unittest.TestCase):
                 cwd=repo,
                 check=True,
             )
-            ws = bench.make_workspace(repo, tmp_path / "wsB", "B")
-            try:
-                workspace_manifest = ws / CONFIG_NAME
-                self.assertTrue(workspace_manifest.is_symlink())
-                self.assertEqual(
-                    workspace_manifest.readlink(),
-                    Path("missing-manifest.toml"),
-                )
-                self.assertFalse((ws / "missing-manifest.toml").exists())
-                self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
-            finally:
-                bench.drop_workspace(repo, ws)
+            for condition in ("B", "C"):
+                with self.subTest(condition=condition):
+                    ws = bench.make_workspace(
+                        repo,
+                        tmp_path / f"ws{condition}",
+                        condition,
+                    )
+                    try:
+                        workspace_manifest = ws / CONFIG_NAME
+                        self.assertTrue(workspace_manifest.is_symlink())
+                        self.assertEqual(
+                            workspace_manifest.readlink(),
+                            Path("missing-manifest.toml"),
+                        )
+                        self.assertTrue(manifest.is_symlink())
+                        self.assertFalse((ws / "missing-manifest.toml").exists())
+                        self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
+                    finally:
+                        bench.drop_workspace(repo, ws)
 
-    def test_condition_a_has_digest_and_instructions(self):
+    def test_condition_c_has_managed_map_and_preserves_authored_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
-            ws = bench.make_workspace(repo, Path(tmp) / "wsA", "A")
+            ws = bench.make_workspace(repo, Path(tmp) / "wsC", "C")
             try:
-                self.assertTrue((ws / "PROJECT_DIGEST.md").exists())
-                self.assertIn("PROJECT_DIGEST.md", (ws / "CLAUDE.md").read_text())
+                context = (ws / "CLAUDE.md").read_bytes()
+                self.assertIn(b"Corpus conventions", context)
+                self.assertIn(b"hologram:v2:start", context)
+                self.assertIn(b"# hologram:2 state=", context)
+                self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
                 self.assertTrue((ws / "svc.py").exists())
             finally:
                 bench.drop_workspace(repo, ws)
+
+    def test_authored_context_bytes_are_preserved_for_b_and_c(self):
+        authored = b"\xfffirst\r\nsecond\r\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = _mini_corpus(tmp_path)
+            (repo / "CLAUDE.md").write_bytes(authored)
+            subprocess.run(["git", "add", "CLAUDE.md"], cwd=repo, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=b@b",
+                    "-c",
+                    "user.name=b",
+                    "commit",
+                    "-qm",
+                    "binary authored context",
+                ],
+                cwd=repo,
+                check=True,
+            )
+
+            for condition in ("B", "C"):
+                with self.subTest(condition=condition):
+                    ws = bench.make_workspace(
+                        repo,
+                        tmp_path / f"binary-{condition}",
+                        condition,
+                    )
+                    try:
+                        self.assertTrue(
+                            (ws / "CLAUDE.md").read_bytes().startswith(authored)
+                        )
+                    finally:
+                        bench.drop_workspace(repo, ws)
+
+    def test_authored_context_symlink_is_rejected_without_following(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = _mini_corpus(tmp_path)
+            outside = tmp_path / "outside.md"
+            outside.write_bytes(b"outside authored bytes\n")
+            context = repo / "CLAUDE.md"
+            context.unlink()
+            context.symlink_to(outside)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.email=b@b",
+                    "-c",
+                    "user.name=b",
+                    "commit",
+                    "-qm",
+                    "symlink authored context",
+                ],
+                cwd=repo,
+                check=True,
+            )
+
+            with self.assertRaises(AtomicWriteError):
+                bench.make_workspace(repo, tmp_path / "unsafe", "B")
+            self.assertEqual(outside.read_bytes(), b"outside authored bytes\n")
+
+    def test_preexisting_hologram_context_and_map_are_rejected(self):
+        artifacts = {
+            "claude": ("CLAUDE.md", render_managed_block("old map\n")),
+            "agent": (
+                "AGENTS.md",
+                LEGACY_START + b"\nold map\n" + LEGACY_END + b"\n",
+            ),
+            "malformed": ("GEMINI.md", CONTEXT_START + b"\nunterminated\n"),
+            "standalone": ("PROJECT_DIGEST.md", b"# hologram:2 stale\n"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for artifact, (name, content) in artifacts.items():
+                for condition in ("B", "C"):
+                    with self.subTest(artifact=artifact, condition=condition):
+                        case = tmp_path / f"{artifact}-{condition}"
+                        case.mkdir()
+                        repo = _mini_corpus(case)
+                        (repo / name).write_bytes(content)
+                        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+                        subprocess.run(
+                            [
+                                "git",
+                                "-c",
+                                "user.email=b@b",
+                                "-c",
+                                "user.name=b",
+                                "commit",
+                                "-qm",
+                                "preexisting hologram context",
+                            ],
+                            cwd=repo,
+                            check=True,
+                        )
+                        ws = case / "workspace"
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "preexisting Hologram",
+                        ):
+                            bench.make_workspace(repo, ws, condition)
+                        self.assertFalse(ws.exists())
+
+    def test_manifest_declared_custom_output_is_rejected_without_following(self):
+        manifest_bytes = canonical_config_bytes(
+            dataclasses.replace(
+                default_config(),
+                agents=(),
+                output="docs/MAP.md",
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            for target_kind in ("regular", "symlink"):
+                for condition in ("B", "C"):
+                    with self.subTest(target_kind=target_kind, condition=condition):
+                        case = tmp_path / f"{target_kind}-{condition}"
+                        case.mkdir()
+                        repo = _mini_corpus(case)
+                        (repo / CONFIG_NAME).write_bytes(manifest_bytes)
+                        docs = repo / "docs"
+                        docs.mkdir()
+                        target = docs / "MAP.md"
+                        if target_kind == "regular":
+                            target.write_text(BEFORE_DIGEST, encoding="utf-8")
+                        else:
+                            outside = case / "outside-map.md"
+                            outside.write_bytes(b"outside map bytes\n")
+                            target.symlink_to("../../outside-map.md")
+                        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+                        subprocess.run(
+                            [
+                                "git",
+                                "-c",
+                                "user.email=b@b",
+                                "-c",
+                                "user.name=b",
+                                "commit",
+                                "-qm",
+                                "custom standalone map",
+                            ],
+                            cwd=repo,
+                            check=True,
+                        )
+
+                        error = ValueError if target_kind == "regular" else AtomicWriteError
+                        with self.assertRaises(error):
+                            bench.make_workspace(repo, case / "workspace", condition)
+                        self.assertEqual((repo / CONFIG_NAME).read_bytes(), manifest_bytes)
+                        if target_kind == "symlink":
+                            self.assertEqual(
+                                (case / "outside-map.md").read_bytes(),
+                                b"outside map bytes\n",
+                            )
+
+    def test_failed_workspace_setup_removes_registered_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = _mini_corpus(tmp_path)
+            ws = tmp_path / "failed-workspace"
+            try:
+                with (
+                    mock.patch.object(
+                        bench,
+                        "canonical_config_bytes",
+                        side_effect=RuntimeError("setup failed"),
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "setup failed"),
+                ):
+                    bench.make_workspace(repo, ws, "C")
+
+                self.assertFalse(ws.exists())
+                worktrees = subprocess.run(
+                    ["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout
+                self.assertNotIn(str(ws), worktrees)
+            finally:
+                if ws.exists():
+                    bench.drop_workspace(repo, ws)
 
     def test_condition_b_is_control(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -256,18 +533,24 @@ class WorkspaceTest(unittest.TestCase):
             ws = bench.make_workspace(repo, Path(tmp) / "wsB", "B")
             try:
                 self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
-                self.assertNotIn("PROJECT_DIGEST", (ws / "CLAUDE.md").read_text())
-                self.assertEqual(
-                    (ws / CONFIG_NAME).read_text(encoding="utf-8"),
-                    render_config(default_config()),
-                )
+                context = (ws / "CLAUDE.md").read_bytes()
+                self.assertNotIn(b"PROJECT_DIGEST", context)
+                self.assertNotIn(b"hologram:v2:start", context)
+                self.assertFalse((ws / CONFIG_NAME).exists())
             finally:
                 bench.drop_workspace(repo, ws)
+
+    def test_historical_condition_a_is_rejected_before_worktree_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            with self.assertRaisesRegex(ValueError, "conditions B and C"):
+                bench.make_workspace(repo, Path(tmp) / "wsA", "A")
+            self.assertFalse((Path(tmp) / "wsA").exists())
 
     def test_workspace_is_isolated(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
-            ws = bench.make_workspace(repo, Path(tmp) / "wsA", "A")
+            ws = bench.make_workspace(repo, Path(tmp) / "wsC", "C")
             try:
                 (ws / "svc.py").write_text("changed")
                 self.assertIn("normalize", (repo / "svc.py").read_text())
@@ -277,13 +560,14 @@ class WorkspaceTest(unittest.TestCase):
     def test_corpus_claude_md_preserved_and_setup_committed(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
-            ws = bench.make_workspace(repo, Path(tmp) / "wsA", "A")
+            ws = bench.make_workspace(repo, Path(tmp) / "wsC", "C")
             try:
                 text = (ws / "CLAUDE.md").read_text()
                 self.assertIn("Corpus conventions", text)      # corpus part kept
-                self.assertIn("PROJECT_DIGEST.md", text)       # snippet appended
+                self.assertIn("hologram:v2:start", text)
                 diff = subprocess.run(["git", "-C", str(ws), "diff", "--stat"],
-                                      capture_output=True, text=True).stdout
+                                      capture_output=True, text=True,
+                                      check=False).stdout
                 self.assertEqual(diff, "")   # setup committed -> clean slate
             finally:
                 bench.drop_workspace(repo, ws)
@@ -307,12 +591,12 @@ class RunOneTest(unittest.TestCase):
                       "    return sum(normalize(xs)) / len(xs)\n")
                 return TRANSCRIPT
 
-            row = bench.run_one(repo, task, "A", rep=0,
+            row = bench.run_one(repo, task, "C", rep=0,
                                 results_dir=Path(tmp) / "results",
                                 model="sonnet", max_turns=40,
                                 runner=fake_runner)
         self.assertEqual(row["task"], "avg")
-        self.assertEqual(row["condition"], "A")
+        self.assertEqual(row["condition"], "C")
         self.assertTrue(row["accepted"])
         self.assertEqual(row["reused"], ["normalize"])
         self.assertEqual(row["duplicated"], [])
@@ -368,13 +652,72 @@ class ReportTest(unittest.TestCase):
         self.assertIn("0%", md)
         self.assertIn("100%", md)
         self.assertIn("reads", md)
-        self.assertIn("digest hits", md)
+        self.assertNotIn("digest hits", md)
 
     def test_empty_rows(self):
         self.assertIn("no runs", bench.report([]))
 
 
 class CliTest(unittest.TestCase):
+    def test_active_condition_defaults_are_b_and_c_and_a_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            taskfile = Path(tmp) / "tasks.json"
+            taskfile.write_text(
+                json.dumps(
+                    {
+                        "corpus": str(repo),
+                        "tasks": [
+                            {
+                                "id": "noop",
+                                "kind": "navigate",
+                                "prompt": "count files",
+                                "accept_cmd": "true",
+                            }
+                        ],
+                    }
+                )
+            )
+            results = Path(tmp) / "results"
+            row = {
+                "task": "noop",
+                "kind": "navigate",
+                "condition": "unused",
+                "rep": 0,
+                "accepted": True,
+                "reused": [],
+                "duplicated": [],
+                "new_lines": 0,
+            }
+            with mock.patch.object(bench, "run_one", return_value=row) as run:
+                self.assertEqual(
+                    bench.main(
+                        [
+                            "run",
+                            str(taskfile),
+                            "--results",
+                            str(results),
+                            "--dry-run",
+                        ]
+                    ),
+                    0,
+                )
+            self.assertEqual([call.args[2] for call in run.call_args_list], ["B", "C"])
+
+            with self.assertRaises(SystemExit) as caught:
+                bench.main(
+                    [
+                        "run",
+                        str(taskfile),
+                        "--results",
+                        str(results),
+                        "--conditions",
+                        "A",
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(caught.exception.code, 2)
+
     def test_run_writes_jsonl_and_report_reads_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
@@ -388,17 +731,61 @@ class CliTest(unittest.TestCase):
             results = Path(tmp) / "results"
             code = bench.main(["run", str(taskfile),
                                "--results", str(results),
-                               "--conditions", "A", "--reps", "1",
+                               "--conditions", "C", "--reps", "1",
                                "--dry-run"])
             self.assertEqual(code, 0)
             rows = [json.loads(l) for l in
                     (results / "runs.jsonl").read_text().splitlines()]
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["condition"], "A")
+            self.assertEqual(rows[0]["condition"], "C")
 
             code = bench.main(["report", "--results", str(results)])
             self.assertEqual(code, 0)
             self.assertTrue((results / "report.md").exists())
+
+
+class V2ConsumerMigrationTest(unittest.TestCase):
+    def test_benchmark_reads_symbols_through_decoder(self) -> None:
+        verdict = bench.judge_reuse(BEFORE_DIGEST, AFTER_REUSED, ["normalize"])
+
+        self.assertEqual(verdict["reused"], ["normalize"])
+        self.assertEqual(
+            [symbol.symbol_id.name for symbol in verdict["new_lines"]],
+            ["weightedAverage"],
+        )
+
+    def test_condition_c_uses_managed_claude_block_without_legacy_flags(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            ws = bench.make_workspace(repo, Path(tmp) / "wsC", "C")
+            try:
+                context = (ws / "CLAUDE.md").read_bytes()
+                self.assertIn(b"hologram:v2:start", context)
+                self.assertNotIn(b"--embed", context)
+                self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
+            finally:
+                bench.drop_workspace(repo, ws)
+
+    def test_benchmark_readme_labels_a_historical_and_b_c_current(self) -> None:
+        readme = (
+            Path(__file__).resolve().parents[1] / "benchmark" / "README.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Historical condition A", readme)
+        self.assertIn("current conditions B and C", readme)
+        self.assertIn("managed canonical v2 block", readme)
+        for caveat in (
+            "legacy, exploratory, and pre-tier",
+            "`sonnet` is a mutable model alias",
+            "reuse acceptance commands often verify only that a change occurred",
+            "navigation correctness is not automated (`true`)",
+            "40-turn ceiling is not outcome-gated",
+            "n=1 per cell",
+        ):
+            with self.subTest(caveat=caveat):
+                self.assertIn(caveat, readme)
 
 
 if __name__ == "__main__":
