@@ -103,18 +103,15 @@ def load_parser(
     parser_type = getattr(tree_sitter, "Parser", None)
     if not callable(factory) or language_type is None or parser_type is None:
         return None
+    grammar = factory()
+    if not isinstance(grammar, language_type):
+        grammar = language_type(grammar)
     try:
-        grammar = factory()
-        if not isinstance(grammar, language_type):
-            grammar = language_type(grammar)
-        try:
-            return parser_type(grammar)
-        except TypeError:
-            parser = parser_type()
-            parser.language = grammar
-            return parser
-    except Exception:  # noqa: BLE001 - optional parser failures mean unavailable
-        return None
+        return parser_type(grammar)
+    except TypeError:
+        parser = parser_type()
+        parser.language = grammar
+        return parser
 
 
 _load_parser = load_parser
@@ -224,7 +221,9 @@ _CALL_KINDS = frozenset(
 )
 _CONSTRUCT_KINDS = frozenset(
     {
+        "composite_literal",
         "constructor_invocation",
+        "explicit_constructor_invocation",
         "new_expression",
         "object_creation_expression",
         "struct_expression",
@@ -240,8 +239,11 @@ _CALLABLE_KINDS = frozenset(
         "function_definition",
         "function_expression",
         "function_item",
+        "func_literal",
         "function_literal",
+        "closure_expression",
         "lambda_expression",
+        "lambda_literal",
         "method_declaration",
         "method_definition",
     }
@@ -262,12 +264,15 @@ _CONTROL_KINDS: Mapping[str, str] = MappingProxyType(
         "try_statement": "try",
         "try_expression": "try",
         "catch_clause": "catch",
+        "catch_block": "catch",
         "except_clause": "catch",
         "finally_clause": "finally",
         "match_expression": "match",
         "match_statement": "match",
         "switch_expression": "match",
         "switch_statement": "match",
+        "type_switch_statement": "match",
+        "select_statement": "match",
         "when_expression": "match",
         "with_statement": "with",
     }
@@ -275,13 +280,17 @@ _CONTROL_KINDS: Mapping[str, str] = MappingProxyType(
 _TYPE_KINDS = frozenset(
     {
         "array_type",
+        "function_type",
         "generic_type",
         "integral_type",
+        "nullable_type",
+        "predefined_type",
         "primitive_type",
         "scoped_type_identifier",
         "simple_type",
         "type_identifier",
         "user_type",
+        "void_type",
     }
 )
 _IDENTIFIER_KINDS = frozenset(
@@ -292,17 +301,13 @@ _IDENTIFIER_KINDS = frozenset(
         "shorthand_property_identifier",
     }
 )
-_LOCAL_PARENT_KINDS = frozenset(
+_PARAMETER_CONTAINER_KINDS = frozenset(
     {
-        "const_declaration",
-        "declaration",
-        "init_declarator",
-        "lexical_declaration",
-        "local_declaration",
-        "local_variable_declaration",
-        "short_var_declaration",
-        "variable_declaration",
-        "variable_declarator",
+        "class_parameters",
+        "formal_parameters",
+        "function_value_parameters",
+        "parameter_list",
+        "parameters",
     }
 )
 _PARAMETER_KINDS = frozenset(
@@ -315,6 +320,33 @@ _PARAMETER_KINDS = frozenset(
         "rest_parameter",
         "spread_parameter",
         "variadic_parameter",
+    }
+)
+_BODY_KINDS = frozenset(
+    {
+        "block",
+        "compound_statement",
+        "constructor_body",
+        "function_body",
+        "statement_block",
+    }
+)
+_LOCAL_BINDING_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
+    {
+        "catch_formal_parameter": ("name",),
+        "catch_parameter": ("name", "pattern"),
+        "const_declaration": ("name", "pattern"),
+        "declaration": (),
+        "enhanced_for_statement": ("name", "left"),
+        "for_range_clause": ("left",),
+        "init_declarator": ("declarator",),
+        "let_declaration": ("pattern",),
+        "local_declaration": ("name", "pattern"),
+        "resource": ("name",),
+        "short_var_declaration": ("left",),
+        "variable_declaration": ("name", "pattern"),
+        "variable_declarator": ("name", "declarator", "pattern"),
+        "var_spec": ("name",),
     }
 )
 _MEMBER_PARENT_KINDS = frozenset(
@@ -332,24 +364,68 @@ _KEYWORDS = frozenset(
         "await",
         "break",
         "case",
+        "catch",
+        "const",
         "continue",
         "defer",
         "delete",
+        "do",
         "else",
+        "fallthrough",
         "finally",
-        "goto",
+        "for",
+        "foreach",
+        "func",
+        "go",
         "if",
+        "let",
+        "lock",
+        "loop",
+        "goto",
         "import",
         "match",
         "new",
         "raise",
+        "range",
         "return",
+        "select",
+        "self",
+        "super",
         "switch",
+        "synchronized",
+        "this",
         "throw",
         "try",
+        "unsafe",
+        "using",
+        "val",
+        "var",
         "when",
         "while",
+        "with",
         "yield",
+    }
+)
+
+_INTERPOLATED_STRING_KINDS = frozenset(
+    {
+        "interpolated_string_expression",
+        "string_literal",
+        "template_string",
+    }
+)
+_INTERPOLATION_KINDS = frozenset(
+    {
+        "interpolation",
+        "interpolation_expression",
+        "template_substitution",
+    }
+)
+_ARGUMENT_KINDS = frozenset(
+    {
+        "argument_list",
+        "arguments",
+        "value_arguments",
     }
 )
 _OPERATORS = frozenset(
@@ -389,12 +465,22 @@ _OPERATORS = frozenset(
 
 
 def _literal_text(node: object) -> str | None:
+    if not bool(getattr(node, "is_named", True)):
+        return None
     kind = str(getattr(node, "type", "")).casefold()
     if kind in {"true", "false", "boolean", "boolean_literal"}:
         return "<bool>"
     if kind in {"null", "nil", "none", "null_literal"}:
         return "<null>"
-    if "string" in kind or kind in {"char_literal", "character_literal"}:
+    if kind in {
+        "char_literal",
+        "character_literal",
+        "interpolated_string_expression",
+        "raw_string_literal",
+        "string",
+        "string_literal",
+        "template_string",
+    }:
         return "<string>"
     if (
         "number" in kind
@@ -421,12 +507,161 @@ def _is_named_field(parent: object | None, node: object, names: Iterable[str]) -
 
 
 def _call_text(node: object, *, construct: bool) -> str:
-    field_names = ("type", "constructor") if construct else ("name", "function")
+    field_names = (
+        ("type", "constructor", "name") if construct else ("name", "function", "callee")
+    )
     for field_name in field_names:
         field = ast_field(node, field_name)
         if field is not None:
             return ast_text(field)
+    for child in getattr(node, "children", ()):
+        if (
+            bool(getattr(child, "is_named", False))
+            and getattr(child, "type", "") not in _ARGUMENT_KINDS
+        ):
+            return ast_text(child)
     return ast_text(node)
+
+
+def _node_key(node: object) -> tuple[int, int, str]:
+    return (
+        int(getattr(node, "start_byte", 0)),
+        int(getattr(node, "end_byte", 0)),
+        str(getattr(node, "type", "")),
+    )
+
+
+def _identifier_nodes(root: object) -> tuple[object, ...]:
+    if str(getattr(root, "type", "")) in _IDENTIFIER_KINDS:
+        return (root,)
+    found: list[object] = []
+    stack = list(reversed(getattr(root, "children", ())))
+    while stack:
+        node = stack.pop()
+        kind = str(getattr(node, "type", ""))
+        if kind in _TYPE_KINDS:
+            continue
+        if kind in _IDENTIFIER_KINDS:
+            found.append(node)
+            continue
+        stack.extend(reversed(getattr(node, "children", ())))
+    return tuple(found)
+
+
+def _field_roots(node: object, names: Iterable[str]) -> tuple[object, ...]:
+    roots: list[object] = []
+    for name in names:
+        field = ast_field(node, name)
+        if field is not None and all(not _same_node(field, item) for item in roots):
+            roots.append(field)
+    return tuple(roots)
+
+
+def _binding_nodes(node: object, fields: Iterable[str]) -> tuple[object, ...]:
+    roots = _field_roots(node, fields)
+    if roots:
+        return tuple(
+            identifier for root in roots for identifier in _identifier_nodes(root)
+        )
+    return tuple(
+        child
+        for child in getattr(node, "children", ())
+        if str(getattr(child, "type", "")) in _IDENTIFIER_KINDS
+    )
+
+
+def _walk_owned(root: object) -> Iterable[object]:
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        children = getattr(node, "children", ())
+        for child in reversed(children):
+            if str(getattr(child, "type", "")) not in _CALLABLE_KINDS:
+                stack.append(child)
+
+
+def _callable_part(
+    callable_node: object,
+    fields: Iterable[str],
+    kinds: frozenset[str],
+) -> object | None:
+    for field in fields:
+        selected = ast_field(callable_node, field)
+        if selected is not None:
+            return selected
+    children = tuple(getattr(callable_node, "children", ()))
+    for child in children:
+        if str(getattr(child, "type", "")) in kinds:
+            return child
+    stack = list(reversed(children))
+    while stack:
+        node = stack.pop()
+        kind = str(getattr(node, "type", ""))
+        if kind in _CALLABLE_KINDS:
+            continue
+        if kind in kinds:
+            return node
+        stack.extend(reversed(getattr(node, "children", ())))
+    return None
+
+
+def _parameter_keys(parameters: object | None) -> frozenset[tuple[int, int, str]]:
+    if parameters is None:
+        return frozenset()
+    names: list[object] = []
+    for node in _walk_owned(parameters):
+        if str(getattr(node, "type", "")) not in _PARAMETER_KINDS:
+            continue
+        names.extend(_binding_nodes(node, ("name", "pattern", "declarator")))
+    if not names:
+        names.extend(_binding_nodes(parameters, ()))
+    return frozenset(_node_key(node) for node in names)
+
+
+def _local_keys(body: object | None) -> frozenset[tuple[int, int, str]]:
+    if body is None:
+        return frozenset()
+    names: list[object] = []
+    for node in _walk_owned(body):
+        kind = str(getattr(node, "type", ""))
+        fields = _LOCAL_BINDING_FIELDS.get(kind)
+        if fields is not None:
+            bindings = _binding_nodes(node, fields)
+            names.extend(bindings)
+            if kind == "variable_declaration" and not bindings:
+                assignments = (
+                    child
+                    for child in getattr(node, "children", ())
+                    if str(getattr(child, "type", "")) == "assignment_statement"
+                )
+                for assignment in assignments:
+                    variable_lists = (
+                        child
+                        for child in getattr(assignment, "children", ())
+                        if str(getattr(child, "type", "")) == "variable_list"
+                    )
+                    for variables in variable_lists:
+                        names.extend(_identifier_nodes(variables))
+    return frozenset(_node_key(node) for node in names)
+
+
+def _kotlin_constructor(node: object) -> bool:
+    if str(getattr(node, "type", "")) != "call_expression":
+        return False
+    callee: object | None = None
+    for child in getattr(node, "children", ()):
+        if (
+            bool(getattr(child, "is_named", False))
+            and str(getattr(child, "type", "")) not in _ARGUMENT_KINDS
+        ):
+            callee = child
+            break
+    if callee is None:
+        return False
+    identifiers = _identifier_nodes(callee)
+    name = ast_text(identifiers[-1] if identifiers else callee)
+    return bool(name) and name[0].isupper()
 
 
 class _TreeSitterBodyEventWalker:
@@ -434,18 +669,29 @@ class _TreeSitterBodyEventWalker:
         self.source = source
         self.callable_node = callable_node
         self.events: list[BodyEvent] = []
+        self.parameter_keys: frozenset[tuple[int, int, str]] = frozenset()
+        self.local_keys: frozenset[tuple[int, int, str]] = frozenset()
 
     def event(self, kind: BodyEventKind, text: str, node: object) -> None:
         self.events.append(BodyEvent(kind, text, node_span(self.source, node)))
 
     def walk(self) -> tuple[BodyEvent, ...]:
-        parameters = ast_field(self.callable_node, "parameters")
+        parameters = _callable_part(
+            self.callable_node,
+            ("parameters", "parameter", "value_parameters"),
+            _PARAMETER_CONTAINER_KINDS,
+        )
+        body = _callable_part(
+            self.callable_node,
+            ("body",),
+            _BODY_KINDS,
+        )
+        self.parameter_keys = _parameter_keys(parameters)
+        self.local_keys = _local_keys(body)
         if parameters is not None:
-            self.visit(parameters, None, in_parameters=True)
-        body = ast_field(self.callable_node, "body")
-        if body is None:
-            body = self.callable_node
-        self.visit(body, self.callable_node, in_parameters=False, is_root=True)
+            self.visit(parameters, None)
+        if body is not None:
+            self.visit(body, self.callable_node, is_root=True)
         result = tuple(self.events)
         validate_body_events(result)
         return result
@@ -455,7 +701,6 @@ class _TreeSitterBodyEventWalker:
         node: object,
         parent: object | None,
         *,
-        in_parameters: bool,
         is_root: bool = False,
     ) -> None:
         kind = str(getattr(node, "type", ""))
@@ -466,7 +711,10 @@ class _TreeSitterBodyEventWalker:
         if control is not None:
             self.event(BodyEventKind.CONTROL_ENTER, control, node)
 
-        if kind in _CONSTRUCT_KINDS:
+        is_construct = kind in _CONSTRUCT_KINDS or (
+            self.source.language is Language.KOTLIN and _kotlin_constructor(node)
+        )
+        if is_construct:
             self.event(
                 BodyEventKind.CONSTRUCT,
                 _call_text(node, construct=True),
@@ -478,6 +726,10 @@ class _TreeSitterBodyEventWalker:
         literal = _literal_text(node)
         if literal is not None:
             self.event(BodyEventKind.LITERAL, literal, node)
+            if kind in _INTERPOLATED_STRING_KINDS:
+                for child in getattr(node, "children", ()):
+                    if str(getattr(child, "type", "")) in _INTERPOLATION_KINDS:
+                        self.visit(child, node)
             if control is not None:
                 self.event(BodyEventKind.CONTROL_EXIT, control, node)
             return
@@ -490,16 +742,10 @@ class _TreeSitterBodyEventWalker:
                 return
         elif kind in _IDENTIFIER_KINDS:
             parent_kind = str(getattr(parent, "type", ""))
-            if in_parameters and (
-                parent_kind in _PARAMETER_KINDS
-                and _is_named_field(parent, node, ("name", "pattern"))
-            ):
+            key = _node_key(node)
+            if key in self.parameter_keys:
                 event_kind = BodyEventKind.PARAM
-            elif parent_kind in _LOCAL_PARENT_KINDS and _is_named_field(
-                parent,
-                node,
-                ("declarator", "left", "name", "pattern"),
-            ):
+            elif key in self.local_keys:
                 event_kind = BodyEventKind.LOCAL
             elif parent_kind in _MEMBER_PARENT_KINDS and _is_named_field(
                 parent,
@@ -512,15 +758,17 @@ class _TreeSitterBodyEventWalker:
             else:
                 event_kind = BodyEventKind.NAME
             self.event(event_kind, ast_text(node), node)
-        elif not bool(getattr(node, "is_named", True)):
+        else:
             text = ast_text(node)
             if text in _KEYWORDS:
                 self.event(BodyEventKind.KEYWORD, text, node)
-            elif text in _OPERATORS or re.fullmatch(r"[+*/%<>=!&|^~?-]+", text):
+            elif not bool(getattr(node, "is_named", True)) and (
+                text in _OPERATORS or re.fullmatch(r"[+*/%<>=!&|^~?-]+", text)
+            ):
                 self.event(BodyEventKind.OPERATOR, text, node)
 
         for child in getattr(node, "children", ()):
-            self.visit(child, node, in_parameters=in_parameters)
+            self.visit(child, node)
 
         if control is not None:
             self.event(BodyEventKind.CONTROL_EXIT, control, node)

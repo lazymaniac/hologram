@@ -45,6 +45,29 @@ from .state import (
     read_digest_state,
 )
 
+_LEGACY_COMPAT_NAMES = frozenset(
+    {
+        "Symbol",
+        "_PARSERS",
+        "_dep_lines",
+        "_digest_state",
+        "_extract_java",
+        "_hook_python",
+        "_missing_parser_langs",
+        "_reduce_for_embed",
+        "_state_hash",
+        "_tree_lines",
+        "build_digest",
+        "embed_digest",
+        "extract_file",
+        "has_parser",
+        "legacy",
+        "render_simple",
+        "run_cli",
+        "scan_files",
+    }
+)
+
 __all__ = [
     "CONFIG_NAME",
     "CONFIG_SCHEMA_VERSION",
@@ -99,6 +122,8 @@ __all__ = [
 
 def __getattr__(name: str):
     """Temporarily expose legacy module attributes for v1 compatibility."""
+    if name not in _LEGACY_COMPAT_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     legacy = import_module(".legacy", __name__)
     value = legacy if name == "legacy" else getattr(legacy, name)
     globals()[name] = value

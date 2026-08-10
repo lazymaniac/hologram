@@ -305,19 +305,26 @@ class _AstBodyEventWalker:
         arguments = getattr(self.callable_node, "args", None)
         if isinstance(arguments, ast.arguments):
             positional = [*arguments.posonlyargs, *arguments.args]
-            parameter_nodes: list[ast.arg] = [*positional]
+            positional_defaults: list[ast.expr | None] = [None] * (
+                len(positional) - len(arguments.defaults)
+            )
+            positional_defaults.extend(arguments.defaults)
+            for parameter, default in zip(
+                positional,
+                positional_defaults,
+                strict=True,
+            ):
+                self.visit_parameter(parameter, default)
             if arguments.vararg is not None:
-                parameter_nodes.append(arguments.vararg)
-            parameter_nodes.extend(arguments.kwonlyargs)
+                self.visit_parameter(arguments.vararg, None)
+            for parameter, default in zip(
+                arguments.kwonlyargs,
+                arguments.kw_defaults,
+                strict=True,
+            ):
+                self.visit_parameter(parameter, default)
             if arguments.kwarg is not None:
-                parameter_nodes.append(arguments.kwarg)
-            for parameter in parameter_nodes:
-                self.event(BodyEventKind.PARAM, parameter.arg, parameter)
-                if parameter.annotation is not None:
-                    self.visit_annotation(parameter.annotation)
-            for default in [*arguments.defaults, *arguments.kw_defaults]:
-                if default is not None:
-                    self.visit(default)
+                self.visit_parameter(arguments.kwarg, None)
         returns = getattr(self.callable_node, "returns", None)
         if returns is not None:
             self.visit_annotation(returns)
@@ -330,6 +337,30 @@ class _AstBodyEventWalker:
         result = tuple(self.events)
         validate_body_events(result)
         return result
+
+    def visit_parameter(
+        self,
+        parameter: ast.arg,
+        default: ast.expr | None,
+    ) -> None:
+        span = ast_span(self.source, parameter)
+        name_span = SourceSpan(
+            self.source.file,
+            span.start_line,
+            span.start_column,
+            span.start_line,
+            span.start_column + len(parameter.arg.encode("utf-8")),
+        )
+        self.event(
+            BodyEventKind.PARAM,
+            parameter.arg,
+            parameter,
+            span=name_span,
+        )
+        if parameter.annotation is not None:
+            self.visit_annotation(parameter.annotation)
+        if default is not None:
+            self.visit(default)
 
     def visit_annotation(self, node: ast.AST) -> None:
         if isinstance(node, ast.Name):

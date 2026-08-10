@@ -6,6 +6,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 from hologram.model import (
@@ -62,6 +63,43 @@ def source(
         raw,
         hashlib.sha256(raw).hexdigest(),
     )
+
+
+def token_span(
+    snapshot: SourceFile,
+    line: int,
+    token: str,
+    *,
+    occurrence: int = 1,
+) -> SourceSpan:
+    raw_line = snapshot.raw.splitlines()[line - 1]
+    needle = token.encode("utf-8")
+    start = -1
+    for _ in range(occurrence):
+        start = raw_line.find(needle, start + 1)
+        if start < 0:
+            raise AssertionError(f"{token!r} occurrence {occurrence} not found")
+    return SourceSpan(snapshot.file, line, start, line, start + len(needle))
+
+
+def tree_body_fixture(
+    test: unittest.TestCase,
+    language: Language,
+    raw: bytes,
+    callable_kinds: tuple[str, ...],
+) -> tuple[SourceFile, Any, Any, tuple[Any, ...]]:
+    parser = ParserRegistry().parser_for(language)
+    if parser is None:
+        test.skipTest(f"tree-sitter grammar for {language.value} is not installed")
+    snapshot = source(language, file=f"probe.{language.value}", raw=raw)
+    tree = cast(Any, parser).parse(snapshot.raw)
+    test.assertFalse(tree.root_node.has_error, str(tree.root_node))
+    callables = ast_collect(tree.root_node, callable_kinds)
+    test.assertTrue(callables, f"no callable node for {language.value}")
+    callable_node = callables[0]
+    events = body_events(snapshot, callable_node)
+    validate_body_events(events)
+    return snapshot, tree, callable_node, events
 
 
 class _FakeLanguage:
@@ -181,6 +219,101 @@ class ParserRuntimeTest(unittest.TestCase):
         self.assertIn("RuntimeError", result.diagnostics[0].message)
         self.assertIn("broken extraction", result.diagnostics[0].message)
 
+    def test_parser_loader_exception_is_cached_parser_crash_diagnostic(self) -> None:
+        snapshot = source()
+        calls = 0
+
+        def load(name: str) -> object | None:
+            nonlocal calls
+            if name == "tree_sitter_java":
+                calls += 1
+                raise RuntimeError("grammar discovery broke")
+            return None
+
+        registry = ParserRegistry(module_loader=load)
+
+        first = extract_file(snapshot, registry=registry)
+        second = extract_file(snapshot, registry=registry)
+
+        self.assertEqual(calls, 1)
+        for result in (first, second):
+            self.assertIs(result.source, snapshot)
+            self.assertEqual(len(result.diagnostics), 1)
+            self.assertEqual(result.diagnostics[0].code, "parser-crash")
+            self.assertEqual(result.diagnostics[0].severity, DiagnosticSeverity.ERROR)
+            self.assertIn("RuntimeError", result.diagnostics[0].message)
+            self.assertIn("grammar discovery broke", result.diagnostics[0].message)
+
+    def test_parser_construction_exception_is_parser_crash_diagnostic(self) -> None:
+        snapshot = source()
+
+        def broken_grammar() -> object:
+            raise RuntimeError("grammar capsule broke")
+
+        modules = {
+            "tree_sitter_java": SimpleNamespace(language=broken_grammar),
+            "tree_sitter": SimpleNamespace(Language=_FakeLanguage, Parser=_FakeParser),
+        }
+        registry = ParserRegistry(module_loader=modules.get)
+
+        result = extract_file(snapshot, registry=registry)
+
+        self.assertEqual(result.diagnostics[0].code, "parser-crash")
+        self.assertIn("RuntimeError", result.diagnostics[0].message)
+        self.assertIn("grammar capsule broke", result.diagnostics[0].message)
+
+    def test_extractor_loader_exception_is_cached_extractor_crash_diagnostic(
+        self,
+    ) -> None:
+        snapshot = source(Language.PYTHON, file="answer.py", raw=b"answer = 42\n")
+        calls = 0
+
+        def load(name: str) -> object | None:
+            nonlocal calls
+            if name == "hologram.parsers.python":
+                calls += 1
+                raise RuntimeError("extractor discovery broke")
+            return None
+
+        registry = ParserRegistry(module_loader=load)
+
+        first = extract_file(snapshot, registry=registry)
+        second = extract_file(snapshot, registry=registry)
+
+        self.assertEqual(calls, 1)
+        for result in (first, second):
+            self.assertIs(result.source, snapshot)
+            self.assertEqual(len(result.diagnostics), 1)
+            self.assertEqual(result.diagnostics[0].code, "extractor-crash")
+            self.assertIn("RuntimeError", result.diagnostics[0].message)
+            self.assertIn("extractor discovery broke", result.diagnostics[0].message)
+
+    def test_falsey_module_loader_is_honored(self) -> None:
+        snapshot = source(Language.PYTHON, file="answer.py", raw=b"answer = 42\n")
+
+        def fake_extract(snapshot: SourceFile, parser: object | None) -> FileIR:
+            return FileIR(snapshot)
+
+        class FalseyLoader:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def __bool__(self) -> bool:
+                return False
+
+            def __call__(self, name: str) -> object | None:
+                self.calls.append(name)
+                if name == "hologram.parsers.python":
+                    return SimpleNamespace(extract=fake_extract)
+                return None
+
+        loader = FalseyLoader()
+
+        result = extract_file(snapshot, registry=ParserRegistry(module_loader=loader))
+
+        self.assertEqual(result.diagnostics, ())
+        self.assertEqual(loader.calls, ["hologram.parsers.python"])
+
     def test_process_control_exceptions_from_extractors_propagate(self) -> None:
         snapshot = source(Language.PYTHON, file="answer.py", raw=b"answer = 42\n")
 
@@ -204,12 +337,42 @@ class ParserRuntimeTest(unittest.TestCase):
                 with self.assertRaises(type(exception)):
                     extract_file(snapshot, registry=registry)
 
+    def test_process_control_exceptions_from_module_loaders_propagate(self) -> None:
+        cases = (
+            (Language.JAVA, "tree_sitter_java", KeyboardInterrupt()),
+            (Language.JAVA, "tree_sitter_java", SystemExit(3)),
+            (Language.PYTHON, "hologram.parsers.python", KeyboardInterrupt()),
+            (Language.PYTHON, "hologram.parsers.python", SystemExit(4)),
+        )
+        for language, target, exception in cases:
+            with self.subTest(language=language, exception=type(exception).__name__):
+                snapshot = source(
+                    language,
+                    file="probe.py" if language is Language.PYTHON else "Probe.java",
+                )
+
+                def load(
+                    name: str,
+                    error: BaseException = exception,
+                    target_name: str = target,
+                ) -> object | None:
+                    if name == target_name:
+                        raise error
+                    return None
+
+                with self.assertRaises(type(exception)):
+                    extract_file(snapshot, registry=ParserRegistry(module_loader=load))
+
     def test_importing_package_does_not_import_optional_grammars_or_extractors(
         self,
     ) -> None:
         code = """
 import sys
+for name in tuple(sys.modules):
+    if name == 'hologram' or name.startswith('hologram.'):
+        del sys.modules[name]
 import hologram
+from hologram import parsers
 forbidden = {
     'tree_sitter_java',
     'tree_sitter_typescript',
@@ -223,13 +386,16 @@ forbidden = {
     'tree_sitter_html',
 }
 loaded = sorted(forbidden.intersection(sys.modules))
+legacy = sorted(name for name in sys.modules if name == 'hologram.legacy')
 extractors = sorted(
     name for name in sys.modules
     if name.startswith('hologram.parsers.')
     and name.rsplit('.', 1)[-1] not in {'api', 'common', 'treesitter'}
 )
-if loaded or extractors:
-    raise SystemExit(f'eager imports: {loaded!r} {extractors!r}')
+if loaded or legacy or extractors:
+    raise SystemExit(f'eager imports: {loaded!r} {legacy!r} {extractors!r}')
+if parsers.ParserRegistry is not hologram.parsers.ParserRegistry:
+    raise SystemExit('canonical parser package mismatch')
 """
         result = subprocess.run(
             [sys.executable, "-c", code],
@@ -407,6 +573,46 @@ class ParserHelperTest(unittest.TestCase):
         self.assertTrue(any(event.text == "<null>" for event in events))
         self.assertNotIn("hidden", {event.text for event in events})
 
+    def test_stdlib_parameter_defaults_are_emitted_in_source_order(self) -> None:
+        raw = (
+            b"def run(first=alpha(), second=beta(), *, "
+            b"third=gamma(), fourth: Kind=delta()):\n"
+            b"    body()\n"
+        )
+        snapshot = source(Language.PYTHON, file="defaults.py", raw=raw)
+        callable_node = ast.parse(snapshot.text).body[0]
+
+        events = ast_body_events(snapshot, callable_node)
+        relevant = tuple(
+            (event.kind, event.text)
+            for event in events
+            if event.kind
+            in {BodyEventKind.PARAM, BodyEventKind.TYPE, BodyEventKind.CALL}
+        )
+
+        self.assertEqual(
+            relevant,
+            (
+                (BodyEventKind.PARAM, "first"),
+                (BodyEventKind.CALL, "alpha"),
+                (BodyEventKind.PARAM, "second"),
+                (BodyEventKind.CALL, "beta"),
+                (BodyEventKind.PARAM, "third"),
+                (BodyEventKind.CALL, "gamma"),
+                (BodyEventKind.PARAM, "fourth"),
+                (BodyEventKind.TYPE, "Kind"),
+                (BodyEventKind.CALL, "delta"),
+                (BodyEventKind.CALL, "body"),
+            ),
+        )
+        for name in ("first", "second", "third", "fourth"):
+            event = next(
+                item
+                for item in events
+                if item.kind is BodyEventKind.PARAM and item.text == name
+            )
+            self.assertEqual(event.span, token_span(snapshot, 1, name))
+
     def test_tree_sitter_spans_and_call_events_share_utf8_byte_coordinates(
         self,
     ) -> None:
@@ -429,6 +635,282 @@ class ParserHelperTest(unittest.TestCase):
             (BodyEventKind.CALL, span),
             {(event.kind, event.span) for event in events},
         )
+
+    def test_interpolated_strings_keep_one_literal_and_embedded_facts(self) -> None:
+        cases = (
+            (
+                Language.TYPESCRIPT,
+                (
+                    b"function run(value: string) {\n"
+                    b"  const text = `prefix ${target(value)} suffix`;\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                "template_string",
+            ),
+            (
+                Language.KOTLIN,
+                (
+                    b"fun run(value: String) {\n"
+                    b'  val text = "prefix ${target(value)} suffix"\n'
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                "string_literal",
+            ),
+        )
+        for language, raw, callable_kinds, string_kind in cases:
+            with self.subTest(language=language):
+                snapshot, tree, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                string_node = ast_collect(tree.root_node, (string_kind,))[0]
+                target_call = next(
+                    node
+                    for node in ast_collect(tree.root_node, ("call_expression",))
+                    if b"target" in node.text
+                )
+                target_name = next(
+                    node
+                    for node in ast_collect(target_call, ("identifier",))
+                    if node.text == b"target"
+                )
+
+                literals = [
+                    event for event in events if event.kind is BodyEventKind.LITERAL
+                ]
+                self.assertEqual(
+                    [(event.text, event.span) for event in literals],
+                    [("<string>", node_span(snapshot, string_node))],
+                )
+                event_pairs = {(event.kind, event.span) for event in events}
+                self.assertIn(
+                    (BodyEventKind.CALL, node_span(snapshot, target_call)),
+                    event_pairs,
+                )
+                self.assertIn(
+                    (BodyEventKind.NAME, node_span(snapshot, target_name)),
+                    event_pairs,
+                )
+
+    def test_tree_sitter_callable_shapes_bind_params_and_locals_exactly(self) -> None:
+        cases = (
+            (
+                Language.KOTLIN,
+                (
+                    b"fun run(param: Int) {\n"
+                    b"  val local = param\n"
+                    b"  fun nested() { hidden() }\n"
+                    b"  target(local)\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                1,
+                2,
+            ),
+            (
+                Language.GO,
+                (
+                    b"package probe\n"
+                    b"func run(param int) {\n"
+                    b"  local := param\n"
+                    b"  nested := func() { hidden() }\n"
+                    b"  target(local)\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                2,
+                3,
+            ),
+            (
+                Language.RUST,
+                (
+                    b"fn run(param: i32) {\n"
+                    b"  let local = param;\n"
+                    b"  let nested = || hidden();\n"
+                    b"  target(local);\n"
+                    b"}\n"
+                ),
+                ("function_item",),
+                1,
+                2,
+            ),
+        )
+        for language, raw, callable_kinds, parameter_line, local_line in cases:
+            with self.subTest(language=language):
+                snapshot, _, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                parameter_span = token_span(snapshot, parameter_line, "param")
+                local_span = token_span(snapshot, local_line, "local")
+                event_pairs = {(event.kind, event.span) for event in events}
+
+                self.assertIn((BodyEventKind.PARAM, parameter_span), event_pairs)
+                self.assertIn((BodyEventKind.LOCAL, local_span), event_pairs)
+                self.assertNotIn((BodyEventKind.NAME, parameter_span), event_pairs)
+                self.assertNotIn((BodyEventKind.NAME, local_span), event_pairs)
+                self.assertIn(
+                    "target",
+                    {
+                        event.text
+                        for event in events
+                        if event.kind is BodyEventKind.CALL
+                    },
+                )
+                self.assertNotIn("hidden", {event.text for event in events})
+
+    def test_tree_sitter_declaration_bindings_exclude_initializer_uses(self) -> None:
+        cases = (
+            (Language.C, b"int run(int param) {\n  int local = param;\n}\n"),
+            (Language.CPP, b"int run(int param) {\n  int local = param;\n}\n"),
+        )
+        for language, raw in cases:
+            with self.subTest(language=language):
+                snapshot, _, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    ("function_definition",),
+                )
+                local_span = token_span(snapshot, 2, "local")
+                initializer_span = token_span(snapshot, 2, "param")
+                event_pairs = {(event.kind, event.span) for event in events}
+
+                self.assertIn((BodyEventKind.LOCAL, local_span), event_pairs)
+                self.assertNotIn((BodyEventKind.NAME, local_span), event_pairs)
+                self.assertIn((BodyEventKind.NAME, initializer_span), event_pairs)
+                self.assertNotIn((BodyEventKind.LOCAL, initializer_span), event_pairs)
+
+    def test_lua_direct_parameters_and_local_lists_are_bindings(self) -> None:
+        raw = (
+            b"function run(first, second)\n"
+            b"  local local_one, local_two = first, second\n"
+            b"  target(local_one, local_two)\n"
+            b"end\n"
+        )
+        snapshot, _, _, events = tree_body_fixture(
+            self,
+            Language.LUA,
+            raw,
+            ("function_declaration",),
+        )
+        event_pairs = {(event.kind, event.span) for event in events}
+
+        for name, line in (
+            ("first", 1),
+            ("second", 1),
+            ("local_one", 2),
+            ("local_two", 2),
+        ):
+            expected_kind = (
+                BodyEventKind.PARAM if line == 1 else BodyEventKind.LOCAL
+            )
+            span = token_span(snapshot, line, name)
+            self.assertIn((expected_kind, span), event_pairs)
+            self.assertNotIn((BodyEventKind.NAME, span), event_pairs)
+
+    def test_tree_sitter_construction_kinds_use_exact_expression_spans(self) -> None:
+        cases = (
+            (
+                Language.JAVA,
+                b"class Probe {\n  Probe() { this(1); }\n  Probe(int value) {}\n}\n",
+                ("constructor_declaration",),
+                "explicit_constructor_invocation",
+            ),
+            (
+                Language.GO,
+                (
+                    b"package probe\n"
+                    b"type Item struct { Value int }\n"
+                    b"func run() {\n"
+                    b"  local := Item{Value: 1}\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                "composite_literal",
+            ),
+            (
+                Language.KOTLIN,
+                (
+                    b"class Widget\n"
+                    b"fun run(value: Widget?) {\n"
+                    b"  val made = Widget()\n"
+                    b"  target(value)\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                "call_expression",
+            ),
+        )
+        for language, raw, callable_kinds, construct_kind in cases:
+            with self.subTest(language=language):
+                snapshot, tree, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                candidates = ast_collect(tree.root_node, (construct_kind,))
+                if language is Language.KOTLIN:
+                    candidates = [
+                        node for node in candidates if node.text == b"Widget()"
+                    ]
+                self.assertEqual(len(candidates), 1)
+                expected = node_span(snapshot, candidates[0])
+                construction_spans = {
+                    event.span
+                    for event in events
+                    if event.kind is BodyEventKind.CONSTRUCT
+                }
+
+                self.assertEqual(construction_spans, {expected})
+
+    def test_java_control_keywords_and_catch_binding_use_token_spans(self) -> None:
+        raw = (
+            b"class Probe { void run(int limit) {\n"
+            b"  for (int i = 0; i < limit; i++) {\n"
+            b"    try { target(); } catch (Exception error) { recover(error); }\n"
+            b"  }\n"
+            b"} }\n"
+        )
+        snapshot, tree, _, events = tree_body_fixture(
+            self,
+            Language.JAVA,
+            raw,
+            ("method_declaration",),
+        )
+        for_node = ast_collect(tree.root_node, ("for",))[0]
+        catch_node = ast_collect(tree.root_node, ("catch",))[0]
+        catch_parameter = next(
+            node
+            for node in ast_collect(tree.root_node, ("identifier",))
+            if node.text == b"error" and node.start_point.row == 2
+        )
+        event_pairs = {(event.kind, event.span) for event in events}
+
+        self.assertIn(
+            (BodyEventKind.KEYWORD, node_span(snapshot, for_node)),
+            event_pairs,
+        )
+        self.assertIn(
+            (BodyEventKind.KEYWORD, node_span(snapshot, catch_node)),
+            event_pairs,
+        )
+        self.assertIn(
+            (BodyEventKind.LOCAL, node_span(snapshot, catch_parameter)),
+            event_pairs,
+        )
+        self.assertNotIn(
+            (BodyEventKind.NAME, node_span(snapshot, catch_parameter)),
+            event_pairs,
+        )
+        validate_body_events(events)
 
 
 if __name__ == "__main__":

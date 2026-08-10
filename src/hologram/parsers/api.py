@@ -82,10 +82,14 @@ class ParserRegistry:
         *,
         module_loader: Callable[[str], object | None] | None = None,
     ) -> None:
-        self._module_loader = module_loader or importlib.import_module
+        self._module_loader = (
+            importlib.import_module if module_loader is None else module_loader
+        )
         self._parser_cache: dict[Language, object | None] = {}
+        self._parser_errors: dict[Language, Exception] = {}
         self._version_cache: dict[Language, str] = {}
         self._extractor_cache: dict[Language, Extractor | None] = {}
+        self._extractor_errors: dict[Language, Exception] = {}
 
     def has_parser(self, language: Language) -> bool:
         if language in {Language.PYTHON, Language.HELM}:
@@ -97,7 +101,13 @@ class ParserRegistry:
             return None
         if language in self._parser_cache:
             return self._parser_cache[language]
-        parser = load_parser(language, self._module_loader)
+        try:
+            parser = load_parser(language, self._module_loader)
+        except Exception as error:  # noqa: BLE001 - cached discovery boundary
+            self._parser_cache[language] = None
+            self._parser_errors[language] = error
+            self._version_cache[language] = "missing"
+            return None
         self._parser_cache[language] = parser
         self._version_cache[language] = (
             grammar_version(language) if parser is not None else "missing"
@@ -120,20 +130,31 @@ class ParserRegistry:
 
     def _extractor_for(self, language: Language) -> Extractor | None:
         if language not in self._extractor_cache:
-            self._extractor_cache[language] = _extractors(
-                language,
-                self._module_loader,
-            )
+            try:
+                extractor = _extractors(language, self._module_loader)
+            except Exception as error:  # noqa: BLE001 - cached discovery boundary
+                extractor = None
+                self._extractor_errors[language] = error
+            self._extractor_cache[language] = extractor
         return self._extractor_cache[language]
+
+    def _parser_error(self, language: Language) -> Exception | None:
+        return self._parser_errors.get(language)
+
+    def _extractor_error(self, language: Language) -> Exception | None:
+        return self._extractor_errors.get(language)
 
 
 DEFAULT_REGISTRY = ParserRegistry()
 
 
 def _parser_version(registry: ParserProvider, language: Language) -> str | None:
-    if isinstance(registry, ParserRegistry):
-        return registry._reported_version(language)
-    return registry.versions().get(language.value)
+    try:
+        if isinstance(registry, ParserRegistry):
+            return registry._reported_version(language)
+        return registry.versions().get(language.value)
+    except Exception:  # noqa: BLE001 - diagnostics must not be masked by metadata
+        return None
 
 
 def _error_file(
@@ -156,19 +177,73 @@ def extract_file(
     registry: ParserProvider = DEFAULT_REGISTRY,
 ) -> FileIR:
     language = source.language
-    if not registry.has_parser(language):
+    try:
+        has_parser = registry.has_parser(language)
+    except Exception as error:  # noqa: BLE001 - provider discovery boundary
+        return _error_file(
+            source,
+            registry,
+            "parser-crash",
+            f"{source.file}: {language.value} parser discovery crashed: "
+            f"{type(error).__name__}: {error}",
+        )
+    parser_error = (
+        registry._parser_error(language)
+        if isinstance(registry, ParserRegistry)
+        else None
+    )
+    if parser_error is not None:
+        return _error_file(
+            source,
+            registry,
+            "parser-crash",
+            f"{source.file}: {language.value} parser discovery crashed: "
+            f"{type(parser_error).__name__}: {parser_error}",
+        )
+    if not has_parser:
         return _error_file(
             source,
             registry,
             "missing-parser",
             f"{source.file}: parser is unavailable for {language.value}",
         )
-    parser = registry.parser_for(language)
-    extractor = (
-        registry._extractor_for(language)
+    try:
+        parser = registry.parser_for(language)
+    except Exception as error:  # noqa: BLE001 - provider discovery boundary
+        return _error_file(
+            source,
+            registry,
+            "parser-crash",
+            f"{source.file}: {language.value} parser discovery crashed: "
+            f"{type(error).__name__}: {error}",
+        )
+    try:
+        extractor = (
+            registry._extractor_for(language)
+            if isinstance(registry, ParserRegistry)
+            else _extractors(language)
+        )
+    except Exception as error:  # noqa: BLE001 - extractor discovery boundary
+        return _error_file(
+            source,
+            registry,
+            "extractor-crash",
+            f"{source.file}: {language.value} extractor discovery crashed: "
+            f"{type(error).__name__}: {error}",
+        )
+    extractor_error = (
+        registry._extractor_error(language)
         if isinstance(registry, ParserRegistry)
-        else _extractors(language)
+        else None
     )
+    if extractor_error is not None:
+        return _error_file(
+            source,
+            registry,
+            "extractor-crash",
+            f"{source.file}: {language.value} extractor discovery crashed: "
+            f"{type(extractor_error).__name__}: {extractor_error}",
+        )
     if extractor is None:
         return _error_file(
             source,
