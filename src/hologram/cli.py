@@ -32,6 +32,13 @@ from .context import (
     read_target_bytes,
     render_managed_block,
 )
+from .diff import (
+    DiffInput,
+    DiffReport,
+    RevisionError,
+    analyze_revision,
+    compare_projects,
+)
 from .hooks import (
     UnsupportedHookError,
     preflight_precommit,
@@ -257,6 +264,22 @@ def _run_check(root: object, config_path: object) -> bool:
     return fresh
 
 
+def _run_diff(root: object, config_path: object, rev: object) -> DiffReport:
+    if not isinstance(rev, str):
+        raise _DeliveryUsageError("rev must be str")
+    resolved, config = _load_command_inputs(root, config_path)
+    artifact = create_artifact(resolved, config)
+    try:
+        current = DiffInput(artifact.analyzed, artifact.render_ir)
+    except (TypeError, ValueError) as error:
+        raise _ArtifactError(f"current diff model is invalid: {error}") from error
+    previous = analyze_revision(resolved, config, rev)
+    try:
+        return compare_projects(previous, current)
+    except (TypeError, ValueError) as error:
+        raise _ArtifactError(f"semantic diff model is invalid: {error}") from error
+
+
 def _validate_quiet(quiet: object) -> bool:
     if not isinstance(quiet, bool):
         raise _DeliveryUsageError("quiet must be bool")
@@ -419,6 +442,29 @@ def command_check(root: Path, config_path: Path, *, quiet: bool) -> int:
     return EXIT_OK
 
 
+def command_diff(
+    root: Path,
+    config_path: Path,
+    rev: str,
+    *,
+    quiet: bool,
+) -> int:
+    """Compare the current canonical model with one committed revision."""
+
+    try:
+        silent = _validate_quiet(quiet)
+        report = _run_diff(root, config_path, rev)
+    except (ConfigError, AtomicWriteError, _DeliveryUsageError, OSError) as error:
+        _diagnose(error)
+        return EXIT_USAGE
+    except (IncompleteBuildError, RevisionError, _ArtifactError) as error:
+        _diagnose(error)
+        return EXIT_INCOMPLETE
+    if not silent:
+        sys.stdout.write(report.text)
+    return EXIT_OK
+
+
 def command_init(
     root: Path,
     config_path: Path,
@@ -465,6 +511,7 @@ __all__ = [
     "BuildArtifact",
     "command_build",
     "command_check",
+    "command_diff",
     "command_init",
     "create_artifact",
 ]

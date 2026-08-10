@@ -24,6 +24,7 @@ from hologram.cli import (
     BuildArtifact,
     command_build,
     command_check,
+    command_diff,
     command_init,
     create_artifact,
 )
@@ -157,6 +158,7 @@ class BuildCheckServiceTest(unittest.TestCase):
                 "BuildArtifact",
                 "command_build",
                 "command_check",
+                "command_diff",
                 "command_init",
                 "create_artifact",
             ],
@@ -185,6 +187,15 @@ class BuildCheckServiceTest(unittest.TestCase):
                 init_signature.parameters[name].kind,
                 inspect.Parameter.KEYWORD_ONLY,
             )
+        diff_signature = inspect.signature(command_diff)
+        self.assertEqual(
+            tuple(diff_signature.parameters),
+            ("root", "config_path", "rev", "quiet"),
+        )
+        self.assertEqual(
+            diff_signature.parameters["quiet"].kind,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
 
     def test_create_artifact_uses_one_snapshot_and_exact_identity_order(self) -> None:
         root, _, config = _configured_root(self.base, "artifact")
