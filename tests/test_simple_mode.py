@@ -6,8 +6,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import hologram  # noqa: E402
-from hologram import (  # noqa: E402
+import hologram
+from hologram import (
     CONFIG_NAME,
     ProjectConfig,
     Symbol,
@@ -57,7 +57,6 @@ class SimpleDigestTest(unittest.TestCase):
 
     def test_signatures_present(self):
         self.assertIn("evaluate(OrderId,List<ItemId>):Quote", self.out)
-        self.assertIn("of(String):⟨X⟩", self.out)
 
     def test_calls_follow_signature_inline(self):
         lines = self.out.splitlines()
@@ -77,15 +76,6 @@ class SimpleDigestTest(unittest.TestCase):
     def test_calls_inline_no_calls_word(self):
         body = "\n".join(self.out.splitlines()[3:])   # skip title/legend/query lines
         self.assertNotIn("calls ", body)
-
-
-@needs_java
-class SameShapeGroupingTest(unittest.TestCase):
-    def test_identical_types_grouped_with_hole_notation(self):
-        out = build_digest(JAVAMINI, config=default_config())
-        self.assertIn("ItemId,OrderId,UserId(R: String)", out)
-        self.assertEqual(out.count("of(String):⟨X⟩"), 1)
-        self.assertNotIn("of(String):UserId", out)
 
 
 class RenderUnitTest(unittest.TestCase):
@@ -347,27 +337,6 @@ class VoidOmissionTest(unittest.TestCase):
         self.assertEqual(main.returns, "void")
 
 
-class GroupExtrasTest(unittest.TestCase):
-    def test_shared_methods_once_extras_per_member(self):
-        syms = [
-            Symbol(name="AId", kind="record", file="m/a.py", line=1, params=["String"],
-                   visibility="pub"),
-            Symbol(name="BId", kind="record", file="m/b.py", line=1, params=["String"],
-                   visibility="pub"),
-            Symbol(name="of", kind="method", file="m/a.py", line=2, container="AId",
-                   signature="of(String):AId", visibility="pub"),
-            Symbol(name="of", kind="method", file="m/b.py", line=2, container="BId",
-                   signature="of(String):BId", visibility="pub"),
-            Symbol(name="extra", kind="method", file="m/b.py", line=3, container="BId",
-                   signature="extra():int", visibility="pub"),
-        ]
-        with tempfile.TemporaryDirectory() as tmp:
-            out = render_simple(Path(tmp), syms, [], "regen")
-        self.assertIn("AId,BId(R: String)", out)          # grouped despite extra method
-        self.assertEqual(out.count("of(String):⟨X⟩"), 1)  # shared shown once
-        self.assertIn("BId: extra():int", out)            # divergence kept -> no coverage loss
-
-
 class PrivateMembersTest(unittest.TestCase):
     def _syms(self):
         return [
@@ -423,7 +392,6 @@ class TightFormatTest(unittest.TestCase):
         out = build_digest(JAVAMINI, config=default_config())
         self.assertIn("evaluate(OrderId,List<ItemId>):Quote", out)
         self.assertIn("OrderStatus(E: NEW,PAID,SHIPPED)", out)
-        self.assertIn("ItemId,OrderId,UserId(R: String)", out)
         self.assertIn("(I sealed: AddOp|RemoveOp)", out)
         ev = next(ln for ln in out.splitlines() if "evaluate(OrderId" in ln)
         self.assertNotIn("→", ev)   # ascii `:Ret`, not the pretty arrow

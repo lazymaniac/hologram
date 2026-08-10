@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import tracemalloc
 import unittest
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import FrozenInstanceError, fields, replace
 from pathlib import Path, PurePosixPath
 from unittest.mock import PropertyMock, patch
 
@@ -33,12 +35,15 @@ from hologram.model import (
     Visibility,
 )
 from hologram.render import (
+    RenderDecodeError,
     RenderFile,
     RenderIntern,
     RenderIR,
     RenderReexport,
     RenderSymbol,
+    decode_render,
     project_render_ir,
+    render_project,
 )
 from hologram.resolve import (
     ResolutionResult,
@@ -1027,6 +1032,7 @@ class RenderProjectionTest(unittest.TestCase):
         displays.assert_called_once()
         right_ir = project_render_ir(right, state=STATE, hot_threshold=2)
         self.assertEqual(left_ir, right_ir)
+        self.assertEqual(render_project(left_ir), render_project(right_ir))
         self.assertEqual(
             next(
                 symbol
@@ -1206,6 +1212,740 @@ class RenderProjectionTest(unittest.TestCase):
                 state=STATE,
                 hot_threshold=1,
             )
+
+
+def _direct_symbol(
+    symbol_id: SymbolId,
+    *,
+    line: int = 1,
+    column: int = 0,
+    visibility: str = "pub",
+    signature: str | None = None,
+    parameters: tuple[str, ...] = (),
+    returns: str | None = None,
+    annotations: tuple[str, ...] = (),
+    modifiers: tuple[str, ...] = (),
+    components: tuple[str, ...] = (),
+    supers: tuple[str, ...] = (),
+    permits: tuple[str, ...] = (),
+    ordered_calls: tuple[str, ...] = (),
+    throws: tuple[str, ...] = (),
+    behaviors: tuple[str, ...] = (),
+    body_lines: int = 0,
+    markers: tuple[str, ...] = (),
+) -> RenderSymbol:
+    return RenderSymbol(
+        symbol_id,
+        line,
+        column,
+        visibility,
+        signature if signature is not None else symbol_id.name,
+        parameters,
+        returns,
+        annotations,
+        modifiers,
+        components,
+        supers,
+        permits,
+        ordered_calls,
+        throws,
+        behaviors,
+        body_lines,
+        markers,
+    )
+
+
+def _all_fields_render_ir() -> RenderIR:
+    production_path = "src/α ids/Item.java"
+    production_id = SymbolId(
+        Language.JAVA,
+        production_path,
+        ("Outer", "Inner"),
+        SymbolKind.METHOD,
+        "build",
+        "(List<A,B>)",
+    )
+    overload_id = SymbolId(
+        Language.JAVA,
+        production_path,
+        ("Outer", "Inner"),
+        SymbolKind.METHOD,
+        "build",
+        "(String)",
+    )
+    test_path = "tests/item test.py"
+    test_id = SymbolId(
+        Language.PYTHON,
+        test_path,
+        (),
+        SymbolKind.FUNCTION,
+        "check",
+        "()",
+    )
+    return RenderIR(
+        2,
+        STATE,
+        (),
+        ("app→core", "pkg→α"),
+        (
+            RenderFile(
+                "gen/generated.py",
+                "python",
+                "generated",
+                None,
+                (),
+                (),
+            ),
+            RenderFile(
+                "src/index.ts",
+                "typescript",
+                "production",
+                None,
+                (RenderReexport("./api kit", None, None, True),),
+                (),
+            ),
+            RenderFile(
+                production_path,
+                "java",
+                "production",
+                "com.acme.ids",
+                (RenderReexport("./named", "Thing", "Alias", False),),
+                (
+                    _direct_symbol(
+                        production_id,
+                        line=7,
+                        column=4,
+                        signature="build(List<A,B> value) → Résult",
+                        parameters=("value: List<A,B>",),
+                        returns="Résult",
+                        annotations=('@Bean("x")',),
+                        modifiers=("public", "async"),
+                        components=("id: int",),
+                        supers=("Base<T,U>",),
+                        permits=("Child One",),
+                        ordered_calls=("Target.run", "Target.run"),
+                        throws=("ProblemException",),
+                        behaviors=("ItemTest.creates item",),
+                        body_lines=21,
+                        markers=("×3", "✓", "≈2"),
+                    ),
+                    _direct_symbol(
+                        overload_id,
+                        line=30,
+                        column=2,
+                        signature="build(String value)",
+                        parameters=("value: String",),
+                        returns="Résult2",
+                    ),
+                ),
+            ),
+            RenderFile(
+                test_path,
+                "python",
+                "test",
+                None,
+                (),
+                (
+                    _direct_symbol(
+                        test_id,
+                        line=2,
+                        column=1,
+                        visibility="private",
+                        signature="check()",
+                        markers=("×0?",),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _projected_repeated_values(
+    values: tuple[str, ...],
+    *,
+    occurrences: int = 3,
+) -> RenderIR:
+    if not 1 <= occurrences <= 10:
+        raise ValueError("test helper supports one through ten occurrences")
+    files: list[FileIR] = []
+    items: list[AnalyzedSymbol] = []
+    for index, value in enumerate(values):
+        path = f"src/value{index}.py"
+        optional = [value if occurrences > offset else None for offset in range(1, 10)]
+        symbol = _symbol(
+            path,
+            f"value{index}",
+            signature=value,
+            params=((value,) if optional[1] is not None else ()),
+            returns=optional[2],
+            annotations=((value,) if optional[3] is not None else ()),
+            modifiers=((value,) if optional[4] is not None else ()),
+            components=((value,) if optional[5] is not None else ()),
+            supers=((value,) if optional[6] is not None else ()),
+            permits=((value,) if optional[7] is not None else ()),
+            raises=((value,) if optional[8] is not None else ()),
+        )
+        files.append(_file(path, module=optional[0], symbols=(symbol,)))
+        items.append(_item(symbol))
+    return project_render_ir(
+        _analyzed(tuple(reversed(files)), tuple(reversed(items))),
+        state=STATE,
+        hot_threshold=10,
+    )
+
+
+def _json_token(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _exact_intern_savings(value: str, alias: str, occurrences: int) -> int:
+    literal = _json_token(f"&{value}" if value.startswith("&") else value)
+    alias_token = _json_token(alias)
+    declaration = f"· intern {alias_token} {_json_token(value)}\n"
+    return (
+        occurrences * len(literal.encode())
+        - occurrences * len(alias_token.encode())
+        - len(declaration.encode())
+    )
+
+
+def _small_render_ir(*, two_symbols: bool = False) -> RenderIR:
+    path = "src/a.py"
+    first_id = SymbolId(
+        Language.PYTHON,
+        path,
+        (),
+        SymbolKind.FUNCTION,
+        "a",
+        "()",
+    )
+    symbols = [_direct_symbol(first_id, signature="a()")]
+    if two_symbols:
+        second_id = SymbolId(
+            Language.PYTHON,
+            path,
+            (),
+            SymbolKind.FUNCTION,
+            "b",
+            "()",
+        )
+        symbols.append(_direct_symbol(second_id, line=2, signature="b()"))
+    return RenderIR(
+        2,
+        STATE,
+        (),
+        (),
+        (
+            RenderFile(
+                path,
+                "python",
+                "production",
+                None,
+                (),
+                tuple(symbols),
+            ),
+        ),
+    )
+
+
+class RenderRoundTripTest(unittest.TestCase):
+    def test_all_fields_have_exact_canonical_unicode_grammar_and_round_trip(
+        self,
+    ) -> None:
+        ir = _all_fields_render_ir()
+        expected = (
+            f"# hologram:2 state={STATE} · regen: hologram build\n"
+            '· deps ["app→core","pkg→α"]\n'
+            '@ "gen/generated.py" "python" "generated" null\n'
+            '@ "src/index.ts" "typescript" "production" null\n'
+            '  reexport [["./api kit",null,null,true]]\n'
+            '@ "src/α ids/Item.java" "java" "production" "com.acme.ids"\n'
+            '  reexport [["./named","Thing","Alias",false]]\n'
+            '  :7:4 [["Outer","Inner"],"method","build",'
+            '"(List<A,B>)"] "pub"\n'
+            '    signature "build(List<A,B> value) → Résult"\n'
+            '    param ["value: List<A,B>"]\n'
+            '    return "Résult"\n'
+            '    annotation ["@Bean(\\"x\\")"]\n'
+            '    modifier ["public","async"]\n'
+            '    component ["id: int"]\n'
+            '    super ["Base<T,U>"]\n'
+            '    permit ["Child One"]\n'
+            '    call ["Target.run","Target.run"]\n'
+            '    throw ["ProblemException"]\n'
+            '    behavior ["ItemTest.creates item"]\n'
+            "    body 21\n"
+            '    mark ["×3","✓","≈2"]\n'
+            '  :30:2 [["Outer","Inner"],"method","build",'
+            '"(String)"] "pub"\n'
+            '    signature "build(String value)"\n'
+            '    param ["value: String"]\n'
+            '    return "Résult2"\n'
+            '@ "tests/item test.py" "python" "test" null\n'
+            '  :2:1 [[] ,"fn","check","()"] "private"\n'
+            '    signature "check()"\n'
+            "    return null\n"
+            '    mark ["×0?"]\n'
+        ).replace('[[] ,"fn"', '[[],"fn"')
+        text = render_project(ir)
+        self.assertEqual(text, expected)
+        self.assertTrue(text.endswith("\n"))
+        self.assertFalse(text.endswith("\n\n"))
+        self.assertEqual(decode_render(text), ir)
+        self.assertEqual(render_project(decode_render(text)), text)
+
+    def test_file_leaves_keep_same_shape_and_every_method_owned(self) -> None:
+        files: list[RenderFile] = []
+        for path, owner in (
+            ("src/ids/ItemId.java", "ItemId"),
+            ("src/ids/OrderId.java", "OrderId"),
+        ):
+            type_id = SymbolId(
+                Language.JAVA,
+                path,
+                (),
+                SymbolKind.RECORD,
+                owner,
+                "",
+            )
+            method_id = SymbolId(
+                Language.JAVA,
+                path,
+                (owner,),
+                SymbolKind.METHOD,
+                "of",
+                "(String)",
+            )
+            files.append(
+                RenderFile(
+                    path,
+                    "java",
+                    "production",
+                    "ids",
+                    (),
+                    (
+                        _direct_symbol(type_id, signature=f"{owner}(String)"),
+                        _direct_symbol(
+                            method_id,
+                            line=2,
+                            signature=f"of(String):{owner}",
+                            parameters=("String",),
+                            returns=owner,
+                        ),
+                    ),
+                )
+            )
+        text = render_project(RenderIR(2, STATE, (), (), tuple(files)))
+        self.assertIn('@ "src/ids/ItemId.java"', text)
+        self.assertIn('@ "src/ids/OrderId.java"', text)
+        self.assertEqual(text.count('"of(String):'), 2)
+        self.assertNotIn("ItemId,OrderId", text)
+        self.assertNotIn("⟨X⟩", text)
+
+    def test_projection_plans_raw_interns_and_renderer_validates_exact_table(
+        self,
+    ) -> None:
+        value = "company.deep.namespace.service.target.run"
+        ir = _projected_repeated_values((value,))
+        self.assertEqual(ir.interns, (RenderIntern("&run", value),))
+        rendered_file = ir.files[0]
+        self.assertEqual(rendered_file.module, value)
+        self.assertEqual(rendered_file.symbols[0].signature, value)
+        self.assertEqual(rendered_file.symbols[0].parameters, (value,))
+
+        text = render_project(ir)
+        self.assertIn(
+            f"· intern {_json_token('&run')} {_json_token(value)}\n",
+            text,
+        )
+        self.assertEqual(text.count(_json_token("&run")), 4)
+        self.assertEqual(text.count(_json_token(value)), 1)
+        self.assertEqual(decode_render(text), ir)
+        with self.assertRaisesRegex(ValueError, "intern"):
+            render_project(replace(ir, interns=()))
+        with self.assertRaisesRegex(ValueError, "intern"):
+            render_project(replace(ir, interns=(RenderIntern("&wrong", value),)))
+        with self.assertRaisesRegex(ValueError, "intern"):
+            render_project(
+                replace(
+                    ir,
+                    interns=(
+                        RenderIntern("&run", value),
+                        RenderIntern("&spare", "unused.long.value"),
+                    ),
+                )
+            )
+
+    def test_interning_uses_three_occurrences_and_strict_positive_utf8_savings(
+        self,
+    ) -> None:
+        only_two = "company.deep.namespace.service.target.run"
+        self.assertEqual(
+            _projected_repeated_values((only_two,), occurrences=2).interns,
+            (),
+        )
+        self.assertEqual(
+            _projected_repeated_values(("x/y",), occurrences=6).interns,
+            (),
+        )
+
+        zero = f"{'x' * 15}/Stable"
+        positive = f"{'x' * 16}/Stable"
+        self.assertEqual(_exact_intern_savings(zero, "&Stable", 3), 0)
+        self.assertEqual(_exact_intern_savings(positive, "&Stable", 3), 2)
+        self.assertEqual(_projected_repeated_values((zero,)).interns, ())
+        self.assertEqual(
+            _projected_repeated_values((positive,)).interns,
+            (RenderIntern("&Stable", positive),),
+        )
+
+    def test_aliases_are_suffix_unique_before_profitability_and_sorted(
+        self,
+    ) -> None:
+        left = "company.deep.namespace.Left.run"
+        right = "company.deep.namespace.Right.run"
+        ir = _projected_repeated_values((right, left))
+        self.assertEqual(
+            ir.interns,
+            (
+                RenderIntern("&Left.run", left),
+                RenderIntern("&Right.run", right),
+            ),
+        )
+
+        unprofitable = "x/Left/run"
+        profitable = "company.really.long.and.descriptive.package.namespace.Left.run"
+        disambiguated = _projected_repeated_values((profitable, unprofitable))
+        self.assertEqual(
+            disambiguated.interns,
+            (RenderIntern("&namespace.Left.run", profitable),),
+        )
+
+        same_segments = _projected_repeated_values(
+            ("company/pkg/Left/run", "company-pkg-Left-run"),
+            occurrences=6,
+        )
+        self.assertEqual(same_segments.interns, ())
+        self.assertEqual(
+            _projected_repeated_values(("1234567890---",), occurrences=10).interns,
+            (),
+        )
+
+    def test_alias_planning_uses_linear_memory_for_deep_segment_values(self) -> None:
+        value = ".".join(("segment",) * 3_000)
+        tracemalloc.start()
+        try:
+            ir = _projected_repeated_values((value,))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(ir.interns, (RenderIntern("&segment", value),))
+        self.assertLess(peak, 12 * 1024 * 1024)
+
+    def test_aliases_round_trip_through_every_eligible_field(self) -> None:
+        value = "company.deep.namespace.service.target.run"
+        symbol_id = SymbolId(
+            Language.PYTHON,
+            "src/a.py",
+            (),
+            SymbolKind.FUNCTION,
+            "a",
+            "()",
+        )
+        symbol = _direct_symbol(
+            symbol_id,
+            signature=value,
+            parameters=(value,),
+            returns=value,
+            annotations=(value,),
+            modifiers=(value,),
+            components=(value,),
+            supers=(value,),
+            permits=(value,),
+            ordered_calls=(value,),
+            throws=(value,),
+            behaviors=(value,),
+        )
+        ir = RenderIR(
+            2,
+            STATE,
+            (RenderIntern("&run", value),),
+            (value,),
+            (
+                RenderFile(
+                    "src/a.py",
+                    "python",
+                    "production",
+                    value,
+                    (RenderReexport(value, value, value, False),),
+                    (symbol,),
+                ),
+            ),
+        )
+
+        text = render_project(ir)
+        self.assertEqual(text.count(_json_token(value)), 1)
+        self.assertEqual(text.count(_json_token("&run")), 17)
+        self.assertEqual(decode_render(text), ir)
+        self.assertEqual(render_project(decode_render(text)), text)
+
+    def test_utf8_json_escaping_and_literal_ampersands_are_reversible(self) -> None:
+        for value in (
+            "company/really/long/quoted\\line\nrun",
+            "公司/very/long/descriptive/路径/run",
+            "&company.deep.namespace.service.target.run",
+        ):
+            with self.subTest(value=value):
+                ir = _projected_repeated_values((value,))
+                self.assertTrue(ir.interns)
+                text = render_project(ir)
+                self.assertIn(_json_token(value), text)
+                self.assertEqual(decode_render(text), ir)
+
+        literal = _projected_repeated_values(("&x",), occurrences=2)
+        self.assertEqual(literal.interns, ())
+        literal_text = render_project(literal)
+        self.assertEqual(literal_text.count(_json_token("&&x")), 2)
+        self.assertEqual(decode_render(literal_text), literal)
+
+    def test_renderer_validates_canonical_structure_without_reordering(self) -> None:
+        ir = _all_fields_render_ir()
+        production = next(file for file in ir.files if file.symbols)
+        symbol = production.symbols[0]
+        invalid = (
+            replace(ir, schema_version=1),
+            replace(ir, state="A" * 64),
+            replace(ir, dependencies=tuple(reversed(ir.dependencies))),
+            replace(ir, dependencies=("app→core", "app→core")),
+            replace(ir, files=tuple(reversed(ir.files))),
+            replace(
+                ir,
+                files=tuple(
+                    replace(
+                        production,
+                        reexports=(
+                            production.reexports[0],
+                            production.reexports[0],
+                        ),
+                    )
+                    if file is production
+                    else file
+                    for file in ir.files
+                ),
+            ),
+            replace(
+                ir,
+                files=tuple(
+                    replace(
+                        production,
+                        symbols=(
+                            replace(symbol, markers=("✓", "×0")),
+                            *production.symbols[1:],
+                        ),
+                    )
+                    if file is production
+                    else file
+                    for file in ir.files
+                ),
+            ),
+            replace(
+                ir,
+                files=tuple(
+                    replace(production, path="/absolute.java")
+                    if file is production
+                    else file
+                    for file in ir.files
+                ),
+            ),
+        )
+        for malformed in invalid:
+            with self.subTest(malformed=malformed), self.assertRaises(ValueError):
+                render_project(malformed)
+
+        two = _small_render_ir(two_symbols=True)
+        with self.assertRaises(ValueError):
+            render_project(
+                replace(
+                    two,
+                    files=(
+                        replace(
+                            two.files[0],
+                            symbols=tuple(reversed(two.files[0].symbols)),
+                        ),
+                    ),
+                )
+            )
+
+    def test_decoder_rejects_header_whitespace_and_json_variants(self) -> None:
+        text = render_project(_all_fields_render_ir())
+        mutations = {
+            "schema": text.replace("# hologram:2", "# hologram:1", 1),
+            "state": text.replace(f"state={STATE}", f"state={'A' * 64}", 1),
+            "regen": text.replace("hologram build", "hologram check", 1),
+            "crlf": text.replace("\n", "\r\n"),
+            "missing-final-lf": text[:-1],
+            "extra-final-lf": f"{text}\n",
+            "trailing-space": text.replace("· deps ", "· deps  ", 1),
+            "escaped-unicode": text.replace("α", "\\u03b1", 1),
+            "json-spacing": text.replace(
+                '["app→core","pkg→α"]',
+                '["app→core", "pkg→α"]',
+                1,
+            ),
+            "unknown-top-level": text.replace(
+                '· deps ["app→core","pkg→α"]\n',
+                '· deps ["app→core","pkg→α"]\n· unknown []\n',
+                1,
+            ),
+        }
+        for name, malformed in mutations.items():
+            self.assertNotEqual(malformed, text)
+            with self.subTest(name=name), self.assertRaises(RenderDecodeError):
+                decode_render(malformed)
+        with self.assertRaises(RenderDecodeError):
+            decode_render(None)  # type: ignore[arg-type]
+
+    def test_decoder_rejects_file_and_symbol_structure_mutations(self) -> None:
+        empty = RenderIR(
+            2,
+            STATE,
+            (),
+            (),
+            (
+                RenderFile("a.py", "python", "production", None, (), ()),
+                RenderFile("b.py", "python", "test", None, (), ()),
+            ),
+        )
+        empty_text = render_project(empty)
+        empty_lines = empty_text.splitlines()
+        file_mutations = {
+            "missing-deps": "\n".join((empty_lines[0], *empty_lines[2:])) + "\n",
+            "duplicate-deps": "\n".join(
+                (empty_lines[0], empty_lines[1], empty_lines[1], *empty_lines[2:])
+            )
+            + "\n",
+            "duplicate-file": "\n".join((*empty_lines, empty_lines[2])) + "\n",
+            "unsorted-files": "\n".join(
+                (*empty_lines[:2], empty_lines[3], empty_lines[2])
+            )
+            + "\n",
+            "invalid-language": empty_text.replace('"python"', '"ruby"', 1),
+            "invalid-role": empty_text.replace('"production"', '"fixture"', 1),
+            "invalid-path": empty_text.replace('"a.py"', '"/a.py"', 1),
+            "invalid-module-type": empty_text.replace(
+                '"production" null',
+                '"production" 1',
+                1,
+            ),
+        }
+        for name, malformed in file_mutations.items():
+            with self.subTest(name=name), self.assertRaises(RenderDecodeError):
+                decode_render(malformed)
+
+    def test_decoder_rejects_noncanonical_intern_declarations(self) -> None:
+        value = "company.deep.namespace.service.target.run"
+        canonical = render_project(_projected_repeated_values((value,)))
+        declaration = f'· intern "&run" {_json_token(value)}\n'
+        self.assertIn(declaration, canonical)
+
+        left = "company.deep.namespace.Left.run"
+        right = "company.deep.namespace.Right.run"
+        pair_text = render_project(_projected_repeated_values((right, left)))
+        left_declaration = f'· intern "&Left.run" {_json_token(left)}\n'
+        right_declaration = f'· intern "&Right.run" {_json_token(right)}\n'
+        self.assertIn(f"{left_declaration}{right_declaration}", pair_text)
+
+        short_ir = _projected_repeated_values(("x/y",), occurrences=6)
+        short_text = render_project(short_ir)
+        aliased_short = short_text.replace(_json_token("x/y"), '"&y"')
+        aliased_short = aliased_short.replace(
+            f"# hologram:2 state={STATE} · regen: hologram build\n",
+            f"# hologram:2 state={STATE} · regen: hologram build\n"
+            '· intern "&y" "x/y"\n',
+            1,
+        )
+        under_three_text = render_project(
+            _projected_repeated_values((value,), occurrences=2)
+        ).replace(_json_token(value), '"&run"')
+        under_three_text = under_three_text.replace(
+            f"# hologram:2 state={STATE} · regen: hologram build\n",
+            f"# hologram:2 state={STATE} · regen: hologram build\n{declaration}",
+            1,
+        )
+
+        mutations = {
+            "missing": canonical.replace(declaration, "", 1),
+            "duplicate-alias": canonical.replace(declaration, declaration * 2, 1),
+            "malformed-alias": canonical.replace('"&run"', '"&1"'),
+            "wrong-derived": canonical.replace('"&run"', '"&target.run"'),
+            "wrong-value": canonical.replace(
+                _json_token(value),
+                _json_token(f"{value}.wrong"),
+                1,
+            ),
+            "unsorted": pair_text.replace(
+                f"{left_declaration}{right_declaration}",
+                f"{right_declaration}{left_declaration}",
+                1,
+            ),
+            "duplicate-expanded-value": canonical.replace(
+                declaration,
+                f'{declaration}· intern "&other" {_json_token(value)}\n',
+                1,
+            ),
+            "under-three": under_three_text,
+            "nonpositive": aliased_short,
+        }
+        for name, malformed in mutations.items():
+            self.assertNotEqual(malformed, canonical)
+            with self.subTest(name=name), self.assertRaises(RenderDecodeError):
+                decode_render(malformed)
+
+        text = render_project(_small_render_ir())
+        signature = '    signature "a()"\n'
+        returns = "    return null\n"
+        symbol_mutations = {
+            "missing-signature": text.replace(signature, "", 1),
+            "missing-return": text.replace(returns, "", 1),
+            "duplicate-signature": text.replace(signature, signature * 2, 1),
+            "wrong-child-order": text.replace(
+                f"{signature}{returns}",
+                f"{returns}{signature}",
+                1,
+            ),
+            "empty-optional": text.replace(
+                signature,
+                f"{signature}    param []\n",
+                1,
+            ),
+            "zero-body": text.replace(returns, f"{returns}    body 0\n", 1),
+            "negative-body": text.replace(returns, f"{returns}    body -1\n", 1),
+            "unknown-child": text.replace(returns, f"{returns}    mystery []\n", 1),
+            "zero-line": text.replace("  :1:0 ", "  :0:0 ", 1),
+            "negative-column": text.replace("  :1:0 ", "  :1:-1 ", 1),
+            "bad-local-id": text.replace(
+                '[[],"fn","a","()"]',
+                '[[],"fn","a"]',
+                1,
+            ),
+            "bad-container": text.replace(
+                '[[],"fn","a","()"]',
+                '["C","fn","a","()"]',
+                1,
+            ),
+            "bad-kind": text.replace(
+                '[[],"fn","a","()"]',
+                '[[],"bogus","a","()"]',
+                1,
+            ),
+            "bad-visibility": text.replace(' "pub"\n', ' "package"\n', 1),
+            "undeclared-alias": text.replace('"a()"', '"&missing"', 1),
+        }
+        for name, malformed in symbol_mutations.items():
+            self.assertNotEqual(malformed, text)
+            with self.subTest(name=name), self.assertRaises(RenderDecodeError):
+                decode_render(malformed)
 
 
 if __name__ == "__main__":
