@@ -1491,7 +1491,7 @@ def _legacy_java_call_name(file_ir: CanonicalFileIR, call) -> str | None:
         if bracket >= 0 and (arguments < 0 or bracket < arguments):
             return None
         return call.name
-    if call.receiver is None:
+    if call.receiver in {None, "super", "this"}:
         return call.name
     if re.fullmatch(r"(?:[^\W\d]|\$)[\w$]*", call.receiver, re.UNICODE):
         return f"{call.receiver}.{call.name}"

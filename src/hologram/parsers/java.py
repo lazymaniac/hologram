@@ -523,18 +523,46 @@ def _annotation_body_events(
     events: Iterable[BodyEvent],
     references: Iterable[ReferenceRef],
 ) -> tuple[BodyEvent, ...]:
+    references = tuple(references)
     type_spans = {
         item.span
         for item in references
         if item.kind is ReferenceKind.TYPE
         and item.context is ReferenceContext.ANNOTATION
     }
-    return ordered_unique(
+    callback_names = {
+        item.span: item.name
+        for item in references
+        if item.kind is ReferenceKind.NAME
+        and item.context is ReferenceContext.ANNOTATION
+    }
+    classified = tuple(
         BodyEvent(BodyEventKind.TYPE, event.text, event.span)
         if event.kind is BodyEventKind.NAME and event.span in type_spans
         else event
         for event in events
     )
+    existing_names = {
+        event.span
+        for event in classified
+        if event.kind is BodyEventKind.NAME
+    }
+    result: list[BodyEvent] = []
+    for event in classified:
+        result.append(event)
+        if (
+            event.kind is BodyEventKind.LITERAL
+            and event.span in callback_names
+            and event.span not in existing_names
+        ):
+            result.append(
+                BodyEvent(
+                    BodyEventKind.NAME,
+                    callback_names[event.span],
+                    event.span,
+                )
+            )
+    return ordered_unique(result)
 
 
 def _type_reference_nodes(node: Any | None) -> Iterable[Any]:

@@ -629,6 +629,45 @@ class Probe {
         )
         assert_body_fact_events(self, result)
 
+    def test_local_event_listener_callback_joins_a_literal_and_name_event(
+        self,
+    ) -> None:
+        raw = b"""\
+class Probe {
+  void run(String value) {
+    @EventListener("onRefresh") String selected = value;
+    @Other("onRefresh") String ordinary = value;
+  }
+}
+"""
+
+        result = extract_file(snapshot(raw, file="src/Probe.java"))
+        run = symbol(result, "run", SymbolKind.METHOD)
+        callback = [
+            item
+            for item in result.references
+            if item.name == "onRefresh"
+            and item.context is ReferenceContext.ANNOTATION
+        ]
+
+        self.assertEqual(len(callback), 1)
+        self.assertEqual(callback[0].owner, run.id)
+        self.assertEqual(callback[0].kind, ReferenceKind.NAME)
+        self.assertEqual(
+            callback[0].confidence,
+            ReferenceConfidence.POSSIBLE,
+        )
+        self.assertEqual(callback[0].span.start_line, 3)
+        body = next(item for item in result.bodies if item.owner == run.id)
+        same_span = [
+            (event.kind, event.text)
+            for event in body.events
+            if event.span == callback[0].span
+        ]
+        self.assertIn((BodyEventKind.LITERAL, "<string>"), same_span)
+        self.assertIn((BodyEventKind.NAME, "onRefresh"), same_span)
+        assert_body_fact_events(self, result)
+
     def test_initializers_emit_calls_and_references_under_their_owner(self) -> None:
         raw = b"""\
 class Probe {
@@ -846,6 +885,39 @@ class Probe {
         )
         legacy_execute = next(item for item in legacy if item.name == "execute")
         self.assertEqual(legacy_execute.calls, ["run", "service.get", "p.Foo"])
+
+    def test_java_legacy_calls_drop_this_and_super_receivers(self) -> None:
+        raw = b"""\
+class Probe extends Parent {
+  void execute() {
+    this.own();
+    super.base();
+  }
+}
+"""
+        source = snapshot(raw, file="src/Probe.java")
+
+        canonical = extract_file(source)
+        execute = symbol(canonical, "execute", SymbolKind.METHOD)
+        self.assertEqual(
+            [
+                (call.receiver, call.name, call.kind)
+                for call in canonical.calls
+                if call.caller == execute.id
+            ],
+            [
+                ("this", "own", CallKind.CALL),
+                ("super", "base", CallKind.CALL),
+            ],
+        )
+
+        legacy = hologram.extract_file(
+            Path("/repo/src/Probe.java"),
+            Path("/repo"),
+            text=raw.decode(),
+        )
+        legacy_execute = next(item for item in legacy if item.name == "execute")
+        self.assertEqual(legacy_execute.calls, ["own", "base"])
 
     def test_package_root_no_longer_exposes_private_java_extractor(self) -> None:
         self.assertNotIn("_extract_java", hologram.__dict__)
