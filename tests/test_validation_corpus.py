@@ -41,7 +41,51 @@ SAMPLE_PATH = PROJECT_ROOT / "validation" / "gold" / "sample.jsonl"
 FACTS_PATH = PROJECT_ROOT / "validation" / "gold" / "facts"
 EXCLUSIONS_PATH = PROJECT_ROOT / "validation" / "gold" / "exclusions"
 GOLD_README_PATH = PROJECT_ROOT / "validation" / "gold" / "README.md"
+ADVERTISED_ROOT = PROJECT_ROOT / "validation" / "fixtures" / "advertised"
+SYNTHETIC_REVISION = "0" * 40
+SYNTHETIC_FACT_SHA256 = (
+    "d0869f47a383456f3a3553552b86274890cfd5da08962c3c99209b21d2f62e7b"
+)
+SYNTHETIC_EXCLUSION_SHA256 = (
+    "33d0ee2790a2a99537893a9fcd21e73f031c5aa673d3484966f34af617d4bc3c"
+)
 REVISION = "a" * 40
+
+ADVERTISED_FIXTURES = (
+    "c/types.c",
+    "c/types.h",
+    "cpp/types.cpp",
+    "cpp/types.hpp",
+    "csharp/Calls.cs",
+    "csharp/Types.cs",
+    "go/calls.go",
+    "go/types.go",
+    "helm/templates/_helpers.tpl",
+    "helm/values.yaml",
+    "html/page.html",
+    "java/Calls.java",
+    "java/Types.java",
+    "javascript/calls.js",
+    "javascript/types.js",
+    "jsx/Calls.jsx",
+    "jsx/Component.jsx",
+    "kotlin/Calls.kt",
+    "kotlin/Types.kt",
+    "lua/calls.lua",
+    "lua/types.lua",
+    "python/calls.py",
+    "python/types.py",
+    "rust/calls.rs",
+    "rust/types.rs",
+    "svelte/Calls.svelte",
+    "svelte/Component.svelte",
+    "tsx/Calls.tsx",
+    "tsx/Component.tsx",
+    "typescript/calls.ts",
+    "typescript/types.ts",
+    "vue/Calls.vue",
+    "vue/Component.vue",
+)
 
 PUBLIC_CORPORA = (
     "codecompanion",
@@ -1395,6 +1439,307 @@ class ValidationGoldCoverageTest(unittest.TestCase):
                 .splitlines(),
             )
             self.assertLessEqual(exclusion.line, len(lines))
+
+
+class SyntheticFixtureMatrixTest(unittest.TestCase):
+    facts: ClassVar[tuple[GoldFact, ...]]
+    exclusions: ClassVar[tuple[Exclusion, ...]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.facts = load_jsonl(FACTS_PATH / "synthetic.jsonl", GoldFact)
+        cls.exclusions = load_jsonl(
+            EXCLUSIONS_PATH / "synthetic.jsonl",
+            Exclusion,
+        )
+
+    def test_exact_advertised_fixture_matrix(self) -> None:
+        actual = tuple(
+            sorted(
+                path.relative_to(ADVERTISED_ROOT).as_posix()
+                for path in ADVERTISED_ROOT.rglob("*")
+                if path.is_file()
+            )
+        )
+        self.assertEqual(actual, ADVERTISED_FIXTURES)
+        self.assertTrue(
+            all(
+                len(
+                    (ADVERTISED_ROOT / relative)
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                )
+                < 40
+                for relative in actual
+            )
+        )
+
+    def test_synthetic_truth_bytes_are_frozen(self) -> None:
+        facts = (FACTS_PATH / "synthetic.jsonl").read_bytes()
+        exclusions = (EXCLUSIONS_PATH / "synthetic.jsonl").read_bytes()
+        self.assertEqual(len(self.facts), 942)
+        self.assertEqual(len(self.exclusions), 4)
+        self.assertEqual(hashlib.sha256(facts).hexdigest(), SYNTHETIC_FACT_SHA256)
+        self.assertEqual(
+            hashlib.sha256(exclusions).hexdigest(),
+            SYNTHETIC_EXCLUSION_SHA256,
+        )
+
+    def test_synthetic_metadata_ids_and_source_anchors_are_exact(self) -> None:
+        for fact in self.facts:
+            with self.subTest(fact=fact.id):
+                self.assertEqual(fact.corpus, "synthetic")
+                self.assertEqual(fact.revision, SYNTHETIC_REVISION)
+                self.assertIn(fact.path, ADVERTISED_FIXTURES)
+                self.assertEqual(fact.id, expected_fact_id(fact))
+                subject = parse_symbol_id(fact.subject)
+                self.assertEqual(subject[0], fact.language)
+                self.assertEqual(subject[1], fact.path)
+                lines = (
+                    (ADVERTISED_ROOT / fact.path)
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                )
+                self.assertLessEqual(fact.line, len(lines))
+                implicit = (
+                    subject[3] == SymbolKind.MODULE.value
+                    or fact.language in {Language.HTML.value, Language.HELM.value}
+                    or (
+                        fact.language in {Language.VUE.value, Language.SVELTE.value}
+                        and subject[3] == SymbolKind.CLASS.value
+                        and subject[4] == Path(fact.path).stem
+                    )
+                )
+                if not implicit:
+                    self.assertIn(subject[4], lines[fact.line - 1])
+        for exclusion in self.exclusions:
+            with self.subTest(exclusion=exclusion.id):
+                self.assertEqual(exclusion.corpus, "synthetic")
+                self.assertEqual(exclusion.revision, SYNTHETIC_REVISION)
+                self.assertIn(exclusion.path, ADVERTISED_FIXTURES)
+                self.assertEqual(exclusion.id, expected_exclusion_id(exclusion))
+                parse_exclusion_scope(exclusion.scope)
+
+    def test_all_languages_syntax_modes_and_relations_are_planted(self) -> None:
+        declarations = [fact for fact in self.facts if fact.category == "declaration"]
+        self.assertEqual(
+            {fact.language for fact in declarations}, {item.value for item in Language}
+        )
+        self.assertTrue(
+            any(
+                fact.language == Language.TSX.value and fact.path.endswith(".jsx")
+                for fact in declarations
+            )
+        )
+        self.assertEqual(
+            {path.parts[0] for path in (Path(fact.path) for fact in declarations)},
+            {Path(path).parts[0] for path in ADVERTISED_FIXTURES},
+        )
+        relation_languages = {
+            fact.language for fact in self.facts if fact.category == "relation"
+        }
+        self.assertTrue(
+            {
+                "java",
+                "python",
+                "typescript",
+                "javascript",
+                "tsx",
+                "kotlin",
+                "go",
+                "rust",
+                "csharp",
+                "cpp",
+                "vue",
+                "svelte",
+            }.issubset(relation_languages)
+        )
+
+    def test_ordered_calls_are_repeated_and_lexical(self) -> None:
+        orders = {
+            (fact.language, fact.subject): thaw_json(fact.value)["targets"]
+            for fact in self.facts
+            if fact.category == "call_order"
+        }
+        for language in ("java", "python", "typescript", "tsx", "lua"):
+            matching = [
+                targets
+                for (candidate, _subject), targets in orders.items()
+                if candidate == language
+                and len(targets) >= 3
+                and targets[0] == targets[2]
+                and targets[0] != targets[1]
+            ]
+            with self.subTest(language=language):
+                self.assertTrue(matching)
+
+    def test_planted_advisory_and_duplicate_cases_are_exact(self) -> None:
+        by_name: dict[str, list[GoldFact]] = {}
+        for fact in self.facts:
+            name = str(parse_symbol_id(fact.subject)[4])
+            by_name.setdefault(name, []).append(fact)
+
+        zero = {
+            name: thaw_json(
+                next(
+                    fact for fact in facts if fact.category == "zero_classification"
+                ).value
+            )["classification"]
+            for name, facts in by_name.items()
+            if any(fact.category == "zero_classification" for fact in facts)
+        }
+        self.assertEqual(zero["GoldUnusedStrong"], "strong")
+        self.assertEqual(zero["GoldPublicSurface"], "uncertain")
+        self.assertEqual(zero["GoldDynamicCallback"], "uncertain")
+        self.assertEqual(zero["GoldSameFileUsed"], "none")
+        self.assertEqual(zero["GoldStringOnlyStrong"], "strong")
+
+        strong = {
+            name: fact.expected
+            for name, facts in by_name.items()
+            for fact in facts
+            if fact.category == "strong_x0"
+        }
+        self.assertTrue(strong["GoldUnusedStrong"])
+        self.assertFalse(strong["GoldDynamicCallback"])
+        self.assertTrue(strong["GoldStringOnlyStrong"])
+
+        approximate = [fact for fact in self.facts if fact.category == "approximate"]
+        self.assertTrue(any(fact.expected for fact in approximate))
+        self.assertTrue(any(not fact.expected for fact in approximate))
+        positive_names = {
+            str(parse_symbol_id(fact.subject)[4])
+            for fact in approximate
+            if fact.expected
+        }
+        negative_names = {
+            str(parse_symbol_id(fact.subject)[4])
+            for fact in approximate
+            if not fact.expected
+        }
+        self.assertIn("goldExactCloneA", positive_names)
+        self.assertIn("goldSimilarNegativeA", negative_names)
+
+    def test_zero_classification_is_closed_for_every_declaration(self) -> None:
+        declarations = {
+            fact.subject for fact in self.facts if fact.category == "declaration"
+        }
+        zeros = [fact for fact in self.facts if fact.category == "zero_classification"]
+        self.assertEqual({fact.subject for fact in zeros}, declarations)
+        self.assertEqual(len(zeros), len(declarations))
+        self.assertTrue(
+            all(
+                thaw_json(fact.value)["classification"]
+                in {"none", "strong", "uncertain"}
+                for fact in zeros
+            )
+        )
+
+    def test_synthetic_bundles_calls_relations_and_advisories_are_closed(
+        self,
+    ) -> None:
+        by_subject: dict[str, list[GoldFact]] = {}
+        for fact in self.facts:
+            by_subject.setdefault(fact.subject, []).append(fact)
+        declarations = {
+            fact.subject: fact for fact in self.facts if fact.category == "declaration"
+        }
+        self.assertEqual(len(declarations), 132)
+
+        callable_subjects: set[str] = set()
+        strong_candidates: set[str] = set()
+        for subject, declaration in declarations.items():
+            with self.subTest(subject=subject):
+                grouped = by_subject[subject]
+                core = [
+                    fact for fact in grouped if fact.category in CORE_FACT_CATEGORIES
+                ]
+                self.assertEqual(
+                    Counter(fact.category for fact in core),
+                    Counter({category: 1 for category in CORE_FACT_CATEGORIES}),
+                )
+                self.assertTrue(all(fact.expected for fact in core))
+                self.assertTrue(all(fact.line == declaration.line for fact in grouped))
+                kind = thaw_json(
+                    next(fact for fact in grouped if fact.category == "kind").value
+                )["kind"]
+                visibility = thaw_json(
+                    next(
+                        fact for fact in grouped if fact.category == "visibility"
+                    ).value
+                )["visibility"]
+                if kind in CALLABLE_KINDS:
+                    callable_subjects.add(subject)
+                if (
+                    visibility
+                    in {
+                        Visibility.INTERNAL.value,
+                        Visibility.PRIVATE.value,
+                    }
+                    and kind != SymbolKind.REEXPORT.value
+                ):
+                    strong_candidates.add(subject)
+
+        call_subjects = {
+            fact.subject
+            for fact in self.facts
+            if fact.category in {"call", "call_order"}
+        }
+        self.assertEqual(call_subjects, callable_subjects)
+        for subject in callable_subjects:
+            grouped = by_subject[subject]
+            order = [fact for fact in grouped if fact.category == "call_order"]
+            self.assertEqual(len(order), 1)
+            calls = sorted(
+                (fact for fact in grouped if fact.category == "call"),
+                key=lambda fact: thaw_json(fact.value)["ordinal"],
+            )
+            self.assertEqual(
+                [thaw_json(fact.value)["ordinal"] for fact in calls],
+                list(range(len(calls))),
+            )
+            targets = thaw_json(order[0].value)["targets"]
+            self.assertEqual(
+                targets,
+                [thaw_json(fact.value)["target"] for fact in calls],
+            )
+            self.assertTrue(
+                all(canonical_json(target) in declarations for target in targets)
+            )
+
+        for relation in (fact for fact in self.facts if fact.category == "relation"):
+            value = thaw_json(relation.value)
+            self.assertIn(value["kind"], {"component", "super"})
+            self.assertIn(canonical_json(value["target"]["symbol"]), declarations)
+            self.assertTrue(relation.expected)
+
+        strong = [fact for fact in self.facts if fact.category == "strong_x0"]
+        self.assertEqual({fact.subject for fact in strong}, strong_candidates)
+        for fact in strong:
+            zero = thaw_json(
+                next(
+                    candidate
+                    for candidate in by_subject[fact.subject]
+                    if candidate.category == "zero_classification"
+                ).value
+            )["classification"]
+            self.assertEqual(fact.expected, zero == "strong")
+            self.assertEqual(thaw_json(fact.value), {"classification": "strong"})
+
+        approximate = [fact for fact in self.facts if fact.category == "approximate"]
+        self.assertEqual(len(approximate), 2)
+        for fact in approximate:
+            peer = canonical_json(thaw_json(fact.value)["peer"])
+            self.assertIn(peer, declarations)
+            self.assertLess(parse_symbol_id(fact.subject)[4], parse_symbol_id(peer)[4])
+
+        for exclusion in self.exclusions:
+            self.assertIn(exclusion.reason, EXCLUSION_REASONS)
+            self.assertIsNotNone(exclusion.line)
+            scope = parse_exclusion_scope(exclusion.scope)
+            self.assertIn(scope[0], {"candidate", "source_call"})
+            if scope[0] == "source_call":
+                self.assertIn(canonical_json(scope[1]), declarations)
 
 
 class FreezeWriteSafetyTest(unittest.TestCase):
