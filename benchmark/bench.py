@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import importlib
 import json
 import os
 import re
@@ -36,14 +37,24 @@ if __package__:
     from .corpus import workspace_asset_sha256 as workspace_asset_digest
     from .schema import Config, Task, load_tasks, resolve_corpus_path
     from .transcript import ProcessResult, parse_transcript, terminal_succeeded
+    from .verifiers.common import Verification, parse_verifier_output
 else:
-    import corpus as _corpus  # type: ignore[import-not-found]
-    import schema as _schema  # type: ignore[import-not-found]
-    import transcript as _transcript  # type: ignore[import-not-found]
+    def _shared_module(short_name: str):
+        package_name = f"benchmark.{short_name}"
+        if package_name in sys.modules:
+            module = sys.modules[package_name]
+            sys.modules.setdefault(short_name, module)
+            return module
+        module = importlib.import_module(short_name)
+        sys.modules.setdefault(package_name, module)
+        return module
 
-    sys.modules.setdefault("benchmark.corpus", _corpus)
-    sys.modules.setdefault("benchmark.schema", _schema)
-    sys.modules.setdefault("benchmark.transcript", _transcript)
+    _schema = _shared_module("schema")
+    _corpus = _shared_module("corpus")
+    _transcript = _shared_module("transcript")
+    if "benchmark.verifiers" in sys.modules:
+        sys.modules.setdefault("verifiers", sys.modules["benchmark.verifiers"])
+    _verifier_common = _shared_module("verifiers.common")
     from corpus import (  # type: ignore[import-not-found,no-redef]
         drop_workspace,
         make_workspace,
@@ -65,6 +76,10 @@ else:
         ProcessResult,
         parse_transcript,
         terminal_succeeded,
+    )
+    from verifiers.common import (  # type: ignore[import-not-found,no-redef]
+        Verification,
+        parse_verifier_output,
     )
 
 __all__ = ("Config", "Task", "load_tasks")
@@ -218,6 +233,48 @@ def _digest_of(ws: Path, workspace_assets: Sequence[str] = ()) -> str:
             out.unlink(missing_ok=True)
 
 
+def _verifier_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _run_task_verifier(
+    task: Task,
+    workspace: Path,
+    answer: Path,
+    log_path: Path,
+) -> Verification:
+    command = task.accept_cmd.replace(
+        "{ws}", shlex.quote(str(workspace.resolve()))
+    ).replace(
+        "{answer}", shlex.quote(str(answer.resolve()))
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=1800,
+            check=False,
+        )
+        stdout = completed.stdout
+        stderr = completed.stderr
+        returncode = completed.returncode
+    except subprocess.TimeoutExpired as error:
+        stdout = _verifier_text(error.stdout)
+        stderr = _verifier_text(error.stderr)
+        returncode = 124
+    log_path.write_text(
+        "stdout:\n" + stdout + "\nstderr:\n" + stderr,
+        encoding="utf-8",
+    )
+    return parse_verifier_output(stdout, returncode)
+
+
 def run_one(corpus: Path, task: Task, condition: str, rep: int,
             results_dir: Path, model: str, max_turns: int,
             runner=claude_runner, *, claude_code_version: str = "",
@@ -266,16 +323,13 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
         # intent-to-add so brand-new files show up in `git diff`-based acceptance
         subprocess.run(["git", "-C", str(ws), "add", "-N", "."],
                        capture_output=True, check=False)
-        verifier = subprocess.run(
-            task.accept_cmd.format(
-                ws=shlex.quote(str(ws.resolve())),
-                answer=shlex.quote(str(answer_path.resolve())),
-            ),
-            shell=True,
-            capture_output=True,
-            check=False,
+        verification = _run_task_verifier(
+            task,
+            ws,
+            answer_path,
+            results_dir / f"{task.id}-{condition}-{rep}.verifier.log",
         )
-        verifier_passed = verifier.returncode == 0
+        verifier_passed = verification.passed
         completed = terminal_succeeded(process, summary)
         accepted = completed and verifier_passed
         terminal_status = (
@@ -296,7 +350,7 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
                 "workspace_asset_sha256": row_asset_sha256,
                 "tier": task.tier, "capability": task.capability,
                 "visibility": task.visibility,
-                "score": 1.0 if verifier_passed else 0.0,
+                "rubric_score": verification.score,
                 "reused": verdict["reused"], "duplicated": verdict["duplicated"],
                 "new_lines": len(verdict["new_lines"]),
                 "reads": summary.reads, "searches": summary.searches,
@@ -362,6 +416,45 @@ def _dry_runner(
         )
     )
     return ProcessResult(transcript, "", 0)
+
+
+def _dry_run_row(
+    item,
+    *,
+    config: Config,
+) -> dict[str, object]:
+    return {
+        "task": item.task.id,
+        "kind": item.task.kind,
+        "condition": item.condition,
+        "rep": item.rep,
+        "terminal_status": "dry_run",
+        "completed": False,
+        "verifier_passed": False,
+        "accepted": False,
+        "model": config.model,
+        "claude_code_version": config.claude_code_version,
+        "max_turns": config.max_turns,
+        "corpus_revision": config.corpus.revision,
+        "seed": config.seed,
+        "pair_index": item.pair_index,
+        "challenged_tree_sha256": "0" * 64,
+        "workspace_asset_sha256": "0" * 64,
+        "tier": item.task.tier,
+        "capability": item.task.capability,
+        "visibility": item.task.visibility,
+        "rubric_score": 0.0,
+        "reused": [],
+        "duplicated": [],
+        "new_lines": 0,
+        "reads": 0,
+        "searches": 0,
+        "edits": 0,
+        "map_hits": 0,
+        "turns": 0,
+        "tokens_in": 0,
+        "tokens_out": 0,
+    }
 
 
 def _empty_results_directory(path: Path) -> Path:
@@ -487,7 +580,6 @@ def main(argv: list[str] | None = None) -> int:
                 f"Claude Code {cfg.claude_code_version} required; "
                 f"found {installed_version}"
             )
-    runner = _dry_runner if args.dry_run else claude_runner
     runs_path = results_dir / "runs.jsonl"
     pair_provenance: dict[tuple[str, int], tuple[str, str]] = {}
     total = len(planned)
@@ -496,13 +588,25 @@ def main(argv: list[str] | None = None) -> int:
             f"[{done}/{total}] {item.task.id} {item.condition} rep{item.rep}",
             flush=True,
         )
-        row = run_one(corpus, item.task, item.condition, item.rep, results_dir,
-                      cfg.model, cfg.max_turns, runner=runner,
-                      claude_code_version=cfg.claude_code_version,
-                      corpus_revision=cfg.corpus.revision,
-                      seed=cfg.seed,
-                      pair_index=item.pair_index,
-                      workspace_assets=cfg.corpus.workspace_assets)
+        row = (
+            _dry_run_row(item, config=cfg)
+            if args.dry_run
+            else run_one(
+                corpus,
+                item.task,
+                item.condition,
+                item.rep,
+                results_dir,
+                cfg.model,
+                cfg.max_turns,
+                runner=claude_runner,
+                claude_code_version=cfg.claude_code_version,
+                corpus_revision=cfg.corpus.revision,
+                seed=cfg.seed,
+                pair_index=item.pair_index,
+                workspace_assets=cfg.corpus.workspace_assets,
+            )
+        )
         tree_hash = row.get("challenged_tree_sha256")
         asset_hash = row.get("workspace_asset_sha256")
         if (

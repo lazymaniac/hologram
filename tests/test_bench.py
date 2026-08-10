@@ -106,6 +106,10 @@ class TaskLoaderTest(unittest.TestCase):
 
 
 MODEL = "claude-sonnet-5"
+PASSING_VERIFIER = (
+    "printf '%s\\n' "
+    "'{\"passed\":true,\"score\":1.0,\"diagnostics\":[]}'"
+)
 TRANSCRIPT = "\n".join([
     json.dumps({"type": "system", "subtype": "init", "model": MODEL}),
     json.dumps({"type": "assistant", "message": {"content": [
@@ -1064,7 +1068,7 @@ class RunOneTest(unittest.TestCase):
                 id="avg", tier="simple", capability="implementation",
                 kind="reuse", visibility="public",
                 prompt="Add average() that reuses normalize.",
-                accept_cmd="grep -q average {ws}/svc.py",
+                accept_cmd=f"grep -q average {{ws}}/svc.py && {PASSING_VERIFIER}",
                 expect_reuse=("normalize",))
 
             def fake_runner(
@@ -1096,7 +1100,9 @@ class RunOneTest(unittest.TestCase):
                 id="newfile", tier="simple", capability="implementation",
                 kind="reuse", visibility="public",
                 prompt="Add a helper in a new module.",
-                accept_cmd="git -C {ws} diff --stat | grep -q .",
+                accept_cmd=(
+                    "git -C {ws} diff --stat | grep -q . && " + PASSING_VERIFIER
+                ),
                 expect_reuse=("normalize",))
 
             def fake_runner(prompt, ws, model, max_turns, *, config_dir):
@@ -1114,7 +1120,7 @@ class RunOneTest(unittest.TestCase):
             task = bench.Task(
                 id="noop", tier="simple", capability="orientation",
                 kind="navigate", visibility="public", prompt="look around",
-                accept_cmd="test -d {ws}",
+                accept_cmd=f"test -d {{ws}} && {PASSING_VERIFIER}",
             )
             results = Path(tmp) / "results"
             bench.run_one(repo, task, "B", rep=1, results_dir=results,
@@ -1128,7 +1134,7 @@ class RunOneTest(unittest.TestCase):
             task = bench.Task(
                 id="partial", tier="simple", capability="implementation",
                 kind="reuse", visibility="public", prompt="Add partial().",
-                accept_cmd="grep -q partial {ws}/svc.py",
+                accept_cmd=f"grep -q partial {{ws}}/svc.py && {PASSING_VERIFIER}",
                 expect_reuse=("normalize",),
             )
             transcript = TranscriptMetricsTest()._terminal(
@@ -1165,7 +1171,10 @@ class RunOneTest(unittest.TestCase):
             task = bench.Task(
                 id="answer", tier="simple", capability="orientation",
                 kind="navigate", visibility="public", prompt="Answer.",
-                accept_cmd="grep -q 'Completed the task' {answer} && test -d {ws}",
+                accept_cmd=(
+                    "grep -q 'Completed the task' {answer} && test -d {ws} && "
+                    + PASSING_VERIFIER
+                ),
             )
             results = Path(tmp) / "results"
             row = bench.run_one(
@@ -1186,6 +1195,7 @@ class RunOneTest(unittest.TestCase):
             )
             answer = results / "answer-B-0.answer.txt"
             self.assertEqual(answer.read_text(), "Completed the task.")
+            verifier_log = (results / "answer-B-0.verifier.log").read_text()
         self.assertTrue(row["completed"])
         self.assertTrue(row["verifier_passed"])
         self.assertTrue(row["accepted"])
@@ -1199,6 +1209,8 @@ class RunOneTest(unittest.TestCase):
         self.assertEqual(row["tier"], "simple")
         self.assertEqual(row["capability"], "orientation")
         self.assertEqual(row["visibility"], "public")
+        self.assertEqual(row["rubric_score"], 1.0)
+        self.assertIn('"passed":true', verifier_log)
 
 
 class RunnerIsolationTest(unittest.TestCase):
@@ -1302,7 +1314,8 @@ class RunnerIsolationTest(unittest.TestCase):
             task = bench.Task(
                 id="isolated", tier="simple", capability="implementation",
                 kind="reuse", visibility="public", prompt="Inspect isolation.",
-                accept_cmd="test -d {ws}", expect_reuse=("normalize",),
+                accept_cmd=f"test -d {{ws}} && {PASSING_VERIFIER}",
+                expect_reuse=("normalize",),
             )
             seen: list[Path] = []
 
@@ -1498,6 +1511,7 @@ class CliTest(unittest.TestCase):
 
             with (
                 mock.patch.object(bench, "run_one", side_effect=rows),
+                mock.patch.object(bench, "claude_version", return_value="2.1.224"),
                 self.assertRaisesRegex(ValueError, "pair provenance"),
             ):
                 bench.main(
@@ -1510,7 +1524,6 @@ class CliTest(unittest.TestCase):
                         str(results),
                         "--only",
                         "noop-simple",
-                        "--dry-run",
                     ]
                 )
 
@@ -1520,19 +1533,11 @@ class CliTest(unittest.TestCase):
             taskfile = Path(tmp) / "tasks.json"
             _write_tiered_taskfile(taskfile, repo)
             results = Path(tmp) / "results"
-            row = {
-                "task": "noop",
-                "kind": "navigate",
-                "condition": "unused",
-                "rep": 0,
-                "challenged_tree_sha256": "a" * 64,
-                "workspace_asset_sha256": "b" * 64,
-                "accepted": True,
-                "reused": [],
-                "duplicated": [],
-                "new_lines": 0,
-            }
-            with mock.patch.object(bench, "run_one", return_value=row) as run:
+            with mock.patch.object(
+                bench,
+                "run_one",
+                side_effect=AssertionError("dry run executed a session"),
+            ) as run:
                 self.assertEqual(
                     bench.main(
                         [
@@ -1549,7 +1554,12 @@ class CliTest(unittest.TestCase):
                     ),
                     0,
                 )
-            self.assertEqual([call.args[2] for call in run.call_args_list], ["B", "C"])
+            run.assert_not_called()
+            rows = tuple(
+                json.loads(line)
+                for line in (results / "runs.jsonl").read_text().splitlines()
+            )
+            self.assertEqual([row["condition"] for row in rows], ["B", "C"])
 
             with self.assertRaises(SystemExit) as caught:
                 bench.main(

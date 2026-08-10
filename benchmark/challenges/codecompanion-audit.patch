@@ -1,0 +1,34 @@
+diff --git a/lua/codecompanion/benchmark_audit.lua b/lua/codecompanion/benchmark_audit.lua
+new file mode 100644
+--- /dev/null
++++ b/lua/codecompanion/benchmark_audit.lua
+@@ -0,0 +1,29 @@
++local config = require("codecompanion.config")
++
++local M = {}
++
++local function canonical_slug(value)
++  return value:gsub("_", "-"):lower()
++end
++
++local function active_slug_clone(value)
++  return value:gsub("_", "-"):lower()
++end
++
++local function _unused_private_probe()
++  return "unused-private-probe"
++end
++
++function M.exported_uncertain_surface(value)
++  return canonical_slug(value)
++end
++
++function M.reachable_config_decoy()
++  return config.interactions.chat.tools.opts
++end
++
++function M.active_slug(value)
++  return active_slug_clone(value) .. "::" .. tostring(M.reachable_config_decoy().auto_submit_errors)
++end
++
++return M

@@ -1,0 +1,505 @@
+{
+  "schema_version": 1,
+  "tasks": {
+    "file-edited-lifecycle": {
+      "pass_score": "1",
+      "forbidden_terms": [],
+      "claims": {
+        "event_helper": {
+          "weight": "1/6",
+          "allowed_symbols": ["utils.fire", "CodeCompanionFileEdited"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/utils/init.lua",
+              "anchor": "function M.fire(event, opts)"
+            },
+            {
+              "path": "lua/codecompanion/utils/init.lua",
+              "anchor": "api.nvim_exec_autocmds(\"User\", { pattern = \"CodeCompanion\" .. event, data = opts })"
+            }
+          ],
+          "required_terms": [
+            ["utils.fire"],
+            ["prefix"],
+            ["CodeCompanionFileEdited"],
+            ["User"]
+          ],
+          "forbidden_terms": []
+        },
+        "producers": {
+          "weight": "1/6",
+          "allowed_symbols": ["ACP write_text_file", "ACP handler", "create_file", "insert_edit_into_file"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/acp/init.lua",
+              "anchor": "utils.fire(\"FileEdited\", { path = path, tool = (self.adapter and self.adapter.name) or \"acp\" })"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/acp/handler.lua",
+              "anchor": "utils.fire(\"FileEdited\", { path = path, tool = adapter_name, line = line })"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/create_file.lua",
+              "anchor": "utils.fire(\"FileEdited\", { path = filepath, tool = \"create_file\" })"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/insert_edit_into_file/init.lua",
+              "anchor": "utils.fire(\"FileEdited\", {"
+            }
+          ],
+          "required_terms": [
+            ["ACP write_text_file"],
+            ["ACP handler"],
+            ["create_file"],
+            ["insert_edit_into_file"],
+            ["successful", "after"]
+          ],
+          "forbidden_terms": []
+        },
+        "consumers": {
+          "weight": "1/6",
+          "allowed_symbols": ["code_review", "edited_files"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/interactions/code_review/init.lua",
+              "anchor": "pattern = \"CodeCompanionFileEdited\""
+            },
+            {
+              "path": "lua/codecompanion/interactions/shared/edited_files.lua",
+              "anchor": "pattern = \"CodeCompanionFileEdited\""
+            }
+          ],
+          "required_terms": [
+            ["code_review"],
+            ["track"],
+            ["edited_files"],
+            ["record"]
+          ],
+          "forbidden_terms": []
+        },
+        "installation": {
+          "weight": "1/6",
+          "allowed_symbols": ["code_review", "edited_files", "setup"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/init.lua",
+              "anchor": "require(\"codecompanion.interactions.code_review\").setup()"
+            },
+            {
+              "path": "lua/codecompanion/init.lua",
+              "anchor": "require(\"codecompanion.interactions.shared.edited_files\").setup()"
+            }
+          ],
+          "required_terms": [
+            ["setup"],
+            ["code_review"],
+            ["edited_files"]
+          ],
+          "forbidden_terms": []
+        },
+        "payloads": {
+          "weight": "1/6",
+          "allowed_symbols": ["path", "tool", "line", "bufnr", "adapter"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/acp/init.lua",
+              "anchor": "utils.fire(\"FileEdited\", { path = path, tool = (self.adapter and self.adapter.name) or \"acp\" })"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/acp/handler.lua",
+              "anchor": "utils.fire(\"FileEdited\", { path = path, tool = adapter_name, line = line })"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/create_file.lua",
+              "anchor": "utils.fire(\"FileEdited\", { path = filepath, tool = \"create_file\" })"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/insert_edit_into_file/init.lua",
+              "anchor": "bufnr = source.bufnr"
+            }
+          ],
+          "required_terms": [
+            ["path"],
+            ["tool"],
+            ["line"],
+            ["bufnr"],
+            ["adapter"]
+          ],
+          "forbidden_terms": []
+        },
+        "deletion_consequence": {
+          "weight": "1/6",
+          "allowed_symbols": ["delete_file", "FileEdited", "edited_files", "code_review"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/delete_file.lua",
+              "anchor": "local function delete(action)"
+            },
+            {
+              "path": "lua/codecompanion/interactions/shared/edited_files.lua",
+              "anchor": "record(args.data)"
+            }
+          ],
+          "required_terms": [
+            ["delete_file"],
+            ["does not", "doesn't"],
+            ["FileEdited"],
+            ["edited_files"],
+            ["code_review"]
+          ],
+          "forbidden_terms": ["deletion emits FileEdited"]
+        }
+      }
+    },
+    "move-file-plan": {
+      "pass_score": "9/10",
+      "forbidden_terms": [
+        "new rename helper",
+        "custom approval system",
+        "separate edited file store",
+        "parallel tool registry"
+      ],
+      "claims": {
+        "touchpoints": {
+          "weight": "1/10",
+          "allowed_symbols": ["move_file", "config", "files", "test_move_file"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/config.lua",
+              "anchor": "[\"files\"] = {"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/create_file.lua",
+              "anchor": "name = \"create_file\""
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/delete_file.lua",
+              "anchor": "name = \"delete_file\""
+            },
+            {
+              "path": "tests/interactions/chat/tools/builtin/test_create_file.lua",
+              "anchor": "T[\"can create files\"] = function()"
+            }
+          ],
+          "required_terms": [
+            ["move_file"],
+            ["config"],
+            ["files group"],
+            ["test_move_file"]
+          ],
+          "forbidden_terms": []
+        },
+        "rename_reuse": {
+          "weight": "1/10",
+          "allowed_symbols": ["files.rename"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/utils/files.lua",
+              "anchor": "function M.rename(old_path, new_path)"
+            },
+            {
+              "path": "lua/codecompanion/utils/files.lua",
+              "anchor": "local success, err, errname = uv.fs_rename(old_path, new_path)"
+            }
+          ],
+          "required_terms": [
+            ["files.rename"],
+            ["reuse", "call"]
+          ],
+          "forbidden_terms": ["new rename helper"]
+        },
+        "containment_reuse": {
+          "weight": "1/10",
+          "allowed_symbols": ["files.is_path_within_cwd"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/utils/files.lua",
+              "anchor": "function M.is_path_within_cwd(path)"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/delete_file.lua",
+              "anchor": "if not files.is_path_within_cwd(filepath) then"
+            }
+          ],
+          "required_terms": [
+            ["files.is_path_within_cwd"],
+            ["source"],
+            ["destination"]
+          ],
+          "forbidden_terms": []
+        },
+        "approval_reuse": {
+          "weight": "1/10",
+          "allowed_symbols": ["require_approval_before", "approvals.is_approved"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/create_file.lua",
+              "anchor": "approved = approvals:is_approved(self.chat.bufnr, { tool_name = \"create_file\" })"
+            },
+            {
+              "path": "lua/codecompanion/config.lua",
+              "anchor": "require_approval_before = true"
+            }
+          ],
+          "required_terms": [
+            ["require_approval_before"],
+            ["approval"],
+            ["reuse", "existing"]
+          ],
+          "forbidden_terms": ["custom approval system"]
+        },
+        "registration_reuse": {
+          "weight": "1/10",
+          "allowed_symbols": ["config", "files", "ToolRegistry.add_single_tool"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/config.lua",
+              "anchor": "[\"create_file\"] = {"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tool_registry.lua",
+              "anchor": "function ToolRegistry:add_single_tool(tool, opts)"
+            }
+          ],
+          "required_terms": [
+            ["config"],
+            ["files group"],
+            ["ToolRegistry.add_single_tool", "add_single_tool"]
+          ],
+          "forbidden_terms": ["parallel tool registry"]
+        },
+        "tracking_reuse": {
+          "weight": "1/10",
+          "allowed_symbols": ["utils.fire", "FileEdited", "edited_files"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/create_file.lua",
+              "anchor": "utils.fire(\"FileEdited\", { path = filepath, tool = \"create_file\" })"
+            },
+            {
+              "path": "lua/codecompanion/interactions/shared/edited_files.lua",
+              "anchor": "record(args.data)"
+            }
+          ],
+          "required_terms": [
+            ["utils.fire"],
+            ["FileEdited"],
+            ["destination"],
+            ["edited_files"]
+          ],
+          "forbidden_terms": ["separate edited file store"]
+        },
+        "operation_order": {
+          "weight": "1/10",
+          "allowed_symbols": ["vim.fs.normalize", "files.is_path_within_cwd", "files.rename", "FileEdited"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/delete_file.lua",
+              "anchor": "local filepath = vim.fs.normalize(action.filepath)"
+            },
+            {
+              "path": "lua/codecompanion/utils/files.lua",
+              "anchor": "function M.is_path_within_cwd(path)"
+            },
+            {
+              "path": "lua/codecompanion/utils/files.lua",
+              "anchor": "function M.rename(old_path, new_path)"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/create_file.lua",
+              "anchor": "utils.fire(\"FileEdited\", { path = filepath, tool = \"create_file\" })"
+            }
+          ],
+          "required_terms": [
+            ["normalize"],
+            ["containment"],
+            ["collision"],
+            ["approval"],
+            ["files.rename"],
+            ["FileEdited"],
+            ["success"]
+          ],
+          "forbidden_terms": []
+        },
+        "boundary_cases": {
+          "weight": "1/10",
+          "allowed_symbols": ["files.is_path_within_cwd", "files.exists", "files.rename"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/delete_file.lua",
+              "anchor": "if not files.is_path_within_cwd(filepath) then"
+            },
+            {
+              "path": "lua/codecompanion/interactions/chat/tools/builtin/create_file.lua",
+              "anchor": "if not files.exists(filepath) then"
+            },
+            {
+              "path": "lua/codecompanion/utils/files.lua",
+              "anchor": "if not M.exists(old_path) then"
+            }
+          ],
+          "required_terms": [
+            ["outside cwd"],
+            ["symlink"],
+            ["missing source"],
+            ["existing destination"],
+            ["same path"],
+            ["directories"],
+            ["rename failure"]
+          ],
+          "forbidden_terms": []
+        },
+        "tests": {
+          "weight": "1/10",
+          "allowed_symbols": ["test_move_file", "MiniTest"],
+          "evidence": [
+            {
+              "path": "tests/interactions/chat/tools/builtin/test_create_file.lua",
+              "anchor": "T[\"can create files\"] = function()"
+            },
+            {
+              "path": "tests/interactions/chat/tools/builtin/test_delete_file.lua",
+              "anchor": "T[\"can delete a file\"] = function()"
+            }
+          ],
+          "required_terms": [
+            ["test_move_file"],
+            ["MiniTest"],
+            ["create"],
+            ["delete"]
+          ],
+          "forbidden_terms": []
+        },
+        "commands": {
+          "weight": "1/10",
+          "allowed_symbols": ["make test_file", "stylua", "git diff", "make test"],
+          "evidence": [
+            {
+              "path": "Makefile",
+              "anchor": "LC_ALL=C nvim --headless --noplugin -u ./scripts/minimal_init.lua -c \"lua MiniTest.run()\""
+            },
+            {
+              "path": "Makefile",
+              "anchor": "LC_ALL=C nvim --headless --noplugin -u ./scripts/minimal_init.lua -c \"lua MiniTest.run_file('$(FILE)')\""
+            }
+          ],
+          "required_terms": [
+            ["make test_file"],
+            ["test_move_file"],
+            ["stylua --check ."],
+            ["git diff --check"],
+            ["make test"]
+          ],
+          "forbidden_terms": []
+        }
+      }
+    },
+    "duplicate-unused-audit": {
+      "pass_score": "1",
+      "forbidden_terms": [
+        "reachable_config_decoy is unused",
+        "delete reachable_config_decoy",
+        "exported_uncertain_surface is definitely unused"
+      ],
+      "claims": {
+        "active_clone": {
+          "weight": "1/5",
+          "allowed_symbols": ["active_slug_clone", "M.active_slug"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/benchmark_audit.lua",
+              "anchor": "local function active_slug_clone(value)"
+            },
+            {
+              "path": "lua/codecompanion/benchmark_audit.lua",
+              "anchor": "return active_slug_clone(value) .. \"::\" .. tostring(M.reachable_config_decoy().auto_submit_errors)"
+            }
+          ],
+          "required_terms": [
+            ["active_slug_clone"],
+            ["active"],
+            ["clone"],
+            ["M.active_slug"]
+          ],
+          "forbidden_terms": []
+        },
+        "canonical_replacement": {
+          "weight": "1/5",
+          "allowed_symbols": ["canonical_slug", "active_slug_clone"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/benchmark_audit.lua",
+              "anchor": "local function canonical_slug(value)"
+            },
+            {
+              "path": "lua/codecompanion/benchmark_audit.lua",
+              "anchor": "return canonical_slug(value)"
+            }
+          ],
+          "required_terms": [
+            ["canonical_slug"],
+            ["replace"],
+            ["active_slug_clone"]
+          ],
+          "forbidden_terms": []
+        },
+        "strong_zero": {
+          "weight": "1/5",
+          "allowed_symbols": ["_unused_private_probe"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/benchmark_audit.lua",
+              "anchor": "local function _unused_private_probe()"
+            }
+          ],
+          "required_terms": [
+            ["_unused_private_probe"],
+            ["private"],
+            ["unreferenced", "zero"],
+            ["unused"]
+          ],
+          "forbidden_terms": []
+        },
+        "uncertain_surface": {
+          "weight": "1/5",
+          "allowed_symbols": ["M.exported_uncertain_surface"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/benchmark_audit.lua",
+              "anchor": "function M.exported_uncertain_surface(value)"
+            }
+          ],
+          "required_terms": [
+            ["M.exported_uncertain_surface"],
+            ["zero internal references"],
+            ["exported"],
+            ["uncertain"]
+          ],
+          "forbidden_terms": ["definitely unused"]
+        },
+        "reachable_decoy": {
+          "weight": "1/5",
+          "allowed_symbols": ["M.reachable_config_decoy", "M.active_slug", "config"],
+          "evidence": [
+            {
+              "path": "lua/codecompanion/benchmark_audit.lua",
+              "anchor": "function M.reachable_config_decoy()"
+            },
+            {
+              "path": "lua/codecompanion/benchmark_audit.lua",
+              "anchor": "return active_slug_clone(value) .. \"::\" .. tostring(M.reachable_config_decoy().auto_submit_errors)"
+            }
+          ],
+          "required_terms": [
+            ["M.reachable_config_decoy"],
+            ["called", "reachable"],
+            ["config"],
+            ["decoy"],
+            ["not unused"]
+          ],
+          "forbidden_terms": ["is unused", "should be deleted"]
+        }
+      }
+    }
+  }
+}
