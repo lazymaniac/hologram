@@ -35,7 +35,14 @@ if __package__:
         workspace_provenance,
     )
     from .corpus import workspace_asset_sha256 as workspace_asset_digest
-    from .schema import Config, Task, load_tasks, resolve_corpus_path
+    from .reporting import private_report, require_outside_worktree
+    from .schema import (
+        Config,
+        Task,
+        load_tasks,
+        resolve_corpus_path,
+        task_asset_paths,
+    )
     from .transcript import ProcessResult, parse_transcript, terminal_succeeded
     from .verifiers.common import Verification, parse_verifier_output
 else:
@@ -51,6 +58,7 @@ else:
 
     _schema = _shared_module("schema")
     _corpus = _shared_module("corpus")
+    _reporting = _shared_module("reporting")
     _transcript = _shared_module("transcript")
     if "benchmark.verifiers" in sys.modules:
         sys.modules.setdefault("verifiers", sys.modules["benchmark.verifiers"])
@@ -66,11 +74,16 @@ else:
     from corpus import (  # type: ignore[import-not-found,no-redef]
         workspace_asset_sha256 as workspace_asset_digest,
     )
+    from reporting import (  # type: ignore[import-not-found,no-redef]
+        private_report,
+        require_outside_worktree,
+    )
     from schema import (  # type: ignore[import-not-found,no-redef]
         Config,
         Task,
         load_tasks,
         resolve_corpus_path,
+        task_asset_paths,
     )
     from transcript import (  # type: ignore[import-not-found,no-redef]
         ProcessResult,
@@ -85,6 +98,68 @@ else:
 __all__ = ("Config", "Task", "load_tasks")
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+_WORKTREE = Path(__file__).resolve().parents[1]
+_DEFAULT_RESULTS = Path(__file__).parent / "results"
+
+
+def _manifest_path(path: Path) -> Path:
+    """Resolve a manifest without following an outside symlink into this tree."""
+
+    selected = Path(path).expanduser()
+    lexical = Path(os.path.abspath(selected))
+    resolved = selected.resolve(strict=False)
+    worktree = _WORKTREE.resolve(strict=True)
+    if resolved.is_relative_to(worktree):
+        public_manifest = worktree / "benchmark" / "tasks" / "codecompanion.json"
+        if lexical != resolved or resolved != public_manifest:
+            raise ValueError("benchmark manifest must be outside the Hologram worktree")
+    return resolved
+
+
+def _private_run_paths(
+    config: Config,
+    *,
+    manifest: Path,
+    corpus: Path,
+    results: Path | None,
+) -> Path:
+    if results is None:
+        raise ValueError("private run requires an explicit external --results path")
+    require_outside_worktree(
+        manifest,
+        worktree=_WORKTREE,
+        label="private manifest",
+    )
+    require_outside_worktree(
+        corpus,
+        worktree=_WORKTREE,
+        label="private corpus",
+    )
+    selected_results = require_outside_worktree(
+        results,
+        worktree=_WORKTREE,
+        label="private results",
+    )
+    for task in config.tasks:
+        if task.challenge is not None:
+            require_outside_worktree(
+                task.challenge.patch,
+                worktree=_WORKTREE,
+                label="private challenge",
+            )
+        for asset in task_asset_paths(task, manifest=manifest):
+            require_outside_worktree(
+                asset,
+                worktree=_WORKTREE,
+                label="private verifier or hidden-test asset",
+            )
+    for relative in config.corpus.workspace_assets:
+        require_outside_worktree(
+            corpus / relative,
+            worktree=_WORKTREE,
+            label="private workspace asset",
+        )
+    return selected_results
 
 
 def _hologram_command(*args: str) -> list[str]:
@@ -364,6 +439,8 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
 def report(rows: list[dict]) -> str:
     if not rows:
         return "no runs recorded\n"
+    if any(row.get("visibility") == "private" for row in rows):
+        return private_report(rows)
     lines = [("| condition | runs | accepted | duplication (reuse tasks) | "
               "reads | searches | turns | tokens in | tokens out |"),
              "|---|---|---|---|---|---|---|---|---|"]
@@ -473,8 +550,7 @@ def main(argv: list[str] | None = None) -> int:
     p_run = sub.add_parser("run")
     p_run.add_argument("taskfile", type=Path)
     p_run.add_argument("--corpus", type=Path)
-    p_run.add_argument("--results", type=Path,
-                       default=Path(__file__).parent / "results")
+    p_run.add_argument("--results", type=Path)
     p_run.add_argument(
         "--conditions",
         nargs="+",
@@ -490,17 +566,35 @@ def main(argv: list[str] | None = None) -> int:
     p_prepare.add_argument("taskfile", type=Path)
     p_prepare.add_argument("--corpus", type=Path, required=True)
     p_rep = sub.add_parser("report")
-    p_rep.add_argument("--results", type=Path,
-                       default=Path(__file__).parent / "results")
+    p_rep.add_argument("--results", type=Path)
     args = parser.parse_args(argv)
 
     if args.cmd == "report":
-        runs = args.results / "runs.jsonl"
+        explicit_results = args.results is not None
+        selected_results = _DEFAULT_RESULTS if args.results is None else args.results
+        if explicit_results:
+            selected_results = require_outside_worktree(
+                selected_results,
+                worktree=_WORKTREE,
+                label="explicit report results",
+            )
+        runs = selected_results / "runs.jsonl"
         rows = [json.loads(l) for l in runs.read_text().splitlines()] \
             if runs.exists() else []
-        out = args.results / "report.md"
-        out.write_text(report(rows))
-        print(out.read_text())
+        if any(row.get("visibility") == "private" for row in rows):
+            if not explicit_results:
+                raise ValueError(
+                    "private report requires an explicit external raw-results path"
+                )
+            require_outside_worktree(
+                selected_results,
+                worktree=_WORKTREE,
+                label="private report raw results",
+            )
+        out = selected_results / "report.md"
+        rendered = report(rows)
+        out.write_text(rendered, encoding="utf-8")
+        print(rendered, end="")
         return 0
 
     if args.cmd == "prepare":
@@ -510,7 +604,7 @@ def main(argv: list[str] | None = None) -> int:
             destination.mkdir(parents=True)
         try:
             cfg = load_tasks(
-                args.taskfile,
+                _manifest_path(args.taskfile),
                 corpus_override=destination,
                 environ=os.environ,
             )
@@ -525,8 +619,9 @@ def main(argv: list[str] | None = None) -> int:
         print(prepared)
         return 0
 
+    manifest = _manifest_path(args.taskfile)
     cfg = load_tasks(
-        args.taskfile,
+        manifest,
         corpus_override=args.corpus,
         environ=os.environ,
     )
@@ -535,8 +630,18 @@ def main(argv: list[str] | None = None) -> int:
         corpus_override=args.corpus,
         environ=os.environ,
     )
+    selected_results = (
+        _private_run_paths(
+            cfg,
+            manifest=manifest,
+            corpus=corpus,
+            results=args.results,
+        )
+        if cfg.corpus.visibility == "private"
+        else (_DEFAULT_RESULTS if args.results is None else args.results)
+    )
     verify_prepared_corpus(cfg.corpus, corpus)
-    results_dir = _empty_results_directory(args.results)
+    results_dir = _empty_results_directory(selected_results)
     tasks = [t for t in cfg.tasks if args.only is None or t.id in args.only]
     if not tasks:
         raise ValueError("benchmark selection contains no tasks")

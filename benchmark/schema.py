@@ -29,6 +29,10 @@ _CAPABILITY_KIND: Mapping[str, str] = {
     "implementation": "reuse",
     "audit": "navigate",
 }
+_SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", "(", ")"})
+_ASSET_SUFFIXES = frozenset(
+    {".json", ".lua", ".patch", ".py", ".sh", ".toml", ".yaml", ".yml"}
+)
 
 
 @dataclass(frozen=True)
@@ -306,6 +310,61 @@ def _task(value: object, manifest: Path, index: int) -> Task:
     )
 
 
+def task_asset_paths(task: Task, *, manifest: Path) -> tuple[Path, ...]:
+    """Return verifier and hidden-test paths named by a private command.
+
+    Private commands must expose filesystem-backed verifier inputs so the
+    harness can prove they live outside its own worktree. Workspace and answer
+    placeholders are session-owned and therefore intentionally excluded.
+    """
+
+    try:
+        words = shlex.split(task.accept_cmd)
+    except ValueError as error:  # pragma: no cover - load_tasks already validates
+        raise ValueError("task accept_cmd is not valid shell syntax") from error
+    if task.visibility == "private" and any(word in {"-c", "--command"} for word in words):
+        raise ValueError("private verifier commands must not hide assets in shell code")
+    assets: list[Path] = []
+    module_argument = False
+    for word in words:
+        if module_argument:
+            if task.visibility == "private":
+                raise ValueError(
+                    "private verifier modules are not externally path-auditable"
+                )
+            module_argument = False
+            continue
+        if word == "-m":
+            module_argument = True
+            continue
+        if word in _SHELL_OPERATORS or "{ws}" in word or "{answer}" in word:
+            continue
+        candidate = word
+        if candidate.startswith((">>", "<<")):
+            candidate = candidate[2:]
+        elif candidate.startswith((">", "<")):
+            candidate = candidate[1:]
+        if "=" in candidate and not candidate.startswith(("/", "./", "../", "~")):
+            _name, candidate = candidate.split("=", 1)
+        if not candidate or candidate.startswith("-"):
+            continue
+        path = Path(candidate).expanduser()
+        pathlike = (
+            path.is_absolute()
+            or candidate.startswith(("./", "../", "~"))
+            or "/" in candidate
+            or path.suffix.casefold() in _ASSET_SUFFIXES
+        )
+        if not pathlike:
+            continue
+        if not path.is_absolute():
+            path = manifest.parent / path
+        resolved = path.resolve(strict=False)
+        if resolved not in assets:
+            assets.append(resolved)
+    return tuple(assets)
+
+
 def resolve_corpus_path(
     spec: BenchmarkCorpus,
     *,
@@ -410,4 +469,11 @@ def load_tasks(
     )
 
 
-__all__ = ("BenchmarkCorpus", "Challenge", "Config", "Task", "load_tasks")
+__all__ = (
+    "BenchmarkCorpus",
+    "Challenge",
+    "Config",
+    "Task",
+    "load_tasks",
+    "task_asset_paths",
+)
