@@ -221,13 +221,20 @@ _CALL_KINDS = frozenset(
 )
 _CONSTRUCT_KINDS = frozenset(
     {
+        "anonymous_object_creation_expression",
+        "array_creation_expression",
+        "compound_literal_expression",
         "composite_literal",
+        "constructor_delegation_call",
         "constructor_invocation",
         "explicit_constructor_invocation",
+        "implicit_array_creation_expression",
+        "implicit_object_creation_expression",
         "new_expression",
         "object_creation_expression",
         "struct_expression",
         "struct_literal",
+        "table_constructor",
     }
 )
 _TYPESCRIPT_CALLABLE_KINDS = frozenset(
@@ -300,7 +307,7 @@ _TYPESCRIPT_DECLARATION_BOUNDARIES = frozenset(
         "type_alias_declaration",
     }
 )
-_DECLARATION_BOUNDARIES_BY_LANGUAGE: Mapping[Language, frozenset[str]] = (
+_OWNED_REGION_BOUNDARIES_BY_LANGUAGE: Mapping[Language, frozenset[str]] = (
     MappingProxyType(
         {
             Language.JAVA: frozenset(
@@ -321,11 +328,15 @@ _DECLARATION_BOUNDARIES_BY_LANGUAGE: Mapping[Language, frozenset[str]] = (
             Language.KOTLIN: frozenset(
                 {"class_declaration", "object_declaration", "type_alias"}
             ),
-            Language.GO: frozenset(),
+            Language.GO: frozenset({"type_declaration"}),
             Language.RUST: frozenset(
                 {
+                    "async_block",
+                    "const_item",
                     "enum_item",
                     "impl_item",
+                    "mod_item",
+                    "static_item",
                     "struct_item",
                     "trait_item",
                     "type_item",
@@ -362,37 +373,79 @@ _DECLARATION_BOUNDARIES_BY_LANGUAGE: Mapping[Language, frozenset[str]] = (
 _OWNED_BOUNDARIES_BY_LANGUAGE: Mapping[Language, frozenset[str]] = MappingProxyType(
     {
         language: _CALLABLE_KINDS_BY_LANGUAGE[language]
-        | _DECLARATION_BOUNDARIES_BY_LANGUAGE[language]
+        | _OWNED_REGION_BOUNDARIES_BY_LANGUAGE[language]
         for language in Language
     }
 )
-_CONTROL_KINDS: Mapping[str, str] = MappingProxyType(
+_COMMON_CONTROL_KINDS: Mapping[str, str] = MappingProxyType(
     {
-        "if_statement": "if",
-        "if_expression": "if",
+        "catch_block": "catch",
+        "catch_clause": "catch",
         "conditional_expression": "if",
-        "for_statement": "loop",
+        "enhanced_for_statement": "loop",
+        "except_clause": "catch",
+        "expression_switch_statement": "match",
+        "finally_clause": "finally",
         "for_expression": "loop",
         "for_in_statement": "loop",
-        "enhanced_for_statement": "loop",
-        "while_statement": "loop",
-        "while_expression": "loop",
-        "do_statement": "loop",
+        "for_statement": "loop",
+        "if_expression": "if",
+        "if_statement": "if",
         "loop_expression": "loop",
-        "try_statement": "try",
-        "try_expression": "try",
-        "catch_clause": "catch",
-        "catch_block": "catch",
-        "except_clause": "catch",
-        "finally_clause": "finally",
         "match_expression": "match",
         "match_statement": "match",
+        "select_statement": "match",
         "switch_expression": "match",
         "switch_statement": "match",
+        "ternary_expression": "if",
+        "try_expression": "try",
+        "try_statement": "try",
         "type_switch_statement": "match",
-        "select_statement": "match",
         "when_expression": "match",
+        "while_expression": "loop",
+        "while_statement": "loop",
         "with_statement": "with",
+    }
+)
+
+
+def _control_kinds(**overrides: str) -> Mapping[str, str]:
+    return MappingProxyType({**_COMMON_CONTROL_KINDS, **overrides})
+
+
+_TYPESCRIPT_CONTROL_KINDS = _control_kinds(do_statement="loop")
+_CONTROL_KINDS_BY_LANGUAGE: Mapping[Language, Mapping[str, str]] = MappingProxyType(
+    {
+        Language.JAVA: _control_kinds(
+            do_statement="loop",
+            try_with_resources_statement="try",
+        ),
+        Language.PYTHON: _COMMON_CONTROL_KINDS,
+        Language.TYPESCRIPT: _TYPESCRIPT_CONTROL_KINDS,
+        Language.JAVASCRIPT: _TYPESCRIPT_CONTROL_KINDS,
+        Language.TSX: _TYPESCRIPT_CONTROL_KINDS,
+        Language.VUE: _TYPESCRIPT_CONTROL_KINDS,
+        Language.SVELTE: _TYPESCRIPT_CONTROL_KINDS,
+        Language.KOTLIN: _control_kinds(
+            do_while_statement="loop",
+            finally_block="finally",
+        ),
+        Language.GO: _COMMON_CONTROL_KINDS,
+        Language.RUST: _COMMON_CONTROL_KINDS,
+        Language.CSHARP: _control_kinds(
+            do_statement="loop",
+            foreach_statement="loop",
+            lock_statement="with",
+            using_statement="with",
+        ),
+        Language.C: _control_kinds(do_statement="loop"),
+        Language.CPP: _control_kinds(
+            do_statement="loop",
+            for_range_loop="loop",
+        ),
+        Language.LUA: _control_kinds(repeat_statement="loop"),
+        Language.HTML: _COMMON_CONTROL_KINDS,
+        Language.HELM: _COMMON_CONTROL_KINDS,
     }
 )
 _TYPE_KINDS = frozenset(
@@ -446,8 +499,11 @@ _IDENTIFIER_KINDS = frozenset(
 )
 _BINDING_LEAF_KINDS = _IDENTIFIER_KINDS | frozenset(
     {
+        "implicit_parameter",
+        "self",
         "shorthand_field_identifier",
         "shorthand_property_identifier_pattern",
+        "this",
     }
 )
 _NAME_KINDS = _BINDING_LEAF_KINDS
@@ -456,10 +512,16 @@ _PARAMETER_CONTAINER_KINDS = frozenset(
         "class_parameters",
         "formal_parameters",
         "function_value_parameters",
+        "inferred_parameters",
         "lambda_parameters",
         "parameter_list",
         "parameters",
+        "closure_parameters",
     }
+)
+_DEFAULT_PARAMETER_FIELDS = ("parameters", "parameter", "value_parameters")
+_PARAMETER_FIELDS_BY_LANGUAGE: Mapping[Language, tuple[str, ...]] = MappingProxyType(
+    {Language.GO: ("receiver", "parameters", "result")}
 )
 _BODY_KINDS = frozenset(
     {
@@ -469,6 +531,15 @@ _BODY_KINDS = frozenset(
         "function_body",
         "statement_block",
     }
+)
+_ADDITIONAL_BODY_CHILD_KINDS: Mapping[Language, Mapping[str, frozenset[str]]] = (
+    MappingProxyType(
+        {
+            Language.KOTLIN: MappingProxyType(
+                {"secondary_constructor": frozenset({"constructor_delegation_call"})}
+            )
+        }
+    )
 )
 
 _BindingSelector = Literal[
@@ -485,7 +556,7 @@ class _BindingRule:
     fields: tuple[str, ...] = ()
     child_kinds: tuple[str, ...] = ()
     selector: _BindingSelector = "identifier"
-    required_token: str | None = None
+    required_tokens: tuple[str, ...] = ()
 
 
 def _rules(values: Mapping[str, _BindingRule]) -> Mapping[str, _BindingRule]:
@@ -518,6 +589,8 @@ _PARAMETER_BINDING_RULES: Mapping[Language, Mapping[str, _BindingRule]] = (
             Language.JAVA: _rules(
                 {
                     "formal_parameter": _BindingRule(("name",)),
+                    "inferred_parameters": _BindingRule(child_kinds=("identifier",)),
+                    "receiver_parameter": _BindingRule(child_kinds=("this",)),
                     "spread_parameter": _BindingRule(
                         child_kinds=("variable_declarator",),
                         selector="declarator",
@@ -544,9 +617,18 @@ _PARAMETER_BINDING_RULES: Mapping[Language, Mapping[str, _BindingRule]] = (
                 }
             ),
             Language.RUST: _rules(
-                {"parameter": _BindingRule(("pattern",), selector="pattern")}
+                {
+                    "closure_parameters": _BindingRule(selector="pattern"),
+                    "parameter": _BindingRule(("pattern",), selector="pattern"),
+                    "self_parameter": _BindingRule(child_kinds=("self",)),
+                }
             ),
-            Language.CSHARP: _rules({"parameter": _BindingRule(("name",))}),
+            Language.CSHARP: _rules(
+                {
+                    "parameter": _BindingRule(("name",)),
+                    "parameter_list": _BindingRule(("name",)),
+                }
+            ),
             Language.C: _C_PARAMETER_RULES,
             Language.CPP: _CPP_PARAMETER_RULES,
             Language.LUA: _rules({"parameters": _BindingRule(("name",))}),
@@ -557,7 +639,11 @@ _PARAMETER_BINDING_RULES: Mapping[Language, Mapping[str, _BindingRule]] = (
 _TYPESCRIPT_LOCAL_RULES = _rules(
     {
         "catch_clause": _BindingRule(("parameter",), selector="pattern"),
-        "for_in_statement": _BindingRule(("left",), selector="pattern"),
+        "for_in_statement": _BindingRule(
+            ("left",),
+            selector="pattern",
+            required_tokens=("const", "let", "var"),
+        ),
         "variable_declarator": _BindingRule(("name",), selector="pattern"),
     }
 )
@@ -568,6 +654,7 @@ _CPP_LOCAL_RULES = _rules(
     {
         **_C_LOCAL_RULES,
         "catch_clause": _BindingRule(("parameters",), selector="parameters"),
+        "for_range_loop": _BindingRule(("declarator",), selector="declarator"),
     }
 )
 _LOCAL_BINDING_RULES: Mapping[Language, Mapping[str, _BindingRule]] = MappingProxyType(
@@ -598,7 +685,7 @@ _LOCAL_BINDING_RULES: Mapping[Language, Mapping[str, _BindingRule]] = MappingPro
         ),
         Language.GO: _rules(
             {
-                "range_clause": _BindingRule(("left",), required_token=":="),
+                "range_clause": _BindingRule(("left",), required_tokens=(":=",)),
                 "short_var_declaration": _BindingRule(("left",)),
                 "var_spec": _BindingRule(("name",)),
             }
@@ -640,6 +727,7 @@ _LOCAL_BINDING_RULES: Mapping[Language, Mapping[str, _BindingRule]] = MappingPro
 class _MemberRule:
     fields: tuple[str, ...] = ()
     child_kinds: tuple[str, ...] = ()
+    required_fields: tuple[str, ...] = ()
     last_named: bool = False
     continuation_only: bool = False
 
@@ -654,7 +742,15 @@ _TYPESCRIPT_MEMBER_RULES = _member_rules(
 _MEMBER_RULES_BY_LANGUAGE: Mapping[Language, Mapping[str, _MemberRule]] = (
     MappingProxyType(
         {
-            Language.JAVA: _member_rules({"field_access": _MemberRule(("field",))}),
+            Language.JAVA: _member_rules(
+                {
+                    "field_access": _MemberRule(("field",)),
+                    "method_invocation": _MemberRule(
+                        ("name",),
+                        required_fields=("object",),
+                    ),
+                }
+            ),
             Language.TYPESCRIPT: _TYPESCRIPT_MEMBER_RULES,
             Language.JAVASCRIPT: _TYPESCRIPT_MEMBER_RULES,
             Language.TSX: _TYPESCRIPT_MEMBER_RULES,
@@ -666,7 +762,19 @@ _MEMBER_RULES_BY_LANGUAGE: Mapping[Language, Mapping[str, _MemberRule]] = (
             Language.GO: _member_rules(
                 {"selector_expression": _MemberRule(("field",))}
             ),
-            Language.RUST: _member_rules({"field_expression": _MemberRule(("field",))}),
+            Language.RUST: _member_rules(
+                {
+                    "call_expression": _MemberRule(
+                        child_kinds=("generic_function", "scoped_identifier")
+                    ),
+                    "field_expression": _MemberRule(("field",)),
+                    "generic_function": _MemberRule(
+                        child_kinds=("scoped_identifier",),
+                        continuation_only=True,
+                    ),
+                    "scoped_identifier": _MemberRule(("name",), continuation_only=True),
+                }
+            ),
             Language.CSHARP: _member_rules(
                 {
                     "generic_name": _MemberRule(
@@ -679,10 +787,17 @@ _MEMBER_RULES_BY_LANGUAGE: Mapping[Language, Mapping[str, _MemberRule]] = (
             Language.C: _member_rules({"field_expression": _MemberRule(("field",))}),
             Language.CPP: _member_rules(
                 {
+                    "call_expression": _MemberRule(
+                        child_kinds=("qualified_identifier",)
+                    ),
                     "dependent_name": _MemberRule(
                         child_kinds=("template_method",), continuation_only=True
                     ),
                     "field_expression": _MemberRule(("field",)),
+                    "qualified_identifier": _MemberRule(
+                        ("name",), continuation_only=True
+                    ),
+                    "template_function": _MemberRule(("name",), continuation_only=True),
                     "template_method": _MemberRule(("name",), continuation_only=True),
                 }
             ),
@@ -1017,7 +1132,10 @@ def _walk_owned(root: object, boundary_kinds: frozenset[str]) -> Iterable[object
 def _parameter_parts(source: SourceFile, callable_node: object) -> tuple[object, ...]:
     roots = _field_roots(
         callable_node,
-        ("parameters", "parameter", "value_parameters"),
+        _PARAMETER_FIELDS_BY_LANGUAGE.get(
+            source.language,
+            _DEFAULT_PARAMETER_FIELDS,
+        ),
     )
     if roots:
         return roots
@@ -1031,7 +1149,7 @@ def _parameter_parts(source: SourceFile, callable_node: object) -> tuple[object,
         found.extend(
             _field_roots(
                 declarator,
-                ("parameters", "parameter", "value_parameters"),
+                _DEFAULT_PARAMETER_FIELDS,
             )
         )
         pending.extend(_field_roots(declarator, ("declarator",)))
@@ -1046,16 +1164,20 @@ def _parameter_parts(source: SourceFile, callable_node: object) -> tuple[object,
 
 
 def _body_parts(source: SourceFile, callable_node: object) -> tuple[object, ...]:
-    roots = _field_roots(callable_node, ("body",))
+    roots = list(_field_roots(callable_node, ("body",)))
+    if not roots:
+        roots.extend(_child_roots(callable_node, _BODY_KINDS))
+    callable_kind = str(getattr(callable_node, "type", ""))
+    extra_kinds = _ADDITIONAL_BODY_CHILD_KINDS.get(source.language, {}).get(
+        callable_kind,
+        frozenset(),
+    )
+    roots.extend(_child_roots(callable_node, extra_kinds))
     if roots:
-        return roots
-    direct = _child_roots(callable_node, _BODY_KINDS)
-    if direct:
-        return direct
-    if (
-        source.language is Language.KOTLIN
-        and str(getattr(callable_node, "type", "")) == "lambda_literal"
-    ):
+        return tuple(
+            {_node_key(root): root for root in sorted(roots, key=_node_key)}.values()
+        )
+    if source.language is Language.KOTLIN and callable_kind == "lambda_literal":
         return tuple(
             child
             for child in getattr(callable_node, "children", ())
@@ -1109,6 +1231,7 @@ _PATTERN_CONTAINERS = frozenset(
     {
         "array_pattern",
         "captured_pattern",
+        "closure_parameters",
         "generic_pattern",
         "match_pattern",
         "mut_pattern",
@@ -1216,8 +1339,8 @@ def _parameter_list_binding_nodes(root: object) -> tuple[object, ...]:
 
 
 def _rule_binding_nodes(node: object, rule: _BindingRule) -> tuple[object, ...]:
-    if rule.required_token is not None and not any(
-        ast_text(child) == rule.required_token
+    if rule.required_tokens and not any(
+        ast_text(child) in rule.required_tokens
         for child in getattr(node, "children", ())
     ):
         return ()
@@ -1294,6 +1417,10 @@ def _is_member_child(
     if rule is None:
         return False
     if rule.continuation_only and not inherited:
+        return False
+    if rule.required_fields and not all(
+        _field_roots(parent, (field,)) for field in rule.required_fields
+    ):
         return False
     if rule.fields:
         return any(
@@ -1423,7 +1550,7 @@ class _TreeSitterBodyEventWalker:
         if not is_root and kind in boundary_kinds:
             return
 
-        control = _CONTROL_KINDS.get(kind)
+        control = _CONTROL_KINDS_BY_LANGUAGE[self.source.language].get(kind)
         if control is not None:
             self.event(BodyEventKind.CONTROL_ENTER, control, node)
 

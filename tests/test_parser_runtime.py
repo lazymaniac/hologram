@@ -578,9 +578,9 @@ class ParserHelperTest(unittest.TestCase):
 
     def test_stdlib_parameter_defaults_are_emitted_in_source_order(self) -> None:
         raw = (
-            b"def run(first=alpha(), second=beta(), *, "
-            b"third=gamma(), fourth: Kind=delta()):\n"
-            b"    body()\n"
+            b"def run(first=alpha(), second=beta(), *args, "
+            b"third=gamma(), fourth: Kind=delta(), **kwargs):\n"
+            b"    body(*args, value=first, **kwargs)\n"
         )
         snapshot = source(Language.PYTHON, file="defaults.py", raw=raw)
         callable_node = ast.parse(snapshot.text).body[0]
@@ -600,21 +600,275 @@ class ParserHelperTest(unittest.TestCase):
                 (BodyEventKind.CALL, "alpha"),
                 (BodyEventKind.PARAM, "second"),
                 (BodyEventKind.CALL, "beta"),
+                (BodyEventKind.PARAM, "args"),
                 (BodyEventKind.PARAM, "third"),
                 (BodyEventKind.CALL, "gamma"),
                 (BodyEventKind.PARAM, "fourth"),
                 (BodyEventKind.TYPE, "Kind"),
                 (BodyEventKind.CALL, "delta"),
+                (BodyEventKind.PARAM, "kwargs"),
                 (BodyEventKind.CALL, "body"),
             ),
         )
-        for name in ("first", "second", "third", "fourth"):
+        for name in ("first", "second", "args", "third", "fourth", "kwargs"):
             event = next(
                 item
                 for item in events
                 if item.kind is BodyEventKind.PARAM and item.text == name
             )
             self.assertEqual(event.span, token_span(snapshot, 1, name))
+
+        operators = tuple(
+            (event.text, event.span)
+            for event in events
+            if event.kind is BodyEventKind.OPERATOR
+        )
+        self.assertEqual(
+            operators,
+            (
+                ("=", token_span(snapshot, 1, "=", occurrence=1)),
+                ("=", token_span(snapshot, 1, "=", occurrence=2)),
+                ("*", token_span(snapshot, 1, "*", occurrence=1)),
+                ("=", token_span(snapshot, 1, "=", occurrence=3)),
+                ("=", token_span(snapshot, 1, "=", occurrence=4)),
+                ("**", token_span(snapshot, 1, "**")),
+                ("*", token_span(snapshot, 2, "*", occurrence=1)),
+                ("=", token_span(snapshot, 2, "=")),
+                ("**", token_span(snapshot, 2, "**")),
+            ),
+        )
+
+    def test_stdlib_operator_events_use_each_exact_source_token_span(self) -> None:
+        raw = (
+            b"def run(a, b, c, middle_x):\n"
+            b"    assigned = alias = a\n"
+            b"    assigned += b\n"
+            b"    named = (captured := c)\n"
+            b"    binary = a + b\n"
+            b"    compared = a < b <= c\n"
+            b"    if a:\n"
+            b"        return a and middle_x and c\n"
+            b"    return not a or b\n"
+            b'    text = f"{a + b}"\n'
+            b'    annotated: Literal["="] = a\n'
+            b"    relation = a is not b\n"
+            b"    membership = a not in c\n" + "    Kvalue = a + b\n".encode()
+        )
+        snapshot = source(Language.PYTHON, file="operators.py", raw=raw)
+        callable_node = ast.parse(snapshot.text).body[0]
+
+        operators = tuple(
+            (event.text, event.span)
+            for event in ast_body_events(snapshot, callable_node)
+            if event.kind is BodyEventKind.OPERATOR
+        )
+        expected = (
+            ("=", token_span(snapshot, 2, "=", occurrence=1)),
+            ("=", token_span(snapshot, 2, "=", occurrence=2)),
+            ("+=", token_span(snapshot, 3, "+=")),
+            ("=", token_span(snapshot, 4, "=")),
+            (":=", token_span(snapshot, 4, ":=")),
+            ("=", token_span(snapshot, 5, "=")),
+            ("+", token_span(snapshot, 5, "+")),
+            ("=", token_span(snapshot, 6, "=")),
+            ("<", token_span(snapshot, 6, "<")),
+            ("<=", token_span(snapshot, 6, "<=")),
+            ("and", token_span(snapshot, 8, "and", occurrence=1)),
+            ("and", token_span(snapshot, 8, "and", occurrence=2)),
+            ("not", token_span(snapshot, 9, "not")),
+            ("or", token_span(snapshot, 9, "or")),
+            ("=", token_span(snapshot, 10, "=")),
+            ("+", token_span(snapshot, 10, "+")),
+            ("=", token_span(snapshot, 11, "=", occurrence=2)),
+            ("=", token_span(snapshot, 12, "=")),
+            (
+                "is not",
+                SourceSpan(
+                    snapshot.file,
+                    12,
+                    token_span(snapshot, 12, "is").start_column,
+                    12,
+                    token_span(snapshot, 12, "not").end_column,
+                ),
+            ),
+            ("=", token_span(snapshot, 13, "=")),
+            (
+                "not in",
+                SourceSpan(
+                    snapshot.file,
+                    13,
+                    token_span(snapshot, 13, "not").start_column,
+                    13,
+                    token_span(snapshot, 13, "in").end_column,
+                ),
+            ),
+            ("=", token_span(snapshot, 14, "=")),
+            ("+", token_span(snapshot, 14, "+")),
+        )
+
+        self.assertEqual(operators, expected)
+        self.assertEqual(expected[10][1].start_column, 17)
+        self.assertEqual(expected[10][1].end_column, 20)
+        self.assertEqual(expected[11][1].start_column, 30)
+        self.assertEqual(expected[11][1].end_column, 33)
+
+    def test_stdlib_import_match_and_delete_binding_roles_are_exact(self) -> None:
+        raw = (
+            b"def run(subject, existing):\n"
+            b"    import package.module\n"
+            b"    import other.module as renamed\n"
+            b"    from source import first, second as alias\n"
+            b"    match subject:\n"
+            b"        case [head, *tail]:\n"
+            b"            use(head, tail)\n"
+            b'        case {"first": value, "second": other, **rest}:\n'
+            b"            use(value, other, rest)\n"
+            b"        case Point(left=left_value, right=right_value) as point:\n"
+            b"            use(left_value, right_value, point)\n"
+            b"    del existing\n"
+            b"    use(existing)\n"
+        )
+        snapshot = source(Language.PYTHON, file="bindings.py", raw=raw)
+        callable_node = ast.parse(snapshot.text).body[0]
+        events = ast_body_events(snapshot, callable_node)
+        event_pairs = {(event.kind, event.span) for event in events}
+
+        bindings = (
+            (2, "package", 1),
+            (3, "renamed", 1),
+            (4, "first", 1),
+            (4, "alias", 1),
+            (6, "head", 1),
+            (6, "tail", 1),
+            (8, "value", 1),
+            (8, "other", 1),
+            (8, "rest", 1),
+            (10, "left_value", 1),
+            (10, "right_value", 1),
+            (10, "point", 1),
+        )
+        for line, name, occurrence in bindings:
+            with self.subTest(binding=name):
+                span = token_span(snapshot, line, name, occurrence=occurrence)
+                self.assertIn((BodyEventKind.LOCAL, span), event_pairs)
+                self.assertNotIn((BodyEventKind.NAME, span), event_pairs)
+
+        for line, name, occurrence in (
+            (2, "module", 1),
+            (3, "other", 1),
+            (3, "module", 1),
+            (4, "source", 1),
+            (4, "second", 1),
+        ):
+            self.assertNotIn(
+                (
+                    BodyEventKind.LOCAL,
+                    token_span(snapshot, line, name, occurrence=occurrence),
+                ),
+                event_pairs,
+            )
+
+        point_span = token_span(snapshot, 10, "Point")
+        deleted_span = token_span(snapshot, 12, "existing")
+        used_span = token_span(snapshot, 13, "existing")
+        self.assertIn((BodyEventKind.NAME, point_span), event_pairs)
+        self.assertIn((BodyEventKind.NAME, deleted_span), event_pairs)
+        self.assertNotIn((BodyEventKind.LOCAL, deleted_span), event_pairs)
+        self.assertIn((BodyEventKind.NAME, used_span), event_pairs)
+
+        mapping_events = tuple(
+            event.text
+            for event in events
+            if event.span.start_line == 8
+            and event.kind in {BodyEventKind.LITERAL, BodyEventKind.LOCAL}
+        )
+        self.assertEqual(
+            mapping_events,
+            ("<string>", "value", "<string>", "other", "rest"),
+        )
+
+    def test_stdlib_string_binders_use_unicode_source_token_spans(self) -> None:
+        raw = (
+            "def run(Kelvin):\n"
+            "    import module as Kalias\n"
+            "    try:\n"
+            "        visible()\n"
+            "    except Error as Error:\n"
+            "        visible(Error)\n"
+            "    def nested():\n"
+            "        hidden()\n"
+            "    class Nested:\n"
+            "        hidden()\n"
+            "    match Kelvin:\n"
+            '        case {"key": Kcapture}:\n'
+            "            visible(Kcapture)\n"
+            "    visible(nested, Nested)\n"
+        ).encode()
+        snapshot = source(Language.PYTHON, file="unicode_binders.py", raw=raw)
+        callable_node = ast.parse(snapshot.text).body[0]
+        events = ast_body_events(snapshot, callable_node)
+        event_pairs = {(event.kind, event.span) for event in events}
+
+        expected = (
+            (BodyEventKind.PARAM, 1, "Kelvin"),
+            (BodyEventKind.LOCAL, 2, "Kalias"),
+            (BodyEventKind.LOCAL, 5, "Error", 2),
+            (BodyEventKind.LOCAL, 7, "nested"),
+            (BodyEventKind.LOCAL, 9, "Nested"),
+            (BodyEventKind.LOCAL, 12, "Kcapture"),
+        )
+        for expected_binding in expected:
+            kind, line, name, *rest = expected_binding
+            occurrence = rest[0] if rest else 1
+            self.assertIn(
+                (kind, token_span(snapshot, line, name, occurrence=occurrence)),
+                event_pairs,
+            )
+
+        self.assertNotIn("hidden", {event.text for event in events})
+        self.assertIn(
+            (BodyEventKind.TYPE, token_span(snapshot, 5, "Error")),
+            event_pairs,
+        )
+
+    def test_stdlib_callable_scope_excludes_external_and_comprehension_binders(
+        self,
+    ) -> None:
+        raw = (
+            b"def enclosing():\n"
+            b"    outer = 0\n"
+            b"    def run(items, subject):\n"
+            b"        global shared\n"
+            b"        nonlocal outer\n"
+            b"        shared = 1\n"
+            b"        outer = 2\n"
+            b"        local = 3\n"
+            b"        values = [transform(item) for item in items]\n"
+            b"        match subject:\n"
+            b'            case ("a", choice) | ("b", choice):\n'
+            b"                visible(choice)\n"
+            b"        return local\n"
+        )
+        snapshot = source(Language.PYTHON, file="scope.py", raw=raw)
+        enclosing = ast.parse(snapshot.text).body[0]
+        callable_node = enclosing.body[1]
+        events = ast_body_events(snapshot, callable_node)
+        event_pairs = {(event.kind, event.span) for event in events}
+
+        for line, name in ((6, "shared"), (7, "outer")):
+            span = token_span(snapshot, line, name)
+            self.assertIn((BodyEventKind.NAME, span), event_pairs)
+            self.assertNotIn((BodyEventKind.LOCAL, span), event_pairs)
+        for line, name in ((8, "local"), (9, "values")):
+            span = token_span(snapshot, line, name)
+            self.assertIn((BodyEventKind.LOCAL, span), event_pairs)
+        for occurrence in (1, 2):
+            span = token_span(snapshot, 9, "item", occurrence=occurrence)
+            self.assertIn((BodyEventKind.NAME, span), event_pairs)
+            self.assertNotIn((BodyEventKind.LOCAL, span), event_pairs)
+        for occurrence in (1, 2):
+            span = token_span(snapshot, 11, "choice", occurrence=occurrence)
+            self.assertIn((BodyEventKind.LOCAL, span), event_pairs)
 
     def test_tree_sitter_spans_and_call_events_share_utf8_byte_coordinates(
         self,
@@ -767,6 +1021,117 @@ class ParserHelperTest(unittest.TestCase):
                     },
                 )
                 self.assertNotIn("hidden", {event.text for event in events})
+
+    def test_tree_sitter_extended_parameter_roles_use_exact_identifier_spans(
+        self,
+    ) -> None:
+        cases = (
+            (
+                Language.JAVA,
+                (
+                    b"class Probe { void run() {\n"
+                    b"  Factory action = (left, right) -> visible(left, right);\n"
+                    b"} }\n"
+                ),
+                ("lambda_expression",),
+                ((2, "left", 1), (2, "right", 1)),
+            ),
+            (
+                Language.GO,
+                (
+                    b"package probe\n"
+                    b"type Probe struct{}\n"
+                    b"func (first, second *Probe) run(left, right int) "
+                    b"(value int, err error) {\n"
+                    b"  visible(first, second, left, right, value, err)\n"
+                    b"  return\n"
+                    b"}\n"
+                ),
+                ("method_declaration",),
+                (
+                    (3, "first", 1),
+                    (3, "second", 1),
+                    (3, "left", 1),
+                    (3, "right", 1),
+                    (3, "value", 1),
+                    (3, "err", 1),
+                ),
+            ),
+            (
+                Language.CSHARP,
+                (
+                    b"class Probe { void run(params int[] rest) {\n"
+                    b"  System.Func<int, int> action = value => visible(value);\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+                ((1, "rest", 1),),
+            ),
+            (
+                Language.CSHARP,
+                b"class Probe { void run() { System.Func<int, int> action = value => visible(value); } }\n",
+                ("lambda_expression",),
+                ((1, "value", 1),),
+            ),
+            (
+                Language.JAVA,
+                b"class Probe { void run(Probe this, int value) { visible(value); } }\n",
+                ("method_declaration",),
+                ((1, "this", 1), (1, "value", 1)),
+            ),
+            (
+                Language.RUST,
+                b"fn run() { let action = |left, right| visible(left, right); }\n",
+                ("closure_expression",),
+                ((1, "left", 1), (1, "right", 1)),
+            ),
+            (
+                Language.RUST,
+                (
+                    b"fn run() { let action = |(left, right), mut value| "
+                    b"visible(left, right, value); }\n"
+                ),
+                ("closure_expression",),
+                ((1, "left", 1), (1, "right", 1), (1, "value", 1)),
+            ),
+            (
+                Language.RUST,
+                b"impl Probe { fn run(self: Self, value: i32) { visible(self, value); } }\n",
+                ("function_item",),
+                ((1, "self", 1), (1, "value", 1)),
+            ),
+            (
+                Language.RUST,
+                b"impl Probe { fn run(&self, value: i32) { visible(self, value); } }\n",
+                ("function_item",),
+                ((1, "self", 1), (1, "value", 1)),
+            ),
+            (
+                Language.RUST,
+                b"impl Probe { fn run(&mut self, value: i32) { visible(self, value); } }\n",
+                ("function_item",),
+                ((1, "self", 1), (1, "value", 1)),
+            ),
+        )
+        for language, raw, callable_kinds, parameters in cases:
+            with self.subTest(language=language, raw=raw):
+                snapshot, _, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                event_pairs = {(event.kind, event.span) for event in events}
+                for line, name, occurrence in parameters:
+                    span = token_span(
+                        snapshot,
+                        line,
+                        name,
+                        occurrence=occurrence,
+                    )
+                    self.assertIn((BodyEventKind.PARAM, span), event_pairs)
+                    self.assertNotIn((BodyEventKind.NAME, span), event_pairs)
+                    self.assertNotIn((BodyEventKind.KEYWORD, span), event_pairs)
 
     def test_tree_sitter_declaration_bindings_exclude_initializer_uses(self) -> None:
         cases = (
@@ -1328,6 +1693,51 @@ class ParserHelperTest(unittest.TestCase):
                         self.assertNotIn((BodyEventKind.PARAM, span), event_pairs)
                         self.assertNotIn((BodyEventKind.LOCAL, span), event_pairs)
 
+    def test_loop_binding_roles_distinguish_declarations_from_uses(self) -> None:
+        cases = (
+            (
+                Language.TYPESCRIPT,
+                (
+                    b"function run(existing: Item, items: Item[]) {\n"
+                    b"  for (existing of items) { visible(existing); }\n"
+                    b"  for (const created of items) { visible(created); }\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                ((BodyEventKind.NAME, 2, "existing"),),
+                ((BodyEventKind.LOCAL, 3, "created"),),
+            ),
+            (
+                Language.CPP,
+                (
+                    b"void run(Items items) {\n"
+                    b"  for (auto value : items) { visible(value); }\n"
+                    b"}\n"
+                ),
+                ("function_definition",),
+                ((BodyEventKind.NAME, 2, "items"),),
+                ((BodyEventKind.LOCAL, 2, "value"),),
+            ),
+        )
+        for language, raw, callable_kinds, uses, declarations in cases:
+            with self.subTest(language=language):
+                snapshot, _, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                event_pairs = {(event.kind, event.span) for event in events}
+                for kind, line, name in (*uses, *declarations):
+                    span = token_span(snapshot, line, name)
+                    self.assertIn((kind, span), event_pairs)
+                    opposite = (
+                        BodyEventKind.LOCAL
+                        if kind is BodyEventKind.NAME
+                        else BodyEventKind.NAME
+                    )
+                    self.assertNotIn((opposite, span), event_pairs)
+
     def test_tree_sitter_literal_shape_matrix_is_explicit_and_exact(self) -> None:
         cases = (
             (
@@ -1642,6 +2052,84 @@ class ParserHelperTest(unittest.TestCase):
                     self.assertIn((BodyEventKind.NAME, span), event_pairs)
                 self.assertEqual(len(events), len(set(events)))
 
+    def test_qualified_call_members_do_not_reclassify_unqualified_calls(self) -> None:
+        cases = (
+            (
+                Language.JAVA,
+                b"class Probe { void run(Obj obj) { obj.method(); plain(); } }\n",
+                ("method_declaration",),
+                "method",
+                "plain",
+            ),
+            (
+                Language.CPP,
+                b"void run() { Type::method(); plain(); }\n",
+                ("function_definition",),
+                "method",
+                "plain",
+            ),
+            (
+                Language.CPP,
+                b"void run() { Type::method<Item>(); plain<Item>(); }\n",
+                ("function_definition",),
+                "method",
+                "plain",
+            ),
+            (
+                Language.RUST,
+                b"fn run() { Type::method(); plain(); }\n",
+                ("function_item",),
+                "method",
+                "plain",
+            ),
+            (
+                Language.RUST,
+                b"fn run() { Type::method::<Item>(); plain::<Item>(); }\n",
+                ("function_item",),
+                "method",
+                "plain",
+            ),
+        )
+        for language, raw, callable_kinds, member, plain in cases:
+            with self.subTest(language=language):
+                snapshot, _, callable_node, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                owner = symbol_id(snapshot, (), SymbolKind.FUNCTION, "run")
+                member_span = token_span(snapshot, 1, member)
+                plain_span = token_span(snapshot, 1, plain)
+                file_ir = FileIR(
+                    snapshot,
+                    references=(
+                        reference(
+                            owner,
+                            member_span,
+                            member,
+                            "qualifier",
+                            ReferenceKind.NAME,
+                            context=ReferenceContext.CODE,
+                            confidence=ReferenceConfidence.DEFINITE,
+                        ),
+                    ),
+                    bodies=(
+                        BodyIR(
+                            owner,
+                            node_span(snapshot, callable_node),
+                            events,
+                        ),
+                    ),
+                )
+
+                assert_body_fact_events(self, file_ir)
+                event_pairs = {(event.kind, event.span) for event in events}
+                self.assertIn((BodyEventKind.MEMBER, member_span), event_pairs)
+                self.assertIn((BodyEventKind.NAME, member_span), event_pairs)
+                self.assertIn((BodyEventKind.NAME, plain_span), event_pairs)
+                self.assertNotIn((BodyEventKind.MEMBER, plain_span), event_pairs)
+
     def test_tree_sitter_type_context_matrix_emits_exact_leaf_spans(self) -> None:
         cases = (
             (
@@ -1812,6 +2300,58 @@ class ParserHelperTest(unittest.TestCase):
                     {event.span for event in events},
                 )
 
+    def test_go_type_and_rust_async_regions_do_not_leak_into_owner(self) -> None:
+        cases = (
+            (
+                Language.GO,
+                (
+                    b"package probe\n"
+                    b"func run() {\n"
+                    b"  type Local struct { Field Hidden }\n"
+                    b"  visible()\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                ((3, "Local"), (3, "Field"), (3, "Hidden")),
+            ),
+            (
+                Language.RUST,
+                (b"fn run() {\n  let future = async { hidden(); };\n  visible();\n}\n"),
+                ("function_item",),
+                (),
+            ),
+            (
+                Language.RUST,
+                (
+                    b"fn run() {\n"
+                    b"  const LOCAL: i32 = hidden();\n"
+                    b"  static STATIC: i32 = hidden();\n"
+                    b"  mod nested { pub fn inner() { hidden(); } }\n"
+                    b"  visible();\n"
+                    b"}\n"
+                ),
+                ("function_item",),
+                ((2, "LOCAL"), (3, "STATIC"), (4, "nested")),
+            ),
+        )
+        for language, raw, callable_kinds, excluded_names in cases:
+            with self.subTest(language=language):
+                snapshot, _, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                calls = {
+                    event.text for event in events if event.kind is BodyEventKind.CALL
+                }
+
+                self.assertIn("visible", calls)
+                self.assertNotIn("hidden", calls)
+                event_spans = {event.span for event in events}
+                for line, name in excluded_names:
+                    self.assertNotIn(token_span(snapshot, line, name), event_spans)
+
     def test_tree_sitter_construction_kinds_use_exact_expression_spans(self) -> None:
         cases = (
             (
@@ -1819,6 +2359,12 @@ class ParserHelperTest(unittest.TestCase):
                 b"class Probe {\n  Probe() { this(1); }\n  Probe(int value) {}\n}\n",
                 ("constructor_declaration",),
                 "explicit_constructor_invocation",
+            ),
+            (
+                Language.JAVA,
+                b"class Probe { void run() { int[] values = new int[2]; } }\n",
+                ("method_declaration",),
+                "array_creation_expression",
             ),
             (
                 Language.GO,
@@ -1844,6 +2390,54 @@ class ParserHelperTest(unittest.TestCase):
                 ("function_declaration",),
                 "call_expression",
             ),
+            (
+                Language.CSHARP,
+                b"class Probe { Probe make() { return new(); } }\n",
+                ("method_declaration",),
+                "implicit_object_creation_expression",
+            ),
+            (
+                Language.CSHARP,
+                b"class Probe { void run() { int[] values = new int[2]; } }\n",
+                ("method_declaration",),
+                "array_creation_expression",
+            ),
+            (
+                Language.CSHARP,
+                b"class Probe { void run() { var values = new[] { 1, 2 }; } }\n",
+                ("method_declaration",),
+                "implicit_array_creation_expression",
+            ),
+            (
+                Language.CSHARP,
+                b"class Probe { void run() { var value = new { Item = 1 }; } }\n",
+                ("method_declaration",),
+                "anonymous_object_creation_expression",
+            ),
+            (
+                Language.C,
+                b"void run() { (struct Item) { 1 }; }\n",
+                ("function_definition",),
+                "compound_literal_expression",
+            ),
+            (
+                Language.CPP,
+                b"void run() { (Item) { 1 }; }\n",
+                ("function_definition",),
+                "compound_literal_expression",
+            ),
+            (
+                Language.LUA,
+                b"function run() local value = { item = 1 } end\n",
+                ("function_declaration",),
+                "table_constructor",
+            ),
+            (
+                Language.KOTLIN,
+                (b"class Probe(val value: Int) {\n  constructor(): this(1) {}\n}\n"),
+                ("secondary_constructor",),
+                "constructor_delegation_call",
+            ),
         )
         for language, raw, callable_kinds, construct_kind in cases:
             with self.subTest(language=language):
@@ -1854,7 +2448,7 @@ class ParserHelperTest(unittest.TestCase):
                     callable_kinds,
                 )
                 candidates = ast_collect(tree.root_node, (construct_kind,))
-                if language is Language.KOTLIN:
+                if language is Language.KOTLIN and construct_kind == "call_expression":
                     candidates = [
                         node for node in candidates if node.text == b"Widget()"
                     ]
@@ -1908,6 +2502,156 @@ class ParserHelperTest(unittest.TestCase):
             event_pairs,
         )
         validate_body_events(events)
+
+    def test_structured_control_shape_matrix_is_balanced_and_normalized(self) -> None:
+        cases = (
+            (
+                Language.CPP,
+                (
+                    b"void run(Items items) {\n"
+                    b"  for (auto item : items) { visible(item); }\n"
+                    b"}\n"
+                ),
+                ("function_definition",),
+                ("loop",),
+                ("loop",),
+            ),
+            (
+                Language.CSHARP,
+                (
+                    b"class Probe { void run(dynamic items, object gate) {\n"
+                    b"  foreach (var item in items) { visible(item); }\n"
+                    b"  lock (gate) { visible(gate); }\n"
+                    b"  using (var resource = open()) { visible(resource); }\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+                ("loop", "with", "with"),
+                ("loop", "with", "with"),
+            ),
+            (
+                Language.JAVA,
+                (
+                    b"class Probe { void run(Resource resource, boolean flag) {\n"
+                    b"  try (Resource item = open()) { visible(item); }\n"
+                    b"  int chosen = flag ? one() : two();\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+                ("try", "if"),
+                ("try", "if"),
+            ),
+            (
+                Language.TYPESCRIPT,
+                (
+                    b"function run(flag: boolean) {\n"
+                    b"  const chosen = flag ? one() : two();\n"
+                    b"  do { visible(); } while (flag);\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                ("if", "loop"),
+                ("if", "loop"),
+            ),
+            (
+                Language.GO,
+                (
+                    b"package probe\n"
+                    b"func run(value int) {\n"
+                    b"  switch value { case 1: visible() }\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                ("match",),
+                ("match",),
+            ),
+            (
+                Language.KOTLIN,
+                (
+                    b"fun run(flag: Boolean) {\n"
+                    b"  do { visible() } while (flag)\n"
+                    b"  try { visible() } finally { visible() }\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                ("loop", "try", "finally"),
+                ("loop", "finally", "try"),
+            ),
+            (
+                Language.LUA,
+                (
+                    b"function run(done)\n"
+                    b"  do visible() end\n"
+                    b"  repeat visible() until done\n"
+                    b"end\n"
+                ),
+                ("function_declaration",),
+                ("loop",),
+                ("loop",),
+            ),
+        )
+        for language, raw, callable_kinds, expected_enters, expected_exits in cases:
+            with self.subTest(language=language):
+                snapshot, tree, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                enters = tuple(
+                    event.text
+                    for event in events
+                    if event.kind is BodyEventKind.CONTROL_ENTER
+                )
+                exits = tuple(
+                    event.text
+                    for event in events
+                    if event.kind is BodyEventKind.CONTROL_EXIT
+                )
+
+                self.assertEqual(enters, expected_enters)
+                self.assertEqual(exits, expected_exits)
+                if language is Language.LUA:
+                    do_statement = ast_collect(tree.root_node, ("do_statement",))[0]
+                    self.assertNotIn(
+                        node_span(snapshot, do_statement),
+                        {
+                            event.span
+                            for event in events
+                            if event.kind
+                            in {
+                                BodyEventKind.CONTROL_ENTER,
+                                BodyEventKind.CONTROL_EXIT,
+                            }
+                        },
+                    )
+                validate_body_events(events)
+
+        metadata = getattr(treesitter_runtime, "_CONTROL_KINDS_BY_LANGUAGE", {})
+        required = {
+            Language.JAVA: {
+                "expression_switch_statement": "match",
+                "ternary_expression": "if",
+                "try_with_resources_statement": "try",
+            },
+            Language.KOTLIN: {
+                "do_while_statement": "loop",
+                "finally_block": "finally",
+            },
+            Language.TYPESCRIPT: {"ternary_expression": "if"},
+            Language.GO: {"expression_switch_statement": "match"},
+            Language.CSHARP: {
+                "foreach_statement": "loop",
+                "lock_statement": "with",
+                "using_statement": "with",
+            },
+            Language.CPP: {"for_range_loop": "loop"},
+            Language.LUA: {"repeat_statement": "loop"},
+        }
+        for language, expected in required.items():
+            with self.subTest(metadata=language):
+                self.assertTrue(expected.items() <= metadata.get(language, {}).items())
+        self.assertNotIn("do_statement", metadata.get(Language.LUA, {}))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
+import unicodedata
+from bisect import bisect_right
 from collections.abc import Callable, Iterable
 from typing import TypeVar
 
@@ -280,6 +284,70 @@ class _AstBodyEventWalker:
         self.callable_node = callable_node
         self.events: list[BodyEvent] = []
         self._events_seen: set[BodyEvent] = set()
+        offsets = [0]
+        for line in source.raw.splitlines(keepends=True):
+            offsets.append(offsets[-1] + len(line))
+        self._line_offsets = tuple(offsets)
+        self._tokens = self._source_tokens()
+        self._external_bindings = self._declared_external_bindings()
+        self._comprehension_targets = self._comprehension_target_nodes()
+
+    def _source_tokens(self) -> tuple[tuple[tokenize.TokenInfo, SourceSpan], ...]:
+        ignored = {
+            tokenize.COMMENT,
+            tokenize.DEDENT,
+            tokenize.ENDMARKER,
+            tokenize.INDENT,
+            tokenize.NEWLINE,
+            tokenize.NL,
+        }
+        return tuple(
+            (
+                token,
+                span_from_character_columns(
+                    self.source,
+                    token.start[0],
+                    token.start[1],
+                    token.end[0],
+                    token.end[1],
+                ),
+            )
+            for token in tokenize.generate_tokens(
+                io.StringIO(self.source.text).readline
+            )
+            if token.type not in ignored
+        )
+
+    def _owned_nodes(self) -> Iterable[ast.AST]:
+        roots = getattr(self.callable_node, "body", ())
+        stack = list(reversed(roots if isinstance(roots, list) else (roots,)))
+        while stack:
+            node = stack.pop()
+            yield node
+            if isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef),
+            ):
+                continue
+            stack.extend(reversed(tuple(ast.iter_child_nodes(node))))
+
+    def _declared_external_bindings(self) -> frozenset[str]:
+        names: set[str] = set()
+        for node in self._owned_nodes():
+            if isinstance(node, (ast.Global, ast.Nonlocal)):
+                names.update(node.names)
+        return frozenset(names)
+
+    def _comprehension_target_nodes(self) -> frozenset[int]:
+        targets: set[int] = set()
+        for node in self._owned_nodes():
+            if isinstance(node, ast.comprehension):
+                targets.update(
+                    id(child)
+                    for child in ast.walk(node.target)
+                    if isinstance(child, ast.Name)
+                )
+        return frozenset(targets)
 
     def event(
         self,
@@ -293,6 +361,217 @@ class _AstBodyEventWalker:
         if event not in self._events_seen:
             self._events_seen.add(event)
             self.events.append(event)
+
+    @staticmethod
+    def _start(span: SourceSpan) -> tuple[int, int]:
+        return span.start_line, span.start_column
+
+    @staticmethod
+    def _end(span: SourceSpan) -> tuple[int, int]:
+        return span.end_line, span.end_column
+
+    def name_span(
+        self,
+        name: str,
+        node: ast.AST,
+        *,
+        last: bool = False,
+        after: ast.AST | None = None,
+        before: ast.AST | None = None,
+    ) -> SourceSpan:
+        container = ast_span(self.source, node)
+        start = (
+            self._end(ast_span(self.source, after)) if after else self._start(container)
+        )
+        end = (
+            self._start(ast_span(self.source, before))
+            if before
+            else self._end(container)
+        )
+        normalized = unicodedata.normalize("NFKC", name)
+        matches = tuple(
+            span
+            for token, span in self._tokens
+            if self._start(span) >= start
+            and self._end(span) <= end
+            and unicodedata.normalize("NFKC", token.string) == normalized
+        )
+        if not matches:
+            raise AssertionError(
+                f"source token for {name!r} not found in {type(node).__name__}"
+            )
+        return matches[-1] if last else matches[0]
+
+    def binding_event(
+        self,
+        name: str,
+        node: ast.AST,
+        *,
+        last: bool = False,
+        after: ast.AST | None = None,
+        before: ast.AST | None = None,
+    ) -> None:
+        kind = (
+            BodyEventKind.NAME
+            if name in self._external_bindings
+            else BodyEventKind.LOCAL
+        )
+        self.event(
+            kind,
+            name,
+            node,
+            span=self.name_span(
+                name,
+                node,
+                last=last,
+                after=after,
+                before=before,
+            ),
+        )
+
+    def operator_span(
+        self,
+        text: str,
+        left: ast.AST,
+        right: ast.AST,
+        *,
+        from_node_start: bool = False,
+    ) -> SourceSpan:
+        left_span = ast_span(self.source, left)
+        right_span = ast_span(self.source, right)
+        start = self._start(left_span) if from_node_start else self._end(left_span)
+        end = self._start(right_span)
+        return self._operator_span_in_range(
+            text,
+            start,
+            end,
+            context=f"{type(left).__name__} and {type(right).__name__}",
+        )
+
+    def _operator_span_in_range(
+        self,
+        text: str,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        *,
+        context: str,
+    ) -> SourceSpan:
+        parts = text.split()
+        candidates = tuple(
+            (token, span)
+            for token, span in self._tokens
+            if self._start(span) >= start and self._end(span) <= end
+        )
+        matches: list[SourceSpan] = []
+        for index in range(len(candidates) - len(parts) + 1):
+            selected = candidates[index : index + len(parts)]
+            if [token.string for token, _ in selected] != parts:
+                continue
+            matches.append(
+                SourceSpan(
+                    self.source.file,
+                    selected[0][1].start_line,
+                    selected[0][1].start_column,
+                    selected[-1][1].end_line,
+                    selected[-1][1].end_column,
+                )
+            )
+        if not matches:
+            matches.extend(self._raw_operator_spans(text, start, end))
+        if len(matches) != 1:
+            raise AssertionError(
+                f"expected one {text!r} operator in {context}, found {len(matches)}"
+            )
+        return matches[0]
+
+    def prefix_operator_span(self, text: str, node: ast.AST) -> SourceSpan:
+        end = self._start(ast_span(self.source, node))
+        matches = tuple(
+            span
+            for token, span in self._tokens
+            if token.string == text and self._end(span) <= end
+        )
+        if not matches:
+            raise AssertionError(
+                f"source token for prefix {text!r} not found before "
+                f"{type(node).__name__}"
+            )
+        selected = matches[-1]
+        intervening = tuple(
+            token
+            for token, span in self._tokens
+            if self._start(span) >= self._end(selected) and self._end(span) <= end
+        )
+        if intervening:
+            raise AssertionError(
+                f"prefix {text!r} is not adjacent to {type(node).__name__}"
+            )
+        return selected
+
+    def _absolute_offset(self, position: tuple[int, int]) -> int:
+        line, column = position
+        return self._line_offsets[line - 1] + column
+
+    def _position_from_offset(self, offset: int) -> tuple[int, int]:
+        line_index = bisect_right(self._line_offsets, offset) - 1
+        return line_index + 1, offset - self._line_offsets[line_index]
+
+    def _raw_operator_spans(
+        self,
+        text: str,
+        start: tuple[int, int],
+        end: tuple[int, int],
+    ) -> tuple[SourceSpan, ...]:
+        absolute_start = self._absolute_offset(start)
+        segment = self.source.raw[absolute_start : self._absolute_offset(end)]
+        parts = tuple(part.encode() for part in text.split())
+        if len(parts) == 1:
+            pattern = re.escape(parts[0])
+        else:
+            separator = rb"(?:\s|\\\r?\n|#[^\r\n]*(?:\r?\n|$))+"
+            pattern = separator.join(re.escape(part) for part in parts)
+        spans: list[SourceSpan] = []
+        for match in re.finditer(pattern, segment):
+            match_start = self._position_from_offset(absolute_start + match.start())
+            match_end = self._position_from_offset(absolute_start + match.end())
+            spans.append(
+                SourceSpan(
+                    self.source.file,
+                    match_start[0],
+                    match_start[1],
+                    match_end[0],
+                    match_end[1],
+                )
+            )
+        return tuple(spans)
+
+    def operator_event(
+        self,
+        text: str,
+        left: ast.AST,
+        right: ast.AST,
+        *,
+        from_node_start: bool = False,
+    ) -> None:
+        self.event(
+            BodyEventKind.OPERATOR,
+            text,
+            left,
+            span=self.operator_span(
+                text,
+                left,
+                right,
+                from_node_start=from_node_start,
+            ),
+        )
+
+    def prefix_operator_event(self, text: str, node: ast.AST) -> None:
+        self.event(
+            BodyEventKind.OPERATOR,
+            text,
+            node,
+            span=self.prefix_operator_span(text, node),
+        )
 
     def control(
         self,
@@ -320,7 +599,7 @@ class _AstBodyEventWalker:
             ):
                 self.visit_parameter(parameter, default)
             if arguments.vararg is not None:
-                self.visit_parameter(arguments.vararg, None)
+                self.visit_parameter(arguments.vararg, None, prefix="*")
             for parameter, default in zip(
                 arguments.kwonlyargs,
                 arguments.kw_defaults,
@@ -328,7 +607,7 @@ class _AstBodyEventWalker:
             ):
                 self.visit_parameter(parameter, default)
             if arguments.kwarg is not None:
-                self.visit_parameter(arguments.kwarg, None)
+                self.visit_parameter(arguments.kwarg, None, prefix="**")
         returns = getattr(self.callable_node, "returns", None)
         if returns is not None:
             self.visit_annotation(returns)
@@ -346,24 +625,21 @@ class _AstBodyEventWalker:
         self,
         parameter: ast.arg,
         default: ast.expr | None,
+        *,
+        prefix: str | None = None,
     ) -> None:
-        span = ast_span(self.source, parameter)
-        name_span = SourceSpan(
-            self.source.file,
-            span.start_line,
-            span.start_column,
-            span.start_line,
-            span.start_column + len(parameter.arg.encode("utf-8")),
-        )
+        if prefix is not None:
+            self.prefix_operator_event(prefix, parameter)
         self.event(
             BodyEventKind.PARAM,
             parameter.arg,
             parameter,
-            span=name_span,
+            span=self.name_span(parameter.arg, parameter),
         )
         if parameter.annotation is not None:
             self.visit_annotation(parameter.annotation)
         if default is not None:
+            self.operator_event("=", parameter, default)
             self.visit(default)
 
     def visit_annotation(self, node: ast.AST) -> None:
@@ -386,22 +662,13 @@ class _AstBodyEventWalker:
             self.visit_annotation(child)
 
     def attribute_span(self, node: ast.Attribute) -> SourceSpan:
-        span = ast_span(self.source, node)
-        width = len(node.attr.encode("utf-8"))
-        if span.end_column < width:
-            return span
-        return SourceSpan(
-            self.source.file,
-            span.end_line,
-            span.end_column - width,
-            span.end_line,
-            span.end_column,
-        )
+        return self.name_span(node.attr, node, last=True)
 
     def visit(self, node: ast.AST) -> None:
-        if isinstance(
-            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
-        ):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            self.binding_event(node.name, node)
+            return
+        if isinstance(node, ast.Lambda):
             return
         if isinstance(node, ast.If):
             self.control("if", node, lambda: self._visit_if(node))
@@ -429,20 +696,62 @@ class _AstBodyEventWalker:
         if isinstance(node, (ast.With, ast.AsyncWith)):
             self.control("with", node, lambda: self._visit_children(node))
             return
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            self.event(BodyEventKind.KEYWORD, "import", node)
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                if alias.asname is not None:
+                    name = alias.asname
+                    last = True
+                elif isinstance(node, ast.Import):
+                    name = alias.name.split(".", 1)[0]
+                    last = False
+                else:
+                    name = alias.name
+                    last = False
+                self.binding_event(name, alias, last=last)
+            return
         if isinstance(node, ast.Call):
             name = self.call_name(node.func)
             kind = BodyEventKind.CONSTRUCT if name[:1].isupper() else BodyEventKind.CALL
             self.event(kind, name, node)
             self.visit(node.func)
-            for argument in node.args:
-                self.visit(argument)
-            for argument_keyword in node.keywords:
-                self.visit(argument_keyword.value)
+            arguments = sorted(
+                (*node.args, *node.keywords),
+                key=lambda item: self._start(ast_span(self.source, item)),
+            )
+            for argument in arguments:
+                if isinstance(argument, ast.keyword):
+                    operator_text = "=" if argument.arg is not None else "**"
+                    self.operator_event(
+                        operator_text,
+                        argument,
+                        argument.value,
+                        from_node_start=True,
+                    )
+                    self.visit(argument.value)
+                else:
+                    self.visit(argument)
+            return
+        if isinstance(node, ast.Starred):
+            self.operator_event("*", node, node.value, from_node_start=True)
+            self.visit(node.value)
+            return
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values, strict=True):
+                if key is None:
+                    self.prefix_operator_event("**", value)
+                else:
+                    self.visit(key)
+                self.visit(value)
             return
         if isinstance(node, ast.Name):
             kind = (
                 BodyEventKind.LOCAL
-                if isinstance(node.ctx, (ast.Store, ast.Del))
+                if isinstance(node.ctx, ast.Store)
+                and node.id not in self._external_bindings
+                and id(node) not in self._comprehension_targets
                 else BodyEventKind.NAME
             )
             self.event(kind, node.id, node)
@@ -467,48 +776,73 @@ class _AstBodyEventWalker:
                 if isinstance(value, ast.FormattedValue):
                     self.visit(value.value)
             return
+        if isinstance(node, ast.MatchAs):
+            if node.pattern is not None:
+                self.visit(node.pattern)
+            if node.name is not None:
+                self.binding_event(node.name, node, last=True)
+            return
+        if isinstance(node, ast.MatchStar):
+            if node.name is not None:
+                self.binding_event(node.name, node, last=True)
+            return
+        if isinstance(node, ast.MatchMapping):
+            for key, pattern in zip(node.keys, node.patterns, strict=True):
+                self.visit(key)
+                self.visit(pattern)
+            if node.rest is not None:
+                self.binding_event(node.rest, node, last=True)
+            return
         if isinstance(node, ast.AnnAssign):
             self.visit(node.target)
             self.visit_annotation(node.annotation)
             if node.value is not None:
-                self.event(BodyEventKind.OPERATOR, "=", node)
+                self.operator_event("=", node.annotation, node.value)
                 self.visit(node.value)
             return
         if isinstance(node, ast.Assign):
-            for target in node.targets:
+            following = (*node.targets[1:], node.value)
+            for target, right in zip(node.targets, following, strict=True):
                 self.visit(target)
-            self.event(BodyEventKind.OPERATOR, "=", node)
+                self.operator_event("=", target, right)
             self.visit(node.value)
             return
         if isinstance(node, ast.AugAssign):
             self.visit(node.target)
-            self.event(BodyEventKind.OPERATOR, _operator_text(node.op) + "=", node)
+            self.operator_event(_operator_text(node.op) + "=", node.target, node.value)
             self.visit(node.value)
             return
         if isinstance(node, ast.NamedExpr):
             self.visit(node.target)
-            self.event(BodyEventKind.OPERATOR, ":=", node)
+            self.operator_event(":=", node.target, node.value)
             self.visit(node.value)
             return
         if isinstance(node, ast.BinOp):
             self.visit(node.left)
-            self.event(BodyEventKind.OPERATOR, _operator_text(node.op), node)
+            self.operator_event(_operator_text(node.op), node.left, node.right)
             self.visit(node.right)
             return
         if isinstance(node, ast.BoolOp):
-            for index, value in enumerate(node.values):
-                if index:
-                    self.event(BodyEventKind.OPERATOR, _operator_text(node.op), node)
-                self.visit(value)
+            self.visit(node.values[0])
+            for left, right in zip(node.values[:-1], node.values[1:], strict=True):
+                self.operator_event(_operator_text(node.op), left, right)
+                self.visit(right)
             return
         if isinstance(node, ast.Compare):
             self.visit(node.left)
+            left = node.left
             for operator, comparator in zip(node.ops, node.comparators, strict=True):
-                self.event(BodyEventKind.OPERATOR, _operator_text(operator), node)
+                self.operator_event(_operator_text(operator), left, comparator)
                 self.visit(comparator)
+                left = comparator
             return
         if isinstance(node, ast.UnaryOp):
-            self.event(BodyEventKind.OPERATOR, _operator_text(node.op), node)
+            self.operator_event(
+                _operator_text(node.op),
+                node,
+                node.operand,
+                from_node_start=True,
+            )
             self.visit(node.operand)
             return
         keyword_text = self.keyword(node)
@@ -552,8 +886,12 @@ class _AstBodyEventWalker:
         if node.type is not None:
             self.visit_annotation(node.type)
         if node.name:
-            span = ast_span(self.source, node)
-            self.event(BodyEventKind.LOCAL, node.name, node, span=span)
+            self.binding_event(
+                node.name,
+                node,
+                after=node.type,
+                before=node.body[0] if node.body else None,
+            )
         for statement in node.body:
             self.visit(statement)
 
