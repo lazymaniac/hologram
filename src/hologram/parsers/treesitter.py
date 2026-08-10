@@ -317,6 +317,7 @@ _ANONYMOUS_CALLABLE_KINDS_BY_LANGUAGE: Mapping[
         Language.CSHARP: frozenset(
             {"anonymous_method_expression", "lambda_expression"}
         ),
+        Language.LUA: frozenset({"function_definition"}),
     }
 )
 _TYPESCRIPT_DECLARATION_BOUNDARIES = frozenset(

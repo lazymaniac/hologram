@@ -358,19 +358,19 @@ class InitLangTest(unittest.TestCase):
 class BootstrapTest(unittest.TestCase):
     def test_missing_parser_langs_detects_gap(self):
         files = [JAVAMINI / "src/App.java", PYMINI_FILE]
-        saved = hologram._PARSERS["java"]
-        hologram._PARSERS["java"] = None
-        try:
+        with mock.patch(
+            "hologram.legacy.has_parser",
+            side_effect=lambda language: language != "java",
+        ):
             self.assertEqual(hologram._missing_parser_langs(files), {"java"})
-        finally:
-            hologram._PARSERS["java"] = saved
         # python never needs a parser
         self.assertEqual(hologram._missing_parser_langs([PYMINI_FILE]), set())
 
     def test_cli_fails_fast_with_parser_extra_guidance_without_writes(self):
-        saved = hologram._PARSERS["java"]
-        hologram._PARSERS["java"] = None
-        try:
+        with mock.patch(
+            "hologram.legacy.has_parser",
+            side_effect=lambda language: language != "java",
+        ):
             with tempfile.TemporaryDirectory() as tmp:
                 repo = _make_repo(Path(tmp))
                 write_manifest(repo)
@@ -384,8 +384,6 @@ class BootstrapTest(unittest.TestCase):
                 str(ctx.exception),
             )
             self.assertIn("tree-sitter-java", str(ctx.exception))
-        finally:
-            hologram._PARSERS["java"] = saved
 
 
 class HookPythonSelectionTest(unittest.TestCase):

@@ -48,7 +48,6 @@ from .state import (
 _LEGACY_COMPAT_NAMES = frozenset(
     {
         "Symbol",
-        "_PARSERS",
         "_dep_lines",
         "_digest_state",
         "_hook_python",

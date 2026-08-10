@@ -141,21 +141,22 @@ class CSharpExtractTest(unittest.TestCase):
 class CExtractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.syms = extract_file(POLY / "sample.c", POLY)
+        cls.result = _canonical_file(POLY / "sample.c", POLY)
+        cls.syms = cls.result.symbols
 
     def test_typedef_struct_and_enum(self):
         rat = next(s for s in self.syms if s.name == "Rational")
-        self.assertEqual(rat.kind, "class")
-        self.assertEqual(rat.params, ["int", "int"])
+        self.assertEqual(rat.kind, SymbolKind.CLASS)
+        self.assertEqual(rat.params, ("int", "int"))
         force = next(s for s in self.syms if s.name == "Force")
-        self.assertEqual(force.params, ["ASSERTED", "ENTAILED"])
+        self.assertEqual(force.params, ("ASSERTED", "ENTAILED"))
 
     def test_static_fn_private_prototype_public(self):
         red = next(s for s in self.syms if s.name == "reduce")
-        self.assertEqual(red.visibility, "priv")
-        self.assertEqual(red.params, ["Rational*"])
+        self.assertEqual(red.visibility, Visibility.PRIVATE)
+        self.assertEqual(red.params, ("Rational*",))
         add = next(s for s in self.syms if s.name == "rational_add")
-        self.assertEqual(add.visibility, "pub")
+        self.assertEqual(add.visibility, Visibility.PUBLIC)
         self.assertEqual(add.returns, "int")
 
 
@@ -163,23 +164,27 @@ class CExtractTest(unittest.TestCase):
 class CppExtractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.syms = extract_file(POLY / "sample.cpp", POLY)
+        cls.result = _canonical_file(POLY / "sample.cpp", POLY)
+        cls.syms = cls.result.symbols
 
     def test_class_access_sections(self):
         ev = next(s for s in self.syms if s.name == "evaluate")
-        self.assertEqual(ev.visibility, "pub")
+        self.assertEqual(ev.visibility, Visibility.PUBLIC)
         self.assertEqual(ev.container, "Engine")
         comp = next(s for s in self.syms if s.name == "compute")
-        self.assertEqual(comp.visibility, "priv")
+        self.assertEqual(comp.visibility, Visibility.PRIVATE)
 
     def test_out_of_line_definition_merges_calls(self):
         ev = next(s for s in self.syms if s.name == "evaluate")
-        self.assertIn("compute", ev.calls)
+        self.assertIn(
+            "compute",
+            {call.name for call in self.result.calls if call.caller == ev.id},
+        )
         # compute declared in-class (priv), defined out-of-line: one symbol only
         self.assertEqual(len([s for s in self.syms if s.name == "compute"]), 1)
 
     def test_ctor(self):
-        ctor = next(s for s in self.syms if s.kind == "ctor")
+        ctor = next(s for s in self.syms if s.kind is SymbolKind.CONSTRUCTOR)
         self.assertEqual(ctor.name, "Engine")
 
 
@@ -187,32 +192,36 @@ class CppExtractTest(unittest.TestCase):
 class LuaExtractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.syms = extract_file(POLY / "sample.lua", POLY)
+        cls.result = _canonical_file(POLY / "sample.lua", POLY)
+        cls.syms = cls.result.symbols
 
     def test_module_functions_and_methods(self):
         quote = next(s for s in self.syms if s.name == "quote")
         self.assertEqual(quote.container, "M")
-        self.assertEqual(quote.visibility, "pub")
-        self.assertIn("helper", quote.calls)
+        self.assertEqual(quote.visibility, Visibility.PUBLIC)
+        self.assertIn(
+            "helper",
+            {call.name for call in self.result.calls if call.caller == quote.id},
+        )
         reset = next(s for s in self.syms if s.name == "reset")
         self.assertEqual(reset.container, "M")
 
     def test_local_function_private(self):
         helper = next(s for s in self.syms if s.name == "helper")
-        self.assertEqual(helper.visibility, "priv")
-        self.assertEqual(helper.params, ["x"])
+        self.assertEqual(helper.visibility, Visibility.PRIVATE)
+        self.assertEqual(helper.params, ("?",))
 
 
 @_needs("html")
 class HtmlExtractTest(unittest.TestCase):
     def test_ids_and_custom_elements(self):
-        syms = extract_file(POLY / "page.html", POLY)
+        syms = _canonical_file(POLY / "page.html", POLY).symbols
         names = {s.name for s in syms}
         self.assertIn("#app", names)
         self.assertIn("#main-nav", names)
         self.assertIn("nav-menu", names)
         self.assertIn("price-card", names)
-        self.assertTrue(all(s.visibility == "priv" for s in syms))
+        self.assertTrue(all(s.visibility is Visibility.INTERNAL for s in syms))
 
 
 class HelmExtractTest(unittest.TestCase):

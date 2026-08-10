@@ -23,6 +23,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 from . import scan
@@ -32,10 +33,11 @@ from .config import (
     default_config,
     load_config,
 )
-from .model import FileIR as CanonicalFileIR
 from .model import CallKind, Language, SourceFile, SymbolKind, Visibility
+from .model import FileIR as CanonicalFileIR
 from .parsers.api import DEFAULT_REGISTRY
 from .parsers.api import extract_file as extract_canonical_file
+from .parsers.treesitter import GRAMMAR_METADATA
 from .state import compute_state, read_digest_state
 
 TYPE_KINDS = ("class", "interface", "record", "enum", "type")
@@ -99,500 +101,32 @@ def strip_comments_and_strings(text: str) -> str:
     return text
 
 
-def _split_top_commas(raw: str, opens: str, closes: str) -> list[str]:
-    """Split on commas that sit outside any bracket nesting."""
-    parts, depth, cur = [], 0, ""
-    for c in raw:
-        if c in opens:
-            depth += 1
-        elif c in closes:
-            depth -= 1
-        if c == "," and depth == 0:
-            parts.append(cur)
-            cur = ""
-        else:
-            cur += c
-    if cur.strip():
-        parts.append(cur)
-    return parts
-
-
-def tight_type(t: str) -> str:
-    """Collapse interior whitespace in a type expression: Map<K, V> -> Map<K,V>."""
-    return re.sub(r",\s+", ",", t)
-
-
 def _base_type(t: str) -> str:
     """Bare type name: Map<K,V> -> Map, list[X] -> list, String[] -> String."""
     return re.sub(r"[<\[(].*", "", t).strip()
 
 
-def _heritage(segment: str) -> tuple[list[str], list[str]]:
-    """(supers, permits) from the text between a type's name and its body
-    (Java and TS share the extends/implements keywords)."""
-    def names(kw: str) -> list[str]:
-        m = re.search(rf"\b{kw}\s+([\w.<>, \t\n]+?)(?=\bextends\b|\bimplements\b|\bpermits\b|$)",
-                      segment)
-        if not m:
-            return []
-        return [re.sub(r"<.*", "", n.strip()).split(".")[-1]
-                for n in m.group(1).split(",") if n.strip()]
-    supers = names("extends") + names("implements")
-    return supers, names("permits")
-
-
 # ---------------------------------------------------------------------------
-# Tree-sitter core (required for Java and TypeScript/JavaScript)
+# Parser availability retained for the v1 CLI compatibility surface
 # ---------------------------------------------------------------------------
-
-try:
-    from tree_sitter import Language as _TSLanguage, Parser as _TSParser
-except ImportError:
-    _TSLanguage = _TSParser = None
-
-
-def _load_parser(module: str, attr: str = "language"):
-    if _TSParser is None:
-        return None
-    try:
-        mod = __import__(module)
-    except ImportError:
-        return None
-    return _TSParser(_TSLanguage(getattr(mod, attr)()))
-
-
-# lang -> (importable grammar module, pip package)
-_GRAMMAR_MODULES = {
-    "java": ("tree_sitter_java", "tree-sitter-java"),
-    "typescript": ("tree_sitter_typescript", "tree-sitter-typescript"),
-    "javascript": ("tree_sitter_typescript", "tree-sitter-typescript"),
-    "tsx": ("tree_sitter_typescript", "tree-sitter-typescript"),
-    "vue": ("tree_sitter_typescript", "tree-sitter-typescript"),
-    "svelte": ("tree_sitter_typescript", "tree-sitter-typescript"),
-    "go": ("tree_sitter_go", "tree-sitter-go"),
-    "rust": ("tree_sitter_rust", "tree-sitter-rust"),
-    "csharp": ("tree_sitter_c_sharp", "tree-sitter-c-sharp"),
-    "kotlin": ("tree_sitter_kotlin", "tree-sitter-kotlin"),
-    "c": ("tree_sitter_c", "tree-sitter-c"),
-    "cpp": ("tree_sitter_cpp", "tree-sitter-cpp"),
-    "lua": ("tree_sitter_lua", "tree-sitter-lua"),
-    "html": ("tree_sitter_html", "tree-sitter-html"),
-}
-
-_PARSERS = {
-    "java": _load_parser("tree_sitter_java"),
-    "c": _load_parser("tree_sitter_c"),
-    "cpp": _load_parser("tree_sitter_cpp"),
-    "lua": _load_parser("tree_sitter_lua"),
-    "html": _load_parser("tree_sitter_html"),
-}
-
-USING_TREESITTER = _PARSERS["java"] is not None  # kept for callers/tests
-
 
 def has_parser(lang: str) -> bool:
-    if lang in {
-        Language.CSHARP.value,
-        Language.GO.value,
-        Language.JAVASCRIPT.value,
-        Language.KOTLIN.value,
-        Language.RUST.value,
-        Language.SVELTE.value,
-        Language.TSX.value,
-        Language.TYPESCRIPT.value,
-        Language.VUE.value,
-    }:
-        return DEFAULT_REGISTRY.has_parser(Language(lang))
-    return _PARSERS.get(lang) is not None
+    try:
+        language = Language(lang)
+    except ValueError:
+        return False
+    return DEFAULT_REGISTRY.has_parser(language)
 
 
 def _grammar_pkgs(langs) -> list[str]:
-    return ["tree-sitter"] + sorted({_GRAMMAR_MODULES[l][1] for l in langs})
-
-
-def _ast_text(node) -> str:
-    return node.text.decode(errors="replace") if node is not None else ""
-
-
-def _ast_field(node, name):
-    return node.child_by_field_name(name)
-
-
-def _ast_collect(root, kinds) -> list:
-    """All descendant nodes of the given types, in source order."""
-    stack, found = [root], []
-    while stack:
-        n = stack.pop()
-        if n.type in kinds:
-            found.append(n)
-        stack.extend(n.children)
-    found.sort(key=lambda n: n.start_byte)
-    return found
-
-
-def _ast_calls(body, own_name: str, call_kinds, entry_fn) -> list[str]:
-    """Called names in source order, receiver-qualified, deduped, capped at 12."""
-    if body is None:
-        return []
-    seen: list[str] = []
-    for n in _ast_collect(body, call_kinds):
-        name, entry = entry_fn(n)
-        if not name or name == own_name or entry in seen:
-            continue
-        seen.append(entry)
-    return seen[:12]
-
-
-
-def _body_lines(body) -> int:
-    return body.end_point[0] - body.start_point[0] + 1 if body is not None else 0
-
-
-# ---------------------------------------------------------------------------
-# C / C++ extraction (shared declarator machinery)
-# ---------------------------------------------------------------------------
-
-def _c_fn_declarator(node):
-    """(function_declarator, name_node) beneath a definition/declaration, peeling
-    pointer/reference wrappers. name_node may be identifier/field_identifier/
-    qualified_identifier."""
-    fd = None
-    n = _ast_field(node, "declarator")
-    while n is not None:
-        if n.type == "function_declarator":
-            fd = n
-            n = _ast_field(n, "declarator")
-        elif n.type in ("pointer_declarator", "reference_declarator"):
-            n = _ast_field(n, "declarator")
-        else:
-            break
-    return fd, n
-
-
-def _c_params(plist) -> tuple[list[str], dict[str, str]]:
-    types: list[str] = []
-    binds: dict[str, str] = {}
-    if plist is None:
-        return types, binds
-    for p in plist.children:
-        if p.type != "parameter_declaration":
-            continue
-        base = tight_type(_ast_text(_ast_field(p, "type")))
-        d = _ast_field(p, "declarator")
-        stars = _ast_text(d).count("*") if d is not None else 0
-        types.append(base + "*" * stars)
-        while d is not None and d.type in ("pointer_declarator", "reference_declarator"):
-            d = _ast_field(d, "declarator")
-        if d is not None and d.type == "identifier":
-            binds[_ast_text(d)] = _base_type(base)
-    return types, binds
-
-
-def _c_call_entry(n) -> tuple[str, str]:
-    if n.type == "new_expression":
-        entry = _base_type(_ast_text(_ast_field(n, "type")))
-        return entry, entry
-    fn = _ast_field(n, "function")
-    if fn is None:
-        return "", ""
-    if fn.type == "identifier":
-        name = _ast_text(fn)
-        return name, name
-    if fn.type == "field_expression":
-        name = _ast_text(_ast_field(fn, "field"))
-        obj = _ast_field(fn, "argument")
-        entry = (f"{_ast_text(obj)}.{name}"
-                 if obj is not None and obj.type == "identifier" else name)
-        return name, entry
-    if fn.type == "qualified_identifier":
-        name = _ast_text(_ast_field(fn, "name"))
-        scope = _ast_field(fn, "scope")
-        return name, (f"{_base_type(_ast_text(scope))}.{name}"
-                      if scope is not None else name)
-    return "", ""
-
-
-def _c_static(node) -> bool:
-    return any(c.type == "storage_class_specifier" and _ast_text(c) == "static"
-               for c in node.children)
-
-
-def _c_enum_symbol(tn, name: str, rel: str, lang: str) -> Symbol:
-    body = _ast_field(tn, "body")
-    values = [_ast_text(_ast_field(e, "name"))
-              for e in (_ast_collect(body, ("enumerator",)) if body is not None else [])]
-    return Symbol(name=name, kind="enum", file=rel, line=tn.start_point[0] + 1,
-                  signature=f"enum {name}", params=values, visibility="pub", lang=lang)
-
-
-def _extract_c(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["c"].parse(text.encode())
-    symbols: list[Symbol] = []
-    for tn in _ast_collect(tree.root_node, ("struct_specifier", "enum_specifier",
-                                            "type_definition")):
-        if tn.type == "type_definition":
-            inner = _ast_field(tn, "type")
-            alias = _ast_text(_ast_field(tn, "declarator"))
-            if inner is None or _ast_field(inner, "body") is None or not alias:
-                continue
-            if inner.type == "enum_specifier":
-                symbols.append(_c_enum_symbol(inner, alias, rel, "c"))
-            elif inner.type == "struct_specifier":
-                comps = [tight_type(_ast_text(_ast_field(f, "type")))
-                         for f in _ast_collect(inner, ("field_declaration",))]
-                symbols.append(Symbol(
-                    name=alias, kind="class", file=rel, line=tn.start_point[0] + 1,
-                    signature=f"struct {alias}", params=comps,
-                    visibility="pub", lang="c"))
-            continue
-        name_node = _ast_field(tn, "name")
-        if name_node is None or _ast_field(tn, "body") is None:
-            continue
-        name = _ast_text(name_node)
-        if tn.type == "enum_specifier":
-            symbols.append(_c_enum_symbol(tn, name, rel, "c"))
-        else:
-            comps = [tight_type(_ast_text(_ast_field(f, "type")))
-                     for f in _ast_collect(_ast_field(tn, "body"),
-                                           ("field_declaration",))]
-            symbols.append(Symbol(
-                name=name, kind="class", file=rel, line=tn.start_point[0] + 1,
-                signature=f"struct {name}", params=comps,
-                visibility="pub", lang="c"))
-    defined_fns: set[str] = set()
-    for fn in _ast_collect(tree.root_node, ("function_definition",)):
-        fd, name_node = _c_fn_declarator(fn)
-        if fd is None or name_node is None or name_node.type != "identifier":
-            continue
-        name = _ast_text(name_node)
-        defined_fns.add(name)
-        params, binds = _c_params(_ast_field(fd, "parameters"))
-        returns = tight_type(_ast_text(_ast_field(fn, "type")))
-        body = _ast_field(fn, "body")
-        symbols.append(Symbol(
-            name=name, kind="fn", file=rel, line=fn.start_point[0] + 1,
-            signature=f"{name}({','.join(params)})"
-                      + (f":{returns}" if returns != "void" else ""),
-            params=params, returns=returns,
-            visibility="priv" if _c_static(fn) else "pub", lang="c",
-            calls=_ast_calls(body, name, ("call_expression",), _c_call_entry),
-            size=_body_lines(body),
-            bindings=binds,
-        ))
-    for decl in tree.root_node.children:  # top-level prototypes (headers)
-        if decl.type != "declaration":
-            continue
-        fd, name_node = _c_fn_declarator(decl)
-        if fd is None or name_node is None or name_node.type != "identifier":
-            continue
-        name = _ast_text(name_node)
-        if name in defined_fns:
-            continue
-        params, _ = _c_params(_ast_field(fd, "parameters"))
-        returns = tight_type(_ast_text(_ast_field(decl, "type")))
-        symbols.append(Symbol(
-            name=name, kind="fn", file=rel, line=decl.start_point[0] + 1,
-            signature=f"{name}({','.join(params)})"
-                      + (f":{returns}" if returns != "void" else ""),
-            params=params, returns=returns,
-            visibility="priv" if _c_static(decl) else "pub", lang="c",
-        ))
-    return symbols
-
-
-def _extract_cpp(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["cpp"].parse(text.encode())
-    symbols: list[Symbol] = []
-    members: dict[tuple[str, str], Symbol] = {}
-    for tn in _ast_collect(tree.root_node, ("class_specifier", "struct_specifier",
-                                            "enum_specifier")):
-        name_node = _ast_field(tn, "name")
-        body = _ast_field(tn, "body")
-        if name_node is None or body is None:
-            continue
-        cname = _ast_text(name_node)
-        if tn.type == "enum_specifier":
-            symbols.append(_c_enum_symbol(tn, cname, rel, "cpp"))
-            continue
-        comps: list[str] = []
-        supers = []
-        for c in tn.children:
-            if c.type == "base_class_clause":
-                supers = [_base_type(_ast_text(b)) for b in c.children
-                          if b.type in ("type_identifier", "qualified_identifier")]
-        access = "private" if tn.type == "class_specifier" else "public"
-        type_sym = Symbol(
-            name=cname, kind="class", file=rel, line=tn.start_point[0] + 1,
-            signature=f"class {cname}", supers=supers, visibility="pub", lang="cpp")
-        symbols.append(type_sym)
-        for m in body.children:
-            if m.type == "access_specifier":
-                access = _ast_text(m).rstrip(":")
-                continue
-            fd, name_node = _c_fn_declarator(m)
-            if m.type in ("function_definition", "declaration", "field_declaration") \
-                    and fd is not None and name_node is not None:
-                mname = _ast_text(name_node)
-                params, binds = _c_params(_ast_field(fd, "parameters"))
-                rtype = _ast_field(m, "type")
-                returns = tight_type(_ast_text(rtype)) if rtype is not None else None
-                mbody = _ast_field(m, "body")
-                kind = "ctor" if mname == cname else "method"
-                ret_suffix = (f":{returns}"
-                              if kind == "method" and returns and returns != "void"
-                              else "")
-                sym = Symbol(
-                    name=mname, kind=kind, file=rel, line=m.start_point[0] + 1,
-                    signature=f"{mname}({','.join(params)}){ret_suffix}",
-                    params=params, returns=returns or (cname if kind == "ctor" else None),
-                    visibility="pub" if access == "public" else "priv",
-                    container=cname, lang="cpp",
-                    calls=_ast_calls(mbody, mname,
-                                     ("call_expression", "new_expression"),
-                                     _c_call_entry),
-                    bindings=binds, size=_body_lines(mbody),
-                )
-                symbols.append(sym)
-                members[(cname, mname)] = sym
-            elif m.type == "field_declaration" and fd is None:
-                t = _ast_field(m, "type")
-                if t is not None:
-                    comps.append(tight_type(_ast_text(t)))
-        type_sym.params = comps
-    for fn in _ast_collect(tree.root_node, ("function_definition",)):
-        fd, name_node = _c_fn_declarator(fn)
-        if fd is None or name_node is None:
-            continue
-        body = _ast_field(fn, "body")
-        if name_node.type == "qualified_identifier":  # out-of-line member def
-            container = _base_type(_ast_text(_ast_field(name_node, "scope")))
-            mname = _ast_text(_ast_field(name_node, "name"))
-            calls = _ast_calls(body, mname, ("call_expression", "new_expression"),
-                               _c_call_entry)
-            existing = members.get((container, mname))
-            if existing is not None:
-                if not existing.calls:
-                    existing.calls = calls
-                continue
-            params, binds = _c_params(_ast_field(fd, "parameters"))
-            rtype = _ast_field(fn, "type")
-            returns = tight_type(_ast_text(rtype)) if rtype is not None else None
-            symbols.append(Symbol(
-                name=mname, kind="method", file=rel, line=fn.start_point[0] + 1,
-                signature=f"{mname}({','.join(params)})"
-                          + (f":{returns}" if returns and returns != "void" else ""),
-                params=params, returns=returns,
-                visibility="pub", container=container, lang="cpp",
-                calls=calls, bindings=binds,
-            ))
-        elif name_node.type == "identifier" and fn.parent is not None \
-                and fn.parent.type in ("translation_unit", "namespace_definition",
-                                       "declaration_list"):
-            name = _ast_text(name_node)
-            params, binds = _c_params(_ast_field(fd, "parameters"))
-            returns = tight_type(_ast_text(_ast_field(fn, "type")))
-            symbols.append(Symbol(
-                name=name, kind="fn", file=rel, line=fn.start_point[0] + 1,
-                signature=f"{name}({','.join(params)})"
-                          + (f":{returns}" if returns != "void" else ""),
-                params=params, returns=returns,
-                visibility="priv" if _c_static(fn) else "pub", lang="cpp",
-                calls=_ast_calls(body, name, ("call_expression", "new_expression"),
-                                 _c_call_entry),
-                bindings=binds,
-            ))
-    return symbols
-
-
-# ---------------------------------------------------------------------------
-# Lua extraction
-# ---------------------------------------------------------------------------
-
-def _lua_call_entry(n) -> tuple[str, str]:
-    fn = _ast_field(n, "name")
-    if fn is None:
-        return "", ""
-    if fn.type == "identifier":
-        name = _ast_text(fn)
-        return name, name
-    if fn.type in ("dot_index_expression", "method_index_expression"):
-        field = _ast_field(fn, "field") or _ast_field(fn, "method")
-        table = _ast_field(fn, "table")
-        name = _ast_text(field)
-        entry = (f"{_ast_text(table)}.{name}"
-                 if table is not None and table.type == "identifier" else name)
-        return name, entry
-    return "", ""
-
-
-def _extract_lua(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["lua"].parse(text.encode())
-    symbols: list[Symbol] = []
-    for fn in _ast_collect(tree.root_node, ("function_declaration",)):
-        name_node = _ast_field(fn, "name")
-        if name_node is None:
-            continue
-        container = None
-        is_local = any(c.type == "local" for c in fn.children)
-        if name_node.type == "identifier":
-            name = _ast_text(name_node)
-        elif name_node.type in ("dot_index_expression", "method_index_expression"):
-            field = _ast_field(name_node, "field") or _ast_field(name_node, "method")
-            name = _ast_text(field)
-            container = _ast_text(_ast_field(name_node, "table"))
-        else:
-            continue
-        pnode = _ast_field(fn, "parameters")
-        params = [_ast_text(c) for c in (pnode.children if pnode is not None else [])
-                  if c.type == "identifier"]
-        symbols.append(Symbol(
-            name=name, kind="method" if container else "fn", file=rel,
-            line=fn.start_point[0] + 1,
-            signature=f"{name}({','.join(params)})", params=params,
-            visibility="priv" if is_local or name.startswith("_") else "pub",
-            container=container, lang="lua",
-            calls=_ast_calls(_ast_field(fn, "body"), name,
-                             ("function_call",), _lua_call_entry),
-            size=_body_lines(_ast_field(fn, "body")),
-        ))
-    return symbols
-
-
-# ---------------------------------------------------------------------------
-# HTML extraction (ids and custom elements, names only)
-# ---------------------------------------------------------------------------
-
-def _extract_html(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["html"].parse(text.encode())
-    symbols: list[Symbol] = []
-    seen: set[str] = set()
-    for attr in _ast_collect(tree.root_node, ("attribute",)):
-        parts = [c for c in attr.children]
-        if not parts or _ast_text(parts[0]) != "id":
-            continue
-        vals = _ast_collect(attr, ("attribute_value",))
-        if vals and (v := _ast_text(vals[0])) and f"#{v}" not in seen:
-            seen.add(f"#{v}")
-            symbols.append(Symbol(
-                name=f"#{v}", kind="fn", file=rel,
-                line=attr.start_point[0] + 1, signature=f"#{v}",
-                visibility="priv", lang="html"))
-    for tag in _ast_collect(tree.root_node, ("tag_name",)):
-        t = _ast_text(tag)
-        if "-" in t and t not in seen:  # custom element
-            seen.add(t)
-            symbols.append(Symbol(
-                name=t, kind="fn", file=rel, line=tag.start_point[0] + 1,
-                signature=t, visibility="priv", lang="html"))
-    return symbols
-
-
-EXTRACTORS = {
-    "c": _extract_c,
-    "cpp": _extract_cpp,
-    "lua": _extract_lua,
-    "html": _extract_html,
-}
+    languages = {Language(lang) for lang in langs}
+    return ["tree-sitter"] + sorted(
+        {
+            GRAMMAR_METADATA[language].distribution
+            for language in languages
+            if language in GRAMMAR_METADATA
+        }
+    )
 
 
 _LEGACY_CANONICAL_KINDS = frozenset(
@@ -791,6 +325,11 @@ def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
             )
     result: list[str] = []
     for call in owned:
+        if (
+            file_ir.source.language is Language.C
+            and call.kind is CallKind.CONSTRUCT
+        ):
+            continue
         if file_ir.source.language is Language.JAVA:
             name = _legacy_java_call_name(file_ir, call)
         elif file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES:
@@ -1043,6 +582,110 @@ def _legacy_task5_container(language: Language, symbol) -> str | None:
     return symbol.container
 
 
+def _legacy_lua_params(file_ir: CanonicalFileIR, symbol) -> list[str]:
+    body = next((item for item in file_ir.bodies if item.owner == symbol.id), None)
+    if body is None:
+        return []
+    return list(
+        dict.fromkeys(
+            event.text for event in body.events if event.kind.value == "param"
+        )
+    )
+
+
+def _legacy_c_bindings(file_ir: CanonicalFileIR, symbol) -> dict[str, str]:
+    canonical = {binding.name: binding.type_name for binding in symbol.bindings}
+    body = next((item for item in file_ir.bodies if item.owner == symbol.id), None)
+    if body is None:
+        return {} if file_ir.source.language is Language.C else canonical
+    parameters = {
+        event.text for event in body.events if event.kind.value == "param"
+    }
+    return {name: value for name, value in canonical.items() if name in parameters}
+
+
+@lru_cache(maxsize=64)
+def _legacy_cpp_declaration_provenance(
+    source: SourceFile,
+) -> tuple[tuple[tuple[object, ...], int], ...]:
+    """Recover v1 member-declaration lines from the immutable source snapshot."""
+    parser = DEFAULT_REGISTRY.parser_for(Language.CPP)
+    if parser is None or not callable(getattr(parser, "parse", None)):
+        return ()
+    from .parsers._treesitter_common import walk_all
+    from .parsers.c_family import (
+        _direct_declarators,
+        _function_parts,
+        _parameters,
+        _qualified_parts,
+        _Scopes,
+    )
+
+    root = parser.parse(source.raw).root_node  # type: ignore[attr-defined]
+    scopes = _Scopes(root)
+    type_paths = frozenset(scopes.types.values())
+    values: list[tuple[tuple[object, ...], int]] = []
+    for node in walk_all(root):
+        if node.type not in {"declaration", "field_declaration"}:
+            continue
+        for declarator in _direct_declarators(node):
+            parts = _function_parts(declarator)
+            if parts is None:
+                continue
+            function, name_node = parts
+            qualified = _qualified_parts(name_node.text.decode("utf-8"))
+            if not qualified:
+                continue
+            owner = scopes.owner(node, callables=False)
+            if len(qualified) > 1:
+                owner = (*scopes.namespace_owner(node), *qualified[:-1])
+            if owner not in type_paths:
+                continue
+            name = qualified[-1]
+            kind = (
+                SymbolKind.CONSTRUCTOR
+                if owner and name == owner[-1]
+                else SymbolKind.METHOD
+            )
+            signature_key = f"({','.join(p.type_name for p in _parameters(function))})"
+            key = (owner, kind, name, signature_key)
+            values.append((key, node.start_point[0] + 1))
+    return tuple(values)
+
+
+def _legacy_cpp_declaration_line(
+    file_ir: CanonicalFileIR,
+    symbol,
+) -> int | None:
+    key = (
+        symbol.id.container_path,
+        symbol.kind,
+        symbol.name,
+        symbol.id.signature_key,
+    )
+    return dict(_legacy_cpp_declaration_provenance(file_ir.source)).get(key)
+
+
+def _legacy_task6_container(language: Language, symbol) -> str | None:
+    if language in {Language.C, Language.HTML}:
+        return None
+    if language is Language.CPP:
+        if symbol.kind in {
+            SymbolKind.CLASS,
+            SymbolKind.ENUM,
+            SymbolKind.INTERFACE,
+            SymbolKind.RECORD,
+            SymbolKind.TYPE,
+        }:
+            return None
+        return symbol.container
+    if language is Language.LUA:
+        if symbol.kind is SymbolKind.FUNCTION:
+            return None
+        return symbol.id.container_path[0] if symbol.id.container_path else None
+    return _legacy_task5_container(language, symbol)
+
+
 def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
     projected: list[Symbol] = []
     type_paths = {
@@ -1103,6 +746,10 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
             params, returns, signature = _legacy_go_shape(symbol)
         elif file_ir.source.language is Language.KOTLIN:
             params, returns, signature = _legacy_kotlin_shape(symbol)
+        elif file_ir.source.language is Language.LUA:
+            params = _legacy_lua_params(file_ir, symbol)
+            returns = symbol.returns
+            signature = f"{symbol.name}({','.join(params)})"
         else:
             params, returns, signature = (
                 list(symbol.params),
@@ -1118,7 +765,12 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                     else symbol.kind.value
                 ),
                 file=symbol.file,
-                line=symbol.span.start_line,
+                line=(
+                    _legacy_cpp_declaration_line(file_ir, symbol)
+                    or symbol.span.start_line
+                    if file_ir.source.language is Language.CPP
+                    else symbol.span.start_line
+                ),
                 signature=signature,
                 params=params,
                 returns=returns,
@@ -1143,7 +795,7 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                         SymbolKind.RECORD,
                         SymbolKind.TYPE,
                     }
-                    else _legacy_task5_container(file_ir.source.language, symbol)
+                    else _legacy_task6_container(file_ir.source.language, symbol)
                 ),
                 lang=(
                     _legacy_typescript_lang(file_ir, symbol)
@@ -1163,6 +815,10 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                         interface_paths,
                     )
                     if file_ir.source.language in _LEGACY_TASK5_LANGUAGES
+                    else {}
+                    if file_ir.source.language is Language.LUA
+                    else _legacy_c_bindings(file_ir, symbol)
+                    if file_ir.source.language in {Language.C, Language.CPP}
                     else {
                         binding.name: binding.type_name
                         for binding in symbol.bindings
@@ -1175,6 +831,9 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                         or file_ir.source.language is Language.CSHARP
                     )
                     and symbol.kind is SymbolKind.CONSTRUCTOR
+                    else 0
+                    if file_ir.source.language is Language.CPP
+                    and _legacy_cpp_declaration_line(file_ir, symbol) is not None
                     else symbol.body_lines
                 ),
             )
@@ -1186,7 +845,8 @@ def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol
     lang = detect_language(path)
     if lang is None:
         return []
-    if lang in _GRAMMAR_MODULES and not has_parser(lang):
+    language = Language(lang)
+    if language in GRAMMAR_METADATA and not has_parser(lang):
         raise SystemExit(f"{lang} extraction requires tree-sitter: "
                          f"pip install {' '.join(_grammar_pkgs([lang]))}")
     if text is None:
@@ -1195,32 +855,16 @@ def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol
         except OSError:
             return []
     rel = path.relative_to(root).as_posix()
-    if lang in {
-        Language.CSHARP.value,
-        Language.GO.value,
-        Language.HELM.value,
-        Language.JAVA.value,
-        Language.JAVASCRIPT.value,
-        Language.KOTLIN.value,
-        Language.PYTHON.value,
-        Language.RUST.value,
-        Language.SVELTE.value,
-        Language.TSX.value,
-        Language.TYPESCRIPT.value,
-        Language.VUE.value,
-    }:
-        raw = text.encode("utf-8")
-        source = SourceFile(
-            path,
-            rel,
-            Language(lang),
-            scan._source_role(rel),
-            raw,
-            hashlib.sha256(raw).hexdigest(),
-        )
-        return _canonical_to_legacy(extract_canonical_file(source))
-    extractor = EXTRACTORS.get(lang)
-    return extractor(text, rel) if extractor is not None else []
+    raw = text.encode("utf-8")
+    source = SourceFile(
+        path,
+        rel,
+        language,
+        scan._source_role(rel),
+        raw,
+        hashlib.sha256(raw).hexdigest(),
+    )
+    return _canonical_to_legacy(extract_canonical_file(source))
 
 
 # ---------------------------------------------------------------------------
@@ -1955,8 +1599,13 @@ def embed_digest(claude_path: Path, digest: str, max_tokens: int = 30000) -> str
 
 def _missing_parser_langs(files: list[Path]) -> set[str]:
     """Languages present in `files` that need a tree-sitter parser we don't have."""
-    return {l for l in {detect_language(f) for f in files}
-            if l in _GRAMMAR_MODULES and not has_parser(l)}
+    return {
+        language
+        for language in {detect_language(path) for path in files}
+        if language is not None
+        and Language(language) in GRAMMAR_METADATA
+        and not has_parser(language)
+    }
 
 
 def _bootstrap_or_die(missing: set[str], argv: list[str]) -> None:
