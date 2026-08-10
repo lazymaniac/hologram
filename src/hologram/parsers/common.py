@@ -5,7 +5,7 @@ import io
 import re
 import tokenize
 import unicodedata
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -188,6 +188,7 @@ class _PythonSourceContext:
     lines: tuple[str, ...]
     line_offsets: tuple[int, ...]
     tokens: tuple[tuple[str, SourceSpan], ...]
+    token_starts: tuple[tuple[int, int], ...]
 
 
 _PYTHON_SOURCE_CONTEXT_LIMIT = 64
@@ -227,7 +228,8 @@ def _build_python_source_context(source: SourceFile) -> _PythonSourceContext:
         for token in tokenize.generate_tokens(reader)
         if token.type not in _IGNORED_PYTHON_TOKENS
     )
-    return _PythonSourceContext(lines, tuple(offsets), tokens)
+    token_starts = tuple((span.start_line, span.start_column) for _, span in tokens)
+    return _PythonSourceContext(lines, tuple(offsets), tokens, token_starts)
 
 
 def _python_source_context(source: SourceFile) -> _PythonSourceContext:
@@ -370,6 +372,7 @@ class _AstBodyEventWalker:
         context = _python_source_context(source)
         self._line_offsets = context.line_offsets
         self._tokens = context.tokens
+        self._token_starts = context.token_starts
         self._external_bindings = self._declared_external_bindings()
         self._comprehension_targets = self._comprehension_target_nodes()
 
@@ -425,6 +428,19 @@ class _AstBodyEventWalker:
     def _end(span: SourceSpan) -> tuple[int, int]:
         return span.end_line, span.end_column
 
+    def _tokens_in_range(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+    ) -> tuple[tuple[str, SourceSpan], ...]:
+        first = bisect_left(self._token_starts, start)
+        last = bisect_left(self._token_starts, end, lo=first)
+        return tuple(
+            (token_text, span)
+            for token_text, span in self._tokens[first:last]
+            if self._end(span) <= end
+        )
+
     def name_span(
         self,
         name: str,
@@ -446,10 +462,8 @@ class _AstBodyEventWalker:
         normalized = unicodedata.normalize("NFKC", name)
         matches = tuple(
             span
-            for token_text, span in self._tokens
-            if self._start(span) >= start
-            and self._end(span) <= end
-            and unicodedata.normalize("NFKC", token_text) == normalized
+            for token_text, span in self._tokens_in_range(start, end)
+            if unicodedata.normalize("NFKC", token_text) == normalized
         )
         if not matches:
             raise AssertionError(
@@ -512,11 +526,7 @@ class _AstBodyEventWalker:
         context: str,
     ) -> SourceSpan:
         parts = text.split()
-        candidates = tuple(
-            (token_text, span)
-            for token_text, span in self._tokens
-            if self._start(span) >= start and self._end(span) <= end
-        )
+        candidates = self._tokens_in_range(start, end)
         matches: list[SourceSpan] = []
         for index in range(len(candidates) - len(parts) + 1):
             selected = candidates[index : index + len(parts)]
@@ -541,11 +551,9 @@ class _AstBodyEventWalker:
 
     def prefix_operator_span(self, text: str, node: ast.AST) -> SourceSpan:
         end = self._start(ast_span(self.source, node))
-        matches = tuple(
-            span
-            for token_text, span in self._tokens
-            if token_text == text and self._end(span) <= end
-        )
+        callable_start = self._start(ast_span(self.source, self.callable_node))
+        candidates = self._tokens_in_range(callable_start, end)
+        matches = tuple(span for token_text, span in candidates if token_text == text)
         if not matches:
             raise AssertionError(
                 f"source token for prefix {text!r} not found before "
@@ -554,7 +562,7 @@ class _AstBodyEventWalker:
         selected = matches[-1]
         intervening = tuple(
             token_text
-            for token_text, span in self._tokens
+            for token_text, span in candidates
             if self._start(span) >= self._end(selected) and self._end(span) <= end
         )
         if intervening:

@@ -1,4 +1,5 @@
 import ast
+import dataclasses
 import hashlib
 import inspect
 import subprocess
@@ -1195,6 +1196,58 @@ class ParserHelperTest(unittest.TestCase):
             len(common_runtime._PYTHON_SOURCE_CONTEXTS),
             common_runtime._PYTHON_SOURCE_CONTEXT_LIMIT,
         )
+
+    def test_python_token_queries_only_touch_the_callable_window(self) -> None:
+        prefix = b"\n".join(
+            b"def prefix_%d(value):\n    return value + %d\n" % (index, index)
+            for index in range(300)
+        )
+        raw = (
+            prefix
+            + b"\ndef target(value=default()):\n"
+            + b"    result = call(keyword=value)\n"
+            + b"    return obj.member and result\n"
+        )
+        snapshot = source(Language.PYTHON, file="token-locality.py", raw=raw)
+        callable_node = cast(ast.FunctionDef, ast.parse(snapshot.text).body[-1])
+        context = common_runtime._python_source_context(snapshot)
+
+        class CountingTokens:
+            def __init__(self, values: tuple[Any, ...]) -> None:
+                self.values = values
+                self.touches = 0
+
+            def __len__(self) -> int:
+                return len(self.values)
+
+            def __getitem__(self, index: Any) -> Any:
+                if isinstance(index, slice):
+                    start, stop, step = index.indices(len(self.values))
+                    self.touches += len(range(start, stop, step))
+                else:
+                    self.touches += 1
+                return self.values[index]
+
+            def __iter__(self) -> Any:
+                for index in range(len(self.values)):
+                    yield self[index]
+
+        counting = CountingTokens(context.tokens)
+        instrumented = dataclasses.replace(
+            context,
+            tokens=cast(Any, counting),
+        )
+        with common_runtime._PYTHON_SOURCE_CONTEXT_LOCK:
+            common_runtime._PYTHON_SOURCE_CONTEXTS[snapshot] = instrumented
+        try:
+            events = ast_body_events(snapshot, callable_node)
+        finally:
+            with common_runtime._PYTHON_SOURCE_CONTEXT_LOCK:
+                common_runtime._PYTHON_SOURCE_CONTEXTS[snapshot] = context
+
+        self.assertGreater(len(context.tokens), 2_000)
+        self.assertTrue(events)
+        self.assertLess(counting.touches, 100)
 
     def test_stdlib_operator_events_use_each_exact_source_token_span(self) -> None:
         raw = (
