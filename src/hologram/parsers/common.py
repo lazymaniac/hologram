@@ -7,7 +7,7 @@ import tokenize
 import unicodedata
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from threading import RLock
 from typing import TypeVar
@@ -364,7 +364,12 @@ def _constant_text(value: object) -> str:
 
 
 class _AstBodyEventWalker:
-    def __init__(self, source: SourceFile, callable_node: ast.AST) -> None:
+    def __init__(
+        self,
+        source: SourceFile,
+        callable_node: ast.AST,
+        type_constructor_aliases: Mapping[str, str] | None = None,
+    ) -> None:
         self.source = source
         self.callable_node = callable_node
         self.events: list[BodyEvent] = []
@@ -373,6 +378,7 @@ class _AstBodyEventWalker:
         self._line_offsets = context.line_offsets
         self._tokens = context.tokens
         self._token_starts = context.token_starts
+        self._type_constructor_aliases = dict(type_constructor_aliases or ())
         self._external_bindings = self._declared_external_bindings()
         self._comprehension_targets = self._comprehension_target_nodes()
 
@@ -757,11 +763,19 @@ class _AstBodyEventWalker:
             arguments = (
                 node.slice.elts if isinstance(node.slice, ast.Tuple) else (node.slice,)
             )
-            constructor = (
+            constructor_name = (
                 node.value.id
                 if isinstance(node.value, ast.Name)
                 else node.value.attr
                 if isinstance(node.value, ast.Attribute)
+                else None
+            )
+            constructor = (
+                self._type_constructor_aliases.get(
+                    constructor_name,
+                    constructor_name,
+                )
+                if constructor_name is not None
                 else None
             )
             if constructor == "Literal":
@@ -1070,7 +1084,10 @@ class _AstBodyEventWalker:
 
 
 def ast_body_events(
-    source: SourceFile, callable_node: ast.AST
+    source: SourceFile,
+    callable_node: ast.AST,
+    *,
+    type_constructor_aliases: Mapping[str, str] | None = None,
 ) -> tuple[BodyEvent, ...]:
     """Emit one Python scope's events without entering named declarations.
 
@@ -1082,7 +1099,11 @@ def ast_body_events(
         (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.Module),
     ):
         raise TypeError("callable_node must be a Python module, function, or lambda")
-    return _AstBodyEventWalker(source, callable_node).walk()
+    return _AstBodyEventWalker(
+        source,
+        callable_node,
+        type_constructor_aliases,
+    ).walk()
 
 
 body_events = ast_body_events

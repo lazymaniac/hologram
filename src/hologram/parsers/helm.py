@@ -28,7 +28,9 @@ _TOKEN_RE = re.compile(
     rb'"(?:\\.|[^"\\])*"'
     rb"|`[^`]*`"
     rb"|'(?:\\.|[^'\\])*'"
+    rb"|\$\.[A-Za-z_][A-Za-z0-9_.-]*"
     rb"|\$?[A-Za-z_][A-Za-z0-9_.-]*"
+    rb"|\$"
     rb"|\.[A-Za-z_][A-Za-z0-9_.-]*"
     rb"|\."
     rb"|-?\d+(?:\.\d+)?"
@@ -38,7 +40,21 @@ _TOKEN_RE = re.compile(
 )
 _CONTROL_ACTIONS = {b"if": "if", b"range": "loop", b"with": "if"}
 _NON_EVENT_BLOCKS = frozenset({b"block"})
-_KEYWORDS = frozenset({b"else", b"if"})
+_FLOW_ACTIONS = frozenset({b"break", b"continue"})
+_KEYWORDS = frozenset({b"break", b"continue", b"else", b"if"})
+_RESERVED_ACTION_WORDS = frozenset(
+    {
+        b"block",
+        b"break",
+        b"continue",
+        b"define",
+        b"else",
+        b"end",
+        b"if",
+        b"range",
+        b"with",
+    }
+)
 _PUNCTUATION = frozenset({b"(", b")", b","})
 _OPERATORS = frozenset(
     {
@@ -312,11 +328,8 @@ def _unparsed_action_span(
     return None
 
 
-def _decode_go_interpreted(raw: bytes) -> str:
-    quote = raw[:1]
-    if len(raw) < 2 or quote not in {b'"', b"'"} or raw[-1:] != quote:
-        raise ValueError("malformed quoted literal")
-    content = raw[1:-1].decode("utf-8")
+def _decode_go_rune(content: bytes) -> str:
+    text = content.decode("utf-8")
     escapes = {
         "a": "\a",
         "b": "\b",
@@ -331,23 +344,23 @@ def _decode_go_interpreted(raw: bytes) -> str:
     }
     decoded: list[str] = []
     index = 0
-    while index < len(content):
-        character = content[index]
+    while index < len(text):
+        character = text[index]
         if character in {"\n", "\r"}:
-            raise ValueError("newline in interpreted string")
+            raise ValueError("newline in character literal")
         if character != "\\":
             decoded.append(character)
             index += 1
             continue
-        if index + 1 >= len(content):
+        if index + 1 >= len(text):
             raise ValueError("truncated escape")
-        escape = content[index + 1]
+        escape = text[index + 1]
         if escape in escapes:
             decoded.append(escapes[escape])
             index += 2
             continue
         if escape in "01234567":
-            digits = content[index + 1 : index + 4]
+            digits = text[index + 1 : index + 4]
             if len(digits) != 3 or any(digit not in "01234567" for digit in digits):
                 raise ValueError("octal escape must contain three digits")
             value = int(digits, 8)
@@ -360,7 +373,7 @@ def _decode_go_interpreted(raw: bytes) -> str:
         width = widths.get(escape)
         if width is None:
             raise ValueError(f"unknown escape \\{escape}")
-        digits = content[index + 2 : index + 2 + width]
+        digits = text[index + 2 : index + 2 + width]
         if len(digits) != width or any(
             digit not in "0123456789abcdefABCDEF" for digit in digits
         ):
@@ -372,9 +385,77 @@ def _decode_go_interpreted(raw: bytes) -> str:
             raise ValueError("Unicode escape is not a scalar value")
         decoded.append(chr(codepoint))
         index += width + 2
-    decoded_value = "".join(decoded)
-    if quote == b"'" and len(decoded_value) != 1:
+    if len(decoded) != 1:
         raise ValueError("character literal must decode to one character")
+    return decoded[0]
+
+
+def _decode_go_interpreted(raw: bytes) -> str:
+    quote = raw[:1]
+    if len(raw) < 2 or quote not in {b'"', b"'"} or raw[-1:] != quote:
+        raise ValueError("malformed quoted literal")
+    content = raw[1:-1]
+    if quote == b"'":
+        return _decode_go_rune(content)
+    escapes = {
+        ord("a"): ord("\a"),
+        ord("b"): ord("\b"),
+        ord("f"): ord("\f"),
+        ord("n"): ord("\n"),
+        ord("r"): ord("\r"),
+        ord("t"): ord("\t"),
+        ord("v"): ord("\v"),
+        ord("\\"): ord("\\"),
+        ord("'"): ord("'"),
+        ord('"'): ord('"'),
+    }
+    decoded = bytearray()
+    index = 0
+    while index < len(content):
+        byte = content[index]
+        if byte in {ord("\n"), ord("\r")}:
+            raise ValueError("newline in interpreted string")
+        if byte != ord("\\"):
+            decoded.append(byte)
+            index += 1
+            continue
+        if index + 1 >= len(content):
+            raise ValueError("truncated escape")
+        escape = content[index + 1]
+        if escape in escapes:
+            decoded.append(escapes[escape])
+            index += 2
+            continue
+        if escape in b"01234567":
+            digits = content[index + 1 : index + 4]
+            if len(digits) != 3 or any(digit not in b"01234567" for digit in digits):
+                raise ValueError("octal escape must contain three digits")
+            value = int(digits, 8)
+            if value > 0xFF:
+                raise ValueError("octal escape is outside one byte")
+            decoded.append(value)
+            index += 4
+            continue
+        widths = {ord("x"): 2, ord("u"): 4, ord("U"): 8}
+        width = widths.get(escape)
+        if width is None:
+            raise ValueError(f"unknown escape \\{chr(escape)}")
+        digits = content[index + 2 : index + 2 + width]
+        if len(digits) != width or any(
+            digit not in b"0123456789abcdefABCDEF" for digit in digits
+        ):
+            raise ValueError(f"\\{chr(escape)} escape must contain {width} hex digits")
+        codepoint = int(digits, 16)
+        if escape in {ord("u"), ord("U")} and (
+            codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF
+        ):
+            raise ValueError("Unicode escape is not a scalar value")
+        if escape == ord("x"):
+            decoded.append(codepoint)
+        else:
+            decoded.extend(chr(codepoint).encode("utf-8"))
+        index += width + 2
+    decoded_value = decoded.decode("utf-8")
     return decoded_value
 
 
@@ -477,15 +558,22 @@ def _chart_symbols(
 def _pipeline_segments(
     tokens: tuple[_Token, ...],
     start: int = 0,
+    end: int | None = None,
 ) -> tuple[tuple[int, int], ...]:
+    stop = len(tokens) if end is None else end
     segments: list[tuple[int, int]] = []
     segment_start = start
-    for index in range(start, len(tokens)):
-        if tokens[index].raw != b"|":
-            continue
-        segments.append((segment_start, index))
-        segment_start = index + 1
-    segments.append((segment_start, len(tokens)))
+    depth = 0
+    for index in range(start, stop):
+        raw = tokens[index].raw
+        if raw == b"(":
+            depth += 1
+        elif raw == b")":
+            depth -= 1
+        elif raw == b"|" and depth == 0:
+            segments.append((segment_start, index))
+            segment_start = index + 1
+    segments.append((segment_start, stop))
     return tuple(segments)
 
 
@@ -501,6 +589,100 @@ def _operand_indices(
     )
 
 
+def _direct_groups(
+    tokens: tuple[_Token, ...],
+    start: int,
+    end: int,
+) -> tuple[tuple[int, int], ...]:
+    groups: list[tuple[int, int]] = []
+    depth = 0
+    opening = start
+    for index in range(start, end):
+        raw = tokens[index].raw
+        if raw == b"(":
+            if depth == 0:
+                opening = index
+            depth += 1
+        elif raw == b")":
+            depth -= 1
+            if depth == 0:
+                groups.append((opening + 1, index))
+    return tuple(groups)
+
+
+def _top_level_operand_indices(
+    tokens: tuple[_Token, ...],
+    start: int,
+    end: int,
+) -> tuple[int, ...]:
+    operands: list[int] = []
+    depth = 0
+    for index in range(start, end):
+        raw = tokens[index].raw
+        if raw == b"(":
+            depth += 1
+            continue
+        if raw == b")":
+            depth -= 1
+            continue
+        if depth == 0 and raw not in _OPERATORS and raw not in _PUNCTUATION:
+            operands.append(index)
+    return tuple(operands)
+
+
+def _top_level_assignment(
+    tokens: tuple[_Token, ...],
+    start: int,
+    end: int,
+) -> int | None:
+    depth = 0
+    for index in range(start, end):
+        raw = tokens[index].raw
+        if raw == b"(":
+            depth += 1
+        elif raw == b")":
+            depth -= 1
+        elif depth == 0 and raw in {b":=", b"="}:
+            return index
+    return None
+
+
+def _pipeline_range_error(
+    tokens: tuple[_Token, ...],
+    start: int,
+    end: int,
+) -> str | None:
+    if start >= end:
+        return "template pipeline is required"
+    for segment_start, segment_end in _pipeline_segments(tokens, start, end):
+        operands = _operand_indices(tokens, segment_start, segment_end)
+        if not operands:
+            return "template pipeline command is empty"
+        assignment = _top_level_assignment(tokens, segment_start, segment_end)
+        if assignment is not None:
+            left = _top_level_operand_indices(
+                tokens,
+                segment_start,
+                assignment,
+            )
+            right = _operand_indices(tokens, assignment + 1, segment_end)
+            if not left or not right:
+                return "template assignment requires a variable and value"
+            if tokens[assignment].raw == b":=" and any(
+                not tokens[index].raw.startswith(b"$") for index in left
+            ):
+                return "template declaration target must be a variable"
+        for group_start, group_end in _direct_groups(
+            tokens,
+            segment_start,
+            segment_end,
+        ):
+            nested_error = _pipeline_range_error(tokens, group_start, group_end)
+            if nested_error is not None:
+                return nested_error
+    return None
+
+
 def _pipeline_error(tokens: tuple[_Token, ...]) -> str | None:
     if not tokens:
         return "template pipeline is required"
@@ -514,53 +696,76 @@ def _pipeline_error(tokens: tuple[_Token, ...]) -> str | None:
                 return "unexpected closing parenthesis"
     if depth:
         return "unclosed pipeline parenthesis"
-    for start, end in _pipeline_segments(tokens):
-        operands = _operand_indices(tokens, start, end)
-        if not operands:
-            return "template pipeline command is empty"
-        assignment = next(
-            (
-                index
-                for index in range(start, end)
-                if tokens[index].raw in {b":=", b"="}
-            ),
-            None,
+    return _pipeline_range_error(tokens, 0, len(tokens))
+
+
+def _pipeline_structure(
+    tokens: tuple[_Token, ...],
+    start: int = 0,
+    end: int | None = None,
+) -> tuple[set[int], tuple[tuple[int, int, bool], ...]]:
+    stop = len(tokens) if end is None else end
+    locals_: set[int] = set()
+    commands: list[tuple[int, int, bool]] = []
+    for segment_number, (segment_start, segment_end) in enumerate(
+        _pipeline_segments(tokens, start, stop)
+    ):
+        assignment = _top_level_assignment(tokens, segment_start, segment_end)
+        command_start = segment_start
+        if assignment is not None:
+            if tokens[assignment].raw == b":=":
+                locals_.update(
+                    index
+                    for index in _top_level_operand_indices(
+                        tokens,
+                        segment_start,
+                        assignment,
+                    )
+                    if tokens[index].raw.startswith(b"$")
+                )
+            command_start = assignment + 1
+        operands = _top_level_operand_indices(
+            tokens,
+            command_start,
+            segment_end,
         )
-        if assignment is None:
-            continue
-        left = _operand_indices(tokens, start, assignment)
-        right = _operand_indices(tokens, assignment + 1, end)
-        if not left or not right:
-            return "template assignment requires a variable and value"
-        if tokens[assignment].raw == b":=" and any(
-            not tokens[index].raw.startswith(b"$") for index in left
+        if operands:
+            commands.append((operands[0], segment_end, segment_number > 0))
+        for group_start, group_end in _direct_groups(
+            tokens,
+            command_start,
+            segment_end,
         ):
-            return "template declaration target must be a variable"
-    return None
+            nested_locals, nested_commands = _pipeline_structure(
+                tokens,
+                group_start,
+                group_end,
+            )
+            locals_.update(nested_locals)
+            commands.extend(nested_commands)
+    commands.sort(key=lambda command: command[0])
+    return locals_, tuple(commands)
 
 
 def _invocation_shape_error(tokens: tuple[_Token, ...]) -> str | None:
-    for index, token in enumerate(tokens):
+    _, command_ranges = _pipeline_structure(tokens)
+    for index, segment_end, has_pipeline_input in command_ranges:
+        token = tokens[index]
         if token.raw not in {b"include", b"template"}:
             continue
-        if index + 1 >= len(tokens):
+        operands = _top_level_operand_indices(tokens, index, segment_end)
+        if len(operands) < 2:
             return f"{token.raw.decode('ascii')} target must be a string"
-        target = _string_value(tokens[index + 1].raw)
+        target_index = operands[1]
+        target = _string_value(tokens[target_index].raw)
         if not target:
             return f"{token.raw.decode('ascii')} target must be a nonempty string"
         if token.raw == b"include":
-            segment_end = next(
-                (
-                    candidate
-                    for candidate in range(index + 2, len(tokens))
-                    if tokens[candidate].raw == b"|"
-                ),
-                len(tokens),
+            has_group_argument = any(
+                group_start - 1 > target_index
+                for group_start, _ in _direct_groups(tokens, index, segment_end)
             )
-            has_pipeline_input = index > 0 and tokens[index - 1].raw == b"|"
-            if not has_pipeline_input and not _operand_indices(
-                tokens, index + 2, segment_end
-            ):
+            if not has_pipeline_input and len(operands) < 3 and not has_group_argument:
                 return "include requires a template value"
     return None
 
@@ -578,6 +783,12 @@ def _action_shape_error(tokens: tuple[_Token, ...]) -> str | None:
         return None
     if keyword == b"end":
         return None if len(tokens) == 1 else "template end takes no arguments"
+    if keyword in _FLOW_ACTIONS:
+        return (
+            None
+            if len(tokens) == 1
+            else f"template {keyword.decode()} takes no arguments"
+        )
     if keyword in _CONTROL_ACTIONS:
         return _pipeline_error(tokens[1:]) or _invocation_shape_error(tokens[1:])
     if keyword in _NON_EVENT_BLOCKS:
@@ -606,63 +817,28 @@ def _action_fact_roles(
     tokens: tuple[_Token, ...],
     pipeline_start: int,
 ) -> tuple[set[int], dict[int, tuple[str, int, bool]]]:
-    locals_: set[int] = set()
+    locals_, command_ranges = _pipeline_structure(tokens, pipeline_start)
     commands: dict[int, tuple[str, int, bool]] = {}
-    for segment_start, segment_end in _pipeline_segments(tokens, pipeline_start):
-        assignment = next(
-            (
-                index
-                for index in range(segment_start, segment_end)
-                if tokens[index].raw == b":="
-            ),
-            None,
-        )
-        command_start = segment_start
-        if assignment is not None:
-            locals_.update(
-                index
-                for index in range(segment_start, assignment)
-                if tokens[index].raw.startswith(b"$")
-            )
-            command_start = assignment + 1
-        operands = _operand_indices(tokens, command_start, segment_end)
-        if not operands:
-            continue
-        head = operands[0]
+    for head, segment_end, _ in command_ranges:
         raw = tokens[head].raw
         if (
             _literal_text(raw) is None
             and re.fullmatch(rb"[A-Za-z_][A-Za-z0-9_.-]*", raw)
-            and raw
-            not in {
-                b"block",
-                b"define",
-                b"else",
-                b"end",
-                b"if",
-                b"range",
-                b"with",
-            }
+            and raw not in _RESERVED_ACTION_WORDS
         ):
             commands[head] = (
                 raw.decode("utf-8"),
                 _command_span_end(tokens, head, segment_end),
                 False,
             )
-    for index, token in enumerate(tokens[pipeline_start:], start=pipeline_start):
+    for index, segment_end, _ in command_ranges:
+        token = tokens[index]
         if token.raw not in {b"include", b"template"}:
             continue
-        target = _string_value(tokens[index + 1].raw)
+        operands = _top_level_operand_indices(tokens, index, segment_end)
+        target = _string_value(tokens[operands[1]].raw)
         if target is None:
             continue
-        segment_end = next(
-            (
-                candidate
-                for candidate in range(index + 1, len(tokens))
-                if tokens[candidate].raw == b"|"
-            ),
-            len(tokens),
-        )
         commands[index] = (
             target,
             _command_span_end(tokens, index, segment_end),
@@ -891,6 +1067,22 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
             if definition is not None:
                 _action_events(source, starts, definition, tokens[1:])
             stack.append(_Frame(keyword, definition, action_span))
+            continue
+
+        if keyword in _FLOW_ACTIONS:
+            if not any(frame.keyword == b"range" for frame in stack):
+                diagnostics.append(
+                    _syntax_diagnostic(
+                        source,
+                        starts,
+                        f"template {keyword.decode()} outside range",
+                        action.start,
+                        action.end,
+                    )
+                )
+                continue
+            if definition is not None:
+                _action_events(source, starts, definition, tokens)
             continue
 
         if keyword == b"else":

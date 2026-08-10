@@ -738,6 +738,69 @@ def parse(
         for reference in visitor.references:
             self.assertIn((BodyEventKind.NAME, reference.span), event_pairs)
 
+    def test_typing_import_aliases_preserve_annotation_argument_roles(self) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+from typing import Annotated as A, Literal as L
+
+def parse(
+    status: L["ready", "Phantom"],
+    user: A[list["User"], "Metadata", marker],
+    nested: dict[str, list["Real"]],
+) -> A[list["Result"], "ReturnMetadata"]:
+    local: A[list["Kept"], "LocalMetadata", local_marker] = user
+    choice: L["Ignored"] = status
+    nested_choice: A[L["InnerIgnored"], "NestedMetadata"] = status
+    return local
+""",
+                file="aliased-type-strings.py",
+                language=Language.PYTHON,
+            )
+        )
+
+        possible_annotations = [
+            (reference.name, reference.kind)
+            for reference in result.references
+            if reference.context is ReferenceContext.ANNOTATION
+            and reference.confidence is ReferenceConfidence.POSSIBLE
+        ]
+        self.assertEqual(
+            possible_annotations,
+            [
+                ("User", ReferenceKind.TYPE),
+                ("marker", ReferenceKind.NAME),
+                ("Real", ReferenceKind.TYPE),
+                ("Result", ReferenceKind.TYPE),
+                ("Kept", ReferenceKind.TYPE),
+                ("local_marker", ReferenceKind.NAME),
+            ],
+        )
+        suppressed = {
+            "Ignored",
+            "InnerIgnored",
+            "LocalMetadata",
+            "Metadata",
+            "NestedMetadata",
+            "Phantom",
+            "ReturnMetadata",
+            "ready",
+        }
+        self.assertTrue(
+            suppressed.isdisjoint(reference.name for reference in result.references)
+        )
+        parse_symbol = next(
+            symbol for symbol in result.symbols if symbol.name == "parse"
+        )
+        body = next(body for body in result.bodies if body.owner == parse_symbol.id)
+        event_facts = {(event.kind, event.text) for event in body.events}
+        self.assertIn((BodyEventKind.TYPE, "Kept"), event_facts)
+        self.assertIn((BodyEventKind.NAME, "local_marker"), event_facts)
+        for suppressed_name in suppressed:
+            self.assertNotIn((BodyEventKind.TYPE, suppressed_name), event_facts)
+            self.assertNotIn((BodyEventKind.NAME, suppressed_name), event_facts)
+        assert_body_fact_events(self, result)
+
 
 class HelmParserTest(unittest.TestCase):
     def test_chart_values_and_named_templates_preserve_existing_facts(self) -> None:
@@ -1088,6 +1151,10 @@ class HelmParserTest(unittest.TestCase):
             b'{{define "x" trailing}}{{end}}',
             b'{{define "x"}}{{end trailing}}',
             b'{{define ""}}{{end}}',
+            b'{{define "x"}}{{break trailing}}{{end}}',
+            b'{{define "x"}}{{continue true}}{{end}}',
+            b'{{define "x"}}{{break}}{{end}}',
+            b'{{define "x"}}{{continue}}{{end}}',
         )
         for index, raw in enumerate(malformed):
             with self.subTest(index=index):
@@ -1192,22 +1259,199 @@ class HelmParserTest(unittest.TestCase):
             projected = legacy.extract_file(path, root)
         self.assertEqual(projected[0].calls, [])
 
-    def test_helm_quoted_names_decode_go_escapes_and_reject_invalid_ones(
-        self,
-    ) -> None:
-        valid = extract_file(
+    def test_helm_root_values_are_valid_pipeline_operands(self) -> None:
+        raw = b"""\
+{{define "rooted"}}
+{{ include "target" $ }}
+{{ printf "%s" $.Values.name }}
+{{end}}
+"""
+        result = extract_file(
             snapshot(
-                b'{{define "\\u0066oo"}}{{end}}',
-                file="chart/templates/escaped.tpl",
+                raw,
+                file="chart/templates/rooted.tpl",
                 language=Language.HELM,
             )
         )
-        self.assertEqual(valid.diagnostics, ())
-        self.assertEqual([symbol.name for symbol in valid.symbols], ["foo"])
+
+        self.assertEqual(result.diagnostics, ())
+        definition = result.symbols[0]
+        include_line, printf_line = raw.splitlines()[1:3]
+        include_start = include_line.index(b"include")
+        root_start = include_line.index(b"$")
+        printf_start = printf_line.index(b"printf")
+        field_start = printf_line.index(b"$.Values.name")
+        expected_calls = [
+            (
+                "target",
+                SourceSpan(
+                    result.source.file,
+                    2,
+                    include_start,
+                    2,
+                    root_start + 1,
+                ),
+            ),
+            (
+                "printf",
+                SourceSpan(
+                    result.source.file,
+                    3,
+                    printf_start,
+                    3,
+                    field_start + len(b"$.Values.name"),
+                ),
+            ),
+        ]
+        self.assertEqual(
+            [(call.name, call.span) for call in result.calls],
+            expected_calls,
+        )
+        self.assertTrue(all(call.caller == definition.id for call in result.calls))
+        body_facts = {
+            (event.kind, event.text, event.span) for event in result.bodies[0].events
+        }
+        self.assertIn(
+            (
+                BodyEventKind.NAME,
+                "$",
+                SourceSpan(
+                    result.source.file,
+                    2,
+                    root_start,
+                    2,
+                    root_start + 1,
+                ),
+            ),
+            body_facts,
+        )
+        self.assertIn(
+            (
+                BodyEventKind.NAME,
+                "$.Values.name",
+                SourceSpan(
+                    result.source.file,
+                    3,
+                    field_start,
+                    3,
+                    field_start + len(b"$.Values.name"),
+                ),
+            ),
+            body_facts,
+        )
+        assert_body_fact_events(self, result)
+
+    def test_helm_nested_commands_and_loop_controls_have_exact_roles(self) -> None:
+        raw = b"""\
+{{define "nested"}}
+{{ printf "%s" (required "msg" .Values.name) }}
+{{ range .Values.items }}
+{{ break }}
+{{ continue }}
+{{ end }}
+{{end}}
+"""
+        result = extract_file(
+            snapshot(
+                raw,
+                file="chart/templates/nested-commands.tpl",
+                language=Language.HELM,
+            )
+        )
+
+        self.assertEqual(result.diagnostics, ())
+        command_line = raw.splitlines()[1]
+        command_end = command_line.index(b".Values.name") + len(b".Values.name")
+        expected_calls = [
+            (
+                "printf",
+                SourceSpan(
+                    result.source.file,
+                    2,
+                    command_line.index(b"printf"),
+                    2,
+                    command_end,
+                ),
+            ),
+            (
+                "required",
+                SourceSpan(
+                    result.source.file,
+                    2,
+                    command_line.index(b"required"),
+                    2,
+                    command_end,
+                ),
+            ),
+        ]
+        self.assertEqual(
+            [(call.name, call.span) for call in result.calls],
+            expected_calls,
+        )
+        event_facts = {
+            (event.kind, event.text, event.span) for event in result.bodies[0].events
+        }
+        for call_name, call_span in expected_calls:
+            self.assertIn((BodyEventKind.CALL, call_name, call_span), event_facts)
+        for line_number, keyword in ((4, "break"), (5, "continue")):
+            self.assertIn(
+                (
+                    BodyEventKind.KEYWORD,
+                    keyword,
+                    SourceSpan(
+                        result.source.file,
+                        line_number,
+                        3,
+                        line_number,
+                        3 + len(keyword),
+                    ),
+                ),
+                event_facts,
+            )
+        self.assertTrue(
+            {"break", "continue"}.isdisjoint(call.name for call in result.calls)
+        )
+        assert_body_fact_events(self, result)
+
+    def test_helm_quoted_names_decode_go_escapes_and_reject_invalid_ones(
+        self,
+    ) -> None:
+        valid = (
+            (b'{{define "\\u0066oo"}}{{end}}', "foo"),
+            (b'{{define "\\xC3\\xA9"}}{{end}}', "é"),
+            (b'{{define "\\303\\251"}}{{end}}', "é"),
+            (b'{{define "caf\\xC3\\251"}}{{end}}', "café"),
+            (b'{{define "\\U000000e9"}}{{end}}', "é"),
+        )
+        for index, (raw, expected_name) in enumerate(valid):
+            with self.subTest(valid=index):
+                result = extract_file(
+                    snapshot(
+                        raw,
+                        file=f"chart/templates/escaped-{index}.tpl",
+                        language=Language.HELM,
+                    )
+                )
+                self.assertEqual(result.diagnostics, ())
+                self.assertEqual(
+                    [symbol.name for symbol in result.symbols],
+                    [expected_name],
+                )
+
+        valid_rune = extract_file(
+            snapshot(
+                b"{{define \"rune\"}}{{printf '\\u00e9'}}{{end}}",
+                file="chart/templates/valid-rune.tpl",
+                language=Language.HELM,
+            )
+        )
+        self.assertEqual(valid_rune.diagnostics, ())
 
         invalid = (
             b'{{define "\\q"}}{{end}}',
             b'{{define "\\u12"}}{{end}}',
+            b'{{define "\\xFF"}}{{end}}',
+            b"{{define \"x\"}}{{printf '\\xC3\\xA9'}}{{end}}",
         )
         for index, raw in enumerate(invalid):
             with self.subTest(index=index):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import PurePosixPath
 
 from hologram.model import (
@@ -51,6 +51,7 @@ _REGISTRATION_CALLS = frozenset(
 _CONFIGURATION_CALLS = frozenset({"config", "configure", "set_callback"})
 _CALLBACK_KEYWORDS = frozenset({"callback", "handler", "listener", "target"})
 _REFLECTION_CALLS = frozenset({"getattr", "setattr"})
+_TYPING_ROLE_CONSTRUCTORS = frozenset({"Annotated", "Literal"})
 _WEAK_REFERENCE_CONTEXTS = frozenset(
     {
         ReferenceContext.ANNOTATION,
@@ -451,12 +452,31 @@ def _suffix_span(source: SourceFile, node: ast.Attribute) -> SourceSpan:
     )
 
 
-def _type_constructor_name(node: ast.AST) -> str | None:
+def _type_constructor_name(
+    node: ast.AST,
+    aliases: Mapping[str, str],
+) -> str | None:
     if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return None
+        name = node.id
+    elif isinstance(node, ast.Attribute):
+        name = node.attr
+    else:
+        return None
+    return aliases.get(name, name)
+
+
+def _typing_constructor_aliases(tree: ast.Module) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for statement in tree.body:
+        if not isinstance(statement, ast.ImportFrom):
+            continue
+        if statement.level or statement.module != "typing":
+            continue
+        for imported in statement.names:
+            if imported.name not in _TYPING_ROLE_CONSTRUCTORS:
+                continue
+            aliases[imported.asname or imported.name] = imported.name
+    return aliases
 
 
 class _OwnedFactVisitor(ast.NodeVisitor):
@@ -467,12 +487,14 @@ class _OwnedFactVisitor(ast.NodeVisitor):
         events: tuple[BodyEvent, ...] = (),
         *,
         context: ReferenceContext = ReferenceContext.CODE,
+        type_constructor_aliases: Mapping[str, str] | None = None,
     ) -> None:
         self.source = source
         self.owner = owner
         self.calls: list[CallRef] = []
         self.references: list[ReferenceRef] = []
         self.context = context
+        self._type_constructor_aliases = dict(type_constructor_aliases or ())
         self._event_spans_by_end = {
             (
                 event.kind,
@@ -628,7 +650,10 @@ class _OwnedFactVisitor(ast.NodeVisitor):
         arguments = (
             node.slice.elts if isinstance(node.slice, ast.Tuple) else (node.slice,)
         )
-        constructor = _type_constructor_name(node.value)
+        constructor = _type_constructor_name(
+            node.value,
+            self._type_constructor_aliases,
+        )
         if constructor == "Literal":
             for argument in arguments:
                 self._visit_in_context(argument, ReferenceContext.ANNOTATION)
@@ -704,8 +729,14 @@ def _facts_for_callable(
     symbol: Symbol,
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     events: tuple[BodyEvent, ...],
+    type_constructor_aliases: Mapping[str, str],
 ) -> tuple[tuple[CallRef, ...], tuple[ReferenceRef, ...]]:
-    visitor = _OwnedFactVisitor(source, symbol.id, events)
+    visitor = _OwnedFactVisitor(
+        source,
+        symbol.id,
+        events,
+        type_constructor_aliases=type_constructor_aliases,
+    )
     for decorator in node.decorator_list:
         visitor._visit_in_context(decorator, ReferenceContext.ANNOTATION)
     arguments = node.args
@@ -736,8 +767,14 @@ def _facts_for_module(
     symbol: Symbol,
     tree: ast.Module,
     events: tuple[BodyEvent, ...],
+    type_constructor_aliases: Mapping[str, str],
 ) -> tuple[tuple[CallRef, ...], tuple[ReferenceRef, ...]]:
-    visitor = _OwnedFactVisitor(source, symbol.id, events)
+    visitor = _OwnedFactVisitor(
+        source,
+        symbol.id,
+        events,
+        type_constructor_aliases=type_constructor_aliases,
+    )
     for statement in tree.body:
         visitor.visit(statement)
     return tuple(visitor.calls), tuple(visitor.references)
@@ -747,8 +784,13 @@ def _facts_for_class(
     source: SourceFile,
     symbol: Symbol,
     node: ast.ClassDef,
+    type_constructor_aliases: Mapping[str, str],
 ) -> tuple[tuple[CallRef, ...], tuple[ReferenceRef, ...]]:
-    visitor = _OwnedFactVisitor(source, symbol.id)
+    visitor = _OwnedFactVisitor(
+        source,
+        symbol.id,
+        type_constructor_aliases=type_constructor_aliases,
+    )
     for decorator in node.decorator_list:
         visitor._visit_in_context(decorator, ReferenceContext.ANNOTATION)
     for base in node.bases:
@@ -885,6 +927,7 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
 
     declarations = _DeclarationVisitor(source)
     declarations.visit(tree)
+    type_constructor_aliases = _typing_constructor_aliases(tree)
     module_symbol = _module_symbol(source, module, tree)
     symbols = (
         module_symbol,
@@ -894,12 +937,17 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
     calls: list[CallRef] = []
     references: list[ReferenceRef] = []
 
-    module_events = ast_body_events(source, tree)
+    module_events = ast_body_events(
+        source,
+        tree,
+        type_constructor_aliases=type_constructor_aliases,
+    )
     module_calls, module_references = _facts_for_module(
         source,
         module_symbol,
         tree,
         module_events,
+        type_constructor_aliases,
     )
     module_events = _join_reference_events(module_events, module_references)
     bodies.append(BodyIR(module_symbol.id, module_symbol.span, module_events))
@@ -907,16 +955,29 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
     references.extend(module_references)
 
     for symbol, node in declarations.callables:
-        events = ast_body_events(source, node)
+        events = ast_body_events(
+            source,
+            node,
+            type_constructor_aliases=type_constructor_aliases,
+        )
         owned_calls, owned_references = _facts_for_callable(
-            source, symbol, node, events
+            source,
+            symbol,
+            node,
+            events,
+            type_constructor_aliases,
         )
         events = _join_reference_events(events, owned_references)
         bodies.append(BodyIR(symbol.id, _scope_span(source, node.body), events))
         calls.extend(owned_calls)
         references.extend(owned_references)
     for symbol, class_node in declarations.classes:
-        owned_calls, owned_references = _facts_for_class(source, symbol, class_node)
+        owned_calls, owned_references = _facts_for_class(
+            source,
+            symbol,
+            class_node,
+            type_constructor_aliases,
+        )
         calls.extend(owned_calls)
         references.extend(owned_references)
 
