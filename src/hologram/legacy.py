@@ -1465,6 +1465,39 @@ def _legacy_call_name(call) -> str:
     return f"{call.receiver}.{call.name}"
 
 
+def _legacy_span_bytes(file_ir: CanonicalFileIR, span) -> bytes:
+    lines = file_ir.source.raw.splitlines(keepends=True)
+    start = span.start_line - 1
+    end = span.end_line - 1
+    if start == end:
+        return lines[start][span.start_column : span.end_column]
+    return b"".join(
+        (
+            lines[start][span.start_column :],
+            *lines[start + 1 : end],
+            lines[end][: span.end_column],
+        )
+    )
+
+
+def _legacy_java_call_name(file_ir: CanonicalFileIR, call) -> str | None:
+    if call.kind is CallKind.CONSTRUCT:
+        if call.name in {"super", "this"}:
+            return None
+        raw = _legacy_span_bytes(file_ir, call.span).lstrip()
+        constructor = raw[4:] if raw.startswith(b"new ") else raw
+        bracket = constructor.find(b"[")
+        arguments = constructor.find(b"(")
+        if bracket >= 0 and (arguments < 0 or bracket < arguments):
+            return None
+        return call.name
+    if call.receiver is None:
+        return call.name
+    if re.fullmatch(r"(?:[^\W\d]|\$)[\w$]*", call.receiver, re.UNICODE):
+        return f"{call.receiver}.{call.name}"
+    return call.name
+
+
 def _legacy_python_call_spans(
     file_ir: CanonicalFileIR,
     symbol,
@@ -1534,13 +1567,13 @@ def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
         owned = [call for call in file_ir.calls if call.caller == symbol.id]
     result: list[str] = []
     for call in owned:
-        if (
-            file_ir.source.language is Language.JAVA
-            and call.kind is CallKind.CONSTRUCT
-            and call.name in {"super", "this"}
-        ):
+        name = (
+            _legacy_java_call_name(file_ir, call)
+            if file_ir.source.language is Language.JAVA
+            else _legacy_call_name(call)
+        )
+        if name is None:
             continue
-        name = _legacy_call_name(call)
         if name == symbol.name or name in result:
             continue
         result.append(name)

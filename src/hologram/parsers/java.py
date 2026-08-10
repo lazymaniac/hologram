@@ -77,11 +77,6 @@ _PRIMITIVE_TYPES = frozenset(
         "void",
     }
 )
-_IMPORT_RE = re.compile(
-    r"^import\s+(?P<static>static\s+)?"
-    r"(?P<target>(?:[^\W\d]|\$)[\w$]*(?:\.(?:[^\W\d]|\$)[\w$]*)*)"
-    r"(?P<wildcard>\.\*)?\s*;$"
-)
 _IDENTIFIER_RE = re.compile(r"^(?:[^\W\d]|\$)[\w$]*$", re.UNICODE)
 
 
@@ -119,6 +114,16 @@ def _direct_child(node: object | None, kind: str) -> Any | None:
     return next((child for child in _named_children(node) if child.type == kind), None)
 
 
+def _same_node(left: object | None, right: object | None) -> bool:
+    if left is None or right is None:
+        return False
+    return (
+        getattr(left, "start_byte", None) == getattr(right, "start_byte", None)
+        and getattr(left, "end_byte", None) == getattr(right, "end_byte", None)
+        and getattr(left, "type", None) == getattr(right, "type", None)
+    )
+
+
 def _walk_owned(root: object | None) -> Iterable[Any]:
     if root is None:
         return
@@ -129,6 +134,36 @@ def _walk_owned(root: object | None) -> Iterable[Any]:
         for child in reversed(_children(node)):
             if child is root or child.type not in _OWNERSHIP_BOUNDARIES:
                 stack.append(child)
+
+
+def _qualified_name_parts(node: Any | None) -> tuple[str, ...]:
+    if node is None:
+        return ()
+    if node.type in {"identifier", "type_identifier"}:
+        return (ast_text(node),)
+    return tuple(
+        part
+        for child in _named_children(node)
+        for part in _qualified_name_parts(child)
+    )
+
+
+def _qualified_declaration_name(node: Any) -> tuple[str, ...]:
+    target = next(
+        (
+            child
+            for child in _named_children(node)
+            if child.type
+            in {
+                "identifier",
+                "scoped_identifier",
+                "scoped_type_identifier",
+                "type_identifier",
+            }
+        ),
+        None,
+    )
+    return _qualified_name_parts(target)
 
 
 def _module_name(root: Any) -> tuple[str | None, Any | None]:
@@ -142,8 +177,8 @@ def _module_name(root: Any) -> tuple[str | None, Any | None]:
     )
     if package is None or bool(getattr(package, "has_error", False)):
         return None, package
-    raw = ast_text(package).removeprefix("package").removesuffix(";").strip()
-    return raw or None, package
+    parts = _qualified_declaration_name(package)
+    return ".".join(parts) or None, package
 
 
 def _imports(source: SourceFile, root: Any) -> tuple[ImportRef, ...]:
@@ -151,17 +186,14 @@ def _imports(source: SourceFile, root: Any) -> tuple[ImportRef, ...]:
     for node in _named_children(root):
         if node.type != "import_declaration" or bool(getattr(node, "has_error", False)):
             continue
-        match = _IMPORT_RE.fullmatch(ast_text(node).strip())
-        if match is None:
+        parts = _qualified_declaration_name(node)
+        if len(parts) < 2:
             continue
-        target = match.group("target")
-        wildcard = match.group("wildcard") is not None
+        wildcard = any(child.type == "asterisk" for child in _named_children(node))
         if wildcard:
-            module, name = target, None
+            module, name = ".".join(parts), None
         else:
-            module, _, name = target.rpartition(".")
-            if not module or not name:
-                continue
+            module, name = ".".join(parts[:-1]), parts[-1]
         imports.append(ImportRef(node_span(source, node), module, name, None, wildcard))
     return tuple(imports)
 
@@ -421,7 +453,7 @@ def _call(node: Any, owner: SymbolId, source: SourceFile) -> CallRef | None:
         type_node = ast_field(node, "type")
         if type_node is None:
             return None
-        name = _simple_type_name(ast_text(type_node))
+        name = base_type(tight_type(ast_text(type_node)))
     elif node.type == "explicit_constructor_invocation":
         raw = ast_text(node).lstrip()
         name = "this" if raw.startswith("this") else "super"
@@ -487,12 +519,32 @@ def _body_references(
     return ordered_unique(references)
 
 
+def _annotation_body_events(
+    events: Iterable[BodyEvent],
+    references: Iterable[ReferenceRef],
+) -> tuple[BodyEvent, ...]:
+    type_spans = {
+        item.span
+        for item in references
+        if item.kind is ReferenceKind.TYPE
+        and item.context is ReferenceContext.ANNOTATION
+    }
+    return ordered_unique(
+        BodyEvent(BodyEventKind.TYPE, event.text, event.span)
+        if event.kind is BodyEventKind.NAME and event.span in type_spans
+        else event
+        for event in events
+    )
+
+
 def _type_reference_nodes(node: Any | None) -> Iterable[Any]:
     if node is None:
         return
     stack = [node]
     while stack:
         current = stack.pop()
+        if current.type in _ANNOTATION_KINDS:
+            continue
         if current.type == "scoped_type_identifier":
             leaves = tuple(_raw_type_identifier_nodes(current))
             for leaf in leaves:
@@ -551,34 +603,59 @@ def _type_references(
     )
 
 
-def _annotation_references(
+def _raw_identifier_nodes(node: Any | None) -> Iterable[Any]:
+    if node is None:
+        return
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type in {"identifier", "type_identifier"}:
+            yield current
+        else:
+            stack.extend(reversed(_named_children(current)))
+
+
+def _annotation_nodes(nodes: Iterable[Any | None]) -> tuple[Any, ...]:
+    return ordered_unique(
+        node
+        for root in nodes
+        if root is not None
+        for node in _walk_owned(root)
+        if node.type in _ANNOTATION_KINDS
+    )
+
+
+def _annotation_references_from_nodes(
     source: SourceFile,
     owner: SymbolId,
-    declaration: Any,
+    nodes: Iterable[Any | None],
 ) -> tuple[ReferenceRef, ...]:
     references: list[ReferenceRef] = []
-    modifiers = _modifier_node(declaration)
-    for annotation in _named_children(modifiers):
-        if annotation.type not in _ANNOTATION_KINDS:
-            continue
+    for annotation in _annotation_nodes(nodes):
         name_node = ast_field(annotation, "name")
         if name_node is None:
             continue
-        qualified = ast_text(name_node)
-        qualifier, _, name = qualified.rpartition(".")
-        reference_name_node = ast_field(name_node, "name") or name_node
+        parts = _qualified_name_parts(name_node)
+        if not parts:
+            continue
+        qualifier = ".".join(parts[:-1])
+        name = parts[-1]
+        reference_name_node = next(
+            reversed(tuple(_raw_identifier_nodes(name_node))),
+            name_node,
+        )
         references.append(
             reference(
                 owner,
                 node_span(source, reference_name_node),
-                name or qualified,
+                name,
                 qualifier or None,
                 ReferenceKind.TYPE,
                 context=ReferenceContext.ANNOTATION,
                 confidence=ReferenceConfidence.POSSIBLE,
             )
         )
-        if (name or qualified) != "EventListener":
+        if name != "EventListener":
             continue
         for literal in _walk_owned(ast_field(annotation, "arguments")):
             if literal.type != "string_literal":
@@ -594,13 +671,105 @@ def _annotation_references(
                     owner,
                     node_span(source, literal),
                     callback,
-                    name or qualified,
+                    name,
                     ReferenceKind.NAME,
                     context=ReferenceContext.ANNOTATION,
                     confidence=ReferenceConfidence.POSSIBLE,
                 )
             )
     return ordered_unique(references)
+
+
+def _annotation_references(
+    source: SourceFile,
+    owner: SymbolId,
+    declaration: Any,
+) -> tuple[ReferenceRef, ...]:
+    return _annotation_references_from_nodes(
+        source,
+        owner,
+        (_modifier_node(declaration),),
+    )
+
+
+_DECLARATION_NAME_PARENTS = frozenset(
+    {
+        "catch_formal_parameter",
+        "enhanced_for_statement",
+        "formal_parameter",
+        "resource",
+        "spread_parameter",
+        "type_pattern",
+        "variable_declarator",
+    }
+)
+
+
+def _is_declaration_name(node: Any) -> bool:
+    parent = getattr(node, "parent", None)
+    return bool(
+        parent is not None
+        and parent.type in _DECLARATION_NAME_PARENTS
+        and _same_node(ast_field(parent, "name"), node)
+    )
+
+
+def _region_references(
+    source: SourceFile,
+    owner: SymbolId,
+    region: Any | None,
+) -> tuple[ReferenceRef, ...]:
+    if region is None:
+        return ()
+    annotation_spans = tuple(
+        node_span(source, annotation)
+        for annotation in _annotation_nodes((region,))
+    )
+    references = [
+        item
+        for item in _type_references(source, owner, (region,))
+        if not any(
+            _inside(item.span, annotation_span)
+            for annotation_span in annotation_spans
+        )
+    ]
+    for node in _walk_owned(region):
+        if node.type != "identifier" or _is_declaration_name(node):
+            continue
+        span = node_span(source, node)
+        if any(_inside(span, annotation_span) for annotation_span in annotation_spans):
+            continue
+        name = ast_text(node)
+        if not _IDENTIFIER_RE.fullmatch(name):
+            continue
+        references.append(
+            reference(
+                owner,
+                span,
+                name,
+                None,
+                ReferenceKind.NAME,
+                context=ReferenceContext.CODE,
+                confidence=ReferenceConfidence.DEFINITE,
+            )
+        )
+    return ordered_unique(references)
+
+
+def _type_bound_nodes(node: Any) -> tuple[Any, ...]:
+    parameters = ast_field(node, "type_parameters") or _direct_child(
+        node,
+        "type_parameters",
+    )
+    if parameters is None:
+        return ()
+    return tuple(
+        child
+        for parameter in _named_children(parameters)
+        if parameter.type == "type_parameter"
+        for child in _named_children(parameter)
+        if child.type == "type_bound"
+    )
 
 
 def _walk_all(root: Any) -> Iterable[Any]:
@@ -674,6 +843,8 @@ class _Extractor:
         self,
         node: Any,
         container_path: tuple[str, ...],
+        *,
+        implicit_public: bool = False,
     ) -> None:
         kind = _TYPE_KINDS[node.type]
         name = ast_text(ast_field(node, "name"))
@@ -717,10 +888,27 @@ class _Extractor:
             "interface" if node.type == "annotation_type_declaration" else kind.value
         )
         prefix = "sealed " if "sealed" in modifiers else ""
+        relation_nodes = tuple(
+            child
+            for child in _named_children(node)
+            if child.type
+            in {
+                "extends_interfaces",
+                "super_interfaces",
+                "superclass",
+                "permits",
+            }
+        )
+        bound_nodes = _type_bound_nodes(node)
         type_symbol = Symbol(
             symbol_id(self.source, container_path, kind, name),
             node_span(self.source, node),
-            _visibility(node),
+            _visibility(
+                node,
+                default=(
+                    Visibility.PUBLIC if implicit_public else Visibility.INTERNAL
+                ),
+            ),
             f"{prefix}{signature_kind} {name}",
             params=params,
             supers=supers,
@@ -734,22 +922,17 @@ class _Extractor:
             _annotation_references(self.source, type_symbol.id, node)
         )
         self.references.extend(
+            _annotation_references_from_nodes(
+                self.source,
+                type_symbol.id,
+                (*bound_nodes, *relation_nodes),
+            )
+        )
+        self.references.extend(
             _type_references(
                 self.source,
                 type_symbol.id,
-                (
-                    *(
-                        child
-                        for child in _named_children(node)
-                        if child.type
-                        in {
-                            "extends_interfaces",
-                            "super_interfaces",
-                            "superclass",
-                            "permits",
-                        }
-                    ),
-                ),
+                (*bound_nodes, *relation_nodes),
             )
         )
 
@@ -777,6 +960,13 @@ class _Extractor:
             self.references.extend(
                 _annotation_references(self.source, component.id, parameter.node)
             )
+            self.references.extend(
+                _annotation_references_from_nodes(
+                    self.source,
+                    component.id,
+                    (parameter.type_node,),
+                )
+            )
 
         class_bindings = _class_bindings(body, record_parameters)
         for member in _members(body):
@@ -797,9 +987,16 @@ class _Extractor:
                     record_parameters,
                     record_parameter_events,
                     implicit_public=kind is SymbolKind.INTERFACE,
+                    implicit_private=kind is SymbolKind.ENUM,
                 )
             elif member.type in _TYPE_KINDS:
-                self.type_declaration(member, owned_path)
+                self.type_declaration(
+                    member,
+                    owned_path,
+                    implicit_public=kind is SymbolKind.INTERFACE,
+                )
+            elif member.type in {"block", "static_initializer"}:
+                self.initializer(member, type_symbol.id, owned_path)
 
     def enum_constant(
         self,
@@ -817,8 +1014,55 @@ class _Extractor:
             annotations=_annotations(node),
         )
         self.symbols.append(symbol)
-        self.calls.extend(_calls(self.source, symbol.id, node))
+        arguments = ast_field(node, "arguments")
+        self.calls.extend(_calls(self.source, symbol.id, arguments))
+        self.references.extend(
+            _region_references(self.source, symbol.id, arguments)
+        )
         self.references.extend(_annotation_references(self.source, symbol.id, node))
+        self.references.extend(
+            _annotation_references_from_nodes(
+                self.source,
+                symbol.id,
+                (arguments,),
+            )
+        )
+
+        body = ast_field(node, "body")
+        constant_path = (*container_path, name)
+        class_bindings = _class_bindings(body, ())
+        for member in _members(body):
+            if member.type in _FIELD_KINDS:
+                self.field_declaration(member, constant_path, implicit_public=False)
+            elif member.type in _CALLABLE_KINDS:
+                self.callable_declaration(
+                    member,
+                    constant_path,
+                    name,
+                    class_bindings,
+                    (),
+                    (),
+                    implicit_public=False,
+                    implicit_private=False,
+                )
+            elif member.type in _TYPE_KINDS:
+                self.type_declaration(member, constant_path)
+            elif member.type in {"block", "static_initializer"}:
+                self.initializer(member, symbol.id, constant_path)
+
+    def initializer(
+        self,
+        node: Any,
+        owner: SymbolId,
+        container_path: tuple[str, ...],
+    ) -> None:
+        self.calls.extend(_calls(self.source, owner, node))
+        self.references.extend(_region_references(self.source, owner, node))
+        self.references.extend(
+            _annotation_references_from_nodes(self.source, owner, (node,))
+        )
+        for declaration in _nested_types(node):
+            self.type_declaration(declaration, container_path)
 
     def field_declaration(
         self,
@@ -855,8 +1099,25 @@ class _Extractor:
                 _type_references(self.source, symbol.id, (type_node,))
             )
             self.references.extend(_annotation_references(self.source, symbol.id, node))
+            self.references.extend(
+                _annotation_references_from_nodes(
+                    self.source,
+                    symbol.id,
+                    (type_node,),
+                )
+            )
             value = ast_field(declarator, "value")
             self.calls.extend(_calls(self.source, symbol.id, value))
+            self.references.extend(
+                _region_references(self.source, symbol.id, value)
+            )
+            self.references.extend(
+                _annotation_references_from_nodes(
+                    self.source,
+                    symbol.id,
+                    (value,),
+                )
+            )
 
     def callable_declaration(
         self,
@@ -868,6 +1129,7 @@ class _Extractor:
         record_parameter_events: tuple[BodyEvent, ...],
         *,
         implicit_public: bool,
+        implicit_private: bool,
     ) -> None:
         constructor = node.type in {
             "compact_constructor_declaration",
@@ -899,7 +1161,13 @@ class _Extractor:
             node_span(self.source, node),
             _visibility(
                 node,
-                default=(Visibility.PUBLIC if implicit_public else Visibility.INTERNAL),
+                default=(
+                    Visibility.PRIVATE
+                    if constructor and implicit_private
+                    else Visibility.PUBLIC
+                    if implicit_public
+                    else Visibility.INTERNAL
+                ),
             ),
             f"{name}({','.join(params)}){suffix}",
             params=params,
@@ -912,16 +1180,24 @@ class _Extractor:
         )
         self.symbols.append(symbol)
         self.references.extend(_annotation_references(self.source, symbol.id, node))
-        parameter_annotation_spans = tuple(
-            node_span(self.source, annotation)
-            for parameter in parameters
-            for annotation in _named_children(_modifier_node(parameter.node))
-            if annotation.type in _ANNOTATION_KINDS
+        annotation_regions = (
+            *(parameter.node for parameter in parameters),
+            *(parameter.type_node for parameter in parameters),
+            return_node,
+            _direct_child(node, "throws"),
+            *_type_bound_nodes(node),
+            body,
         )
-        for parameter in parameters:
-            self.references.extend(
-                _annotation_references(self.source, symbol.id, parameter.node)
-            )
+        annotation_spans = tuple(
+            node_span(self.source, annotation)
+            for annotation in _annotation_nodes(annotation_regions)
+        )
+        owned_annotation_references = _annotation_references_from_nodes(
+            self.source,
+            symbol.id,
+            annotation_regions,
+        )
+        self.references.extend(owned_annotation_references)
         self.references.extend(
             _type_references(
                 self.source,
@@ -930,12 +1206,16 @@ class _Extractor:
                     *(parameter.type_node for parameter in parameters),
                     return_node,
                     _direct_child(node, "throws"),
+                    *_type_bound_nodes(node),
                 ),
             )
         )
         if body is None:
             return
-        callable_events = body_events(self.source, node)
+        callable_events = _annotation_body_events(
+            body_events(self.source, node),
+            owned_annotation_references,
+        )
         events = callable_events
         if node.type == "compact_constructor_declaration":
             events = (*record_parameter_events, *callable_events)
@@ -945,12 +1225,13 @@ class _Extractor:
             _body_references(
                 symbol.id,
                 callable_events,
-                annotation_spans=parameter_annotation_spans,
+                annotation_spans=annotation_spans,
                 ignored_type_spans=_ignored_qualified_type_spans(self.source, node),
             )
         )
+        local_container = f"{name}{symbol.id.signature_key}"
         for declaration in _nested_types(body):
-            self.type_declaration(declaration, (*container_path, name))
+            self.type_declaration(declaration, (*container_path, local_container))
 
 
 def extract(source: SourceFile, parser: object | None) -> FileIR:

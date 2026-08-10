@@ -558,6 +558,295 @@ class Calls {
         self.assertIn(Binding("widget", "Widget"), all_method.bindings)
         assert_body_fact_events(self, result)
 
+    def test_commented_qualified_package_and_imports_are_structural(self) -> None:
+        raw = b"""\
+@PackageInfo
+package shop /* package segment */ . app /* package segment */ . api;
+import shop /* import segment */ . engine /* import segment */ . Engine;
+import static shop /* import segment */ . Factory /* import segment */ . make;
+import java /* import segment */ . util /* import segment */ . *;
+
+class Probe {}
+"""
+
+        result = extract_file(snapshot(raw, file="src/api/package-info.java"))
+
+        self.assertFalse(result.diagnostics)
+        self.assertEqual(result.module, "shop.app.api")
+        self.assertEqual(
+            [
+                (item.module, item.name, item.wildcard)
+                for item in result.imports
+            ],
+            [
+                ("shop.engine", "Engine", False),
+                ("shop.Factory", "make", False),
+                ("java.util", None, True),
+            ],
+        )
+
+    def test_type_use_and_body_annotations_are_only_possible_references(self) -> None:
+        raw = b"""\
+class Probe {
+  List<@ElementAnno String> field;
+
+  @ReturnAnno String run(@ParamAnno String input) {
+    @LocalAnno String local = (@CastAnno String) input;
+    return local;
+  }
+}
+"""
+
+        result = extract_file(snapshot(raw, file="src/Probe.java"))
+        annotation_names = {
+            "ElementAnno",
+            "ReturnAnno",
+            "ParamAnno",
+            "LocalAnno",
+            "CastAnno",
+        }
+        found = [
+            item for item in result.references if item.name in annotation_names
+        ]
+
+        self.assertEqual({item.name for item in found}, annotation_names)
+        self.assertTrue(
+            all(
+                item.context is ReferenceContext.ANNOTATION
+                and item.confidence is ReferenceConfidence.POSSIBLE
+                and item.kind is ReferenceKind.TYPE
+                for item in found
+            )
+        )
+        self.assertEqual(len(found), len(annotation_names))
+        annotation_spans = {item.span for item in found}
+        self.assertFalse(
+            any(
+                item.span in annotation_spans
+                and item.confidence is ReferenceConfidence.DEFINITE
+                for item in result.references
+            )
+        )
+        assert_body_fact_events(self, result)
+
+    def test_initializers_emit_calls_and_references_under_their_owner(self) -> None:
+        raw = b"""\
+class Probe {
+  static final Factory FACTORY = Factory.create(Seed.VALUE);
+  Widget field = new Widget(Source.value);
+
+  static { Registry.install(FACTORY); }
+  { helper(field); }
+}
+"""
+
+        result = extract_file(snapshot(raw, file="src/Probe.java"))
+        probe = symbol(result, "Probe", SymbolKind.CLASS)
+        factory = symbol(result, "FACTORY", SymbolKind.CONSTANT)
+        field = symbol(result, "field", SymbolKind.FIELD)
+
+        self.assertIn(
+            (factory.id, "Factory", "create", CallKind.CALL),
+            {
+                (call.caller, call.receiver, call.name, call.kind)
+                for call in result.calls
+            },
+        )
+        self.assertIn(
+            (field.id, None, "Widget", CallKind.CONSTRUCT),
+            {
+                (call.caller, call.receiver, call.name, call.kind)
+                for call in result.calls
+            },
+        )
+        self.assertEqual(
+            [
+                (call.receiver, call.name)
+                for call in result.calls
+                if call.caller == probe.id
+            ],
+            [("Registry", "install"), (None, "helper")],
+        )
+        owned_reference_names = {
+            owner: {
+                reference.name
+                for reference in result.references
+                if reference.owner == owner
+                and reference.confidence is ReferenceConfidence.DEFINITE
+            }
+            for owner in (factory.id, field.id, probe.id)
+        }
+        self.assertTrue({"Seed", "VALUE"}.issubset(owned_reference_names[factory.id]))
+        self.assertTrue({"Source", "value"}.issubset(owned_reference_names[field.id]))
+        self.assertTrue(
+            {"Registry", "FACTORY", "field"}.issubset(
+                owned_reference_names[probe.id]
+            )
+        )
+
+    def test_class_and_method_generic_bounds_emit_type_references(self) -> None:
+        raw = b"""\
+class Box<T extends Base & Marker> {
+  <U extends Helper & Comparable<U>> U convert(U value) { return value; }
+}
+"""
+
+        result = extract_file(snapshot(raw, file="src/Box.java"))
+        box = symbol(result, "Box", SymbolKind.CLASS)
+        convert = symbol(result, "convert", SymbolKind.METHOD)
+        by_owner = {
+            owner: {
+                reference.name
+                for reference in result.references
+                if reference.owner == owner
+                and reference.kind is ReferenceKind.TYPE
+                and reference.confidence is ReferenceConfidence.DEFINITE
+            }
+            for owner in (box.id, convert.id)
+        }
+
+        self.assertTrue({"Base", "Marker"}.issubset(by_owner[box.id]))
+        self.assertTrue({"Helper", "Comparable"}.issubset(by_owner[convert.id]))
+
+    def test_local_types_under_overloads_have_signature_aware_containers(self) -> None:
+        raw = b"""\
+class Host {
+  void run(String value) { class Local { void act() { first(); } } }
+  void run(int value) { class Local { void act() { second(); } } }
+}
+"""
+
+        result = extract_file(snapshot(raw, file="src/Host.java"))
+        locals_ = [
+            item
+            for item in result.symbols
+            if item.name == "Local" and item.kind is SymbolKind.CLASS
+        ]
+        actions = [
+            item
+            for item in result.symbols
+            if item.name == "act" and item.kind is SymbolKind.METHOD
+        ]
+
+        self.assertEqual(
+            {item.id.container_path for item in locals_},
+            {("Host", "run(String)"), ("Host", "run(int)")},
+        )
+        self.assertEqual(
+            {item.id.container_path for item in actions},
+            {
+                ("Host", "run(String)", "Local"),
+                ("Host", "run(int)", "Local"),
+            },
+        )
+        self.assertEqual(len({item.id for item in (*locals_, *actions)}), 4)
+
+    def test_enum_constant_class_body_members_are_owned_by_the_constant(self) -> None:
+        raw = b"""\
+enum Mode {
+  E { @Override void act() { service.run(); } },
+  A { @Override void act() { helper(); } };
+  abstract void act();
+}
+"""
+
+        result = extract_file(snapshot(raw, file="src/Mode.java"))
+        actions = [
+            item
+            for item in result.symbols
+            if item.name == "act" and item.kind is SymbolKind.METHOD
+        ]
+        constant_actions = [
+            item
+            for item in actions
+            if item.id.container_path in {("Mode", "E"), ("Mode", "A")}
+        ]
+
+        self.assertEqual(
+            {item.id.container_path for item in constant_actions},
+            {("Mode", "E"), ("Mode", "A")},
+        )
+        calls_by_owner = {
+            action.id: [
+                (call.receiver, call.name)
+                for call in result.calls
+                if call.caller == action.id
+            ]
+            for action in constant_actions
+        }
+        e = next(action for action in constant_actions if action.container == "E")
+        a = next(action for action in constant_actions if action.container == "A")
+        self.assertEqual(calls_by_owner[e.id], [("service", "run")])
+        self.assertEqual(calls_by_owner[a.id], [(None, "helper")])
+        assert_body_fact_events(self, result)
+
+    def test_java_implicit_member_visibility_matches_the_language(self) -> None:
+        raw = b"""\
+interface Contract {
+  class NestedClass {}
+  interface NestedInterface {}
+  enum NestedEnum { VALUE }
+  record NestedRecord(int value) {}
+}
+
+enum Shade {
+  LIGHT;
+  Shade() {}
+}
+"""
+
+        result = extract_file(snapshot(raw, file="src/Contract.java"))
+        member_types = {
+            item.name: item
+            for item in result.symbols
+            if item.name.startswith("Nested")
+        }
+        shade_constructor = symbol(result, "Shade", SymbolKind.CONSTRUCTOR)
+
+        self.assertEqual(
+            {item.visibility for item in member_types.values()},
+            {Visibility.PUBLIC},
+        )
+        self.assertEqual(shade_constructor.visibility, Visibility.PRIVATE)
+
+    def test_java_legacy_calls_keep_v1_projection_without_losing_canonical_facts(
+        self,
+    ) -> None:
+        raw = b"""\
+class Probe {
+  void execute() {
+    service.get().run();
+    new p.Foo();
+    new int[2];
+  }
+}
+"""
+        source = snapshot(raw, file="src/Probe.java")
+
+        canonical = extract_file(source)
+        execute = symbol(canonical, "execute", SymbolKind.METHOD)
+        self.assertEqual(
+            [
+                (call.receiver, call.name, call.kind)
+                for call in canonical.calls
+                if call.caller == execute.id
+            ],
+            [
+                ("service.get()", "run", CallKind.CALL),
+                ("service", "get", CallKind.CALL),
+                (None, "p.Foo", CallKind.CONSTRUCT),
+                (None, "int", CallKind.CONSTRUCT),
+            ],
+        )
+
+        legacy = hologram.extract_file(
+            Path("/repo/src/Probe.java"),
+            Path("/repo"),
+            text=raw.decode(),
+        )
+        legacy_execute = next(item for item in legacy if item.name == "execute")
+        self.assertEqual(legacy_execute.calls, ["run", "service.get", "p.Foo"])
+
     def test_package_root_no_longer_exposes_private_java_extractor(self) -> None:
         self.assertNotIn("_extract_java", hologram.__dict__)
         with self.assertRaises(AttributeError):
