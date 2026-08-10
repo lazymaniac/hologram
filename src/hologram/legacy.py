@@ -181,10 +181,6 @@ _GRAMMAR_MODULES = {
 
 _PARSERS = {
     "java": _load_parser("tree_sitter_java"),
-    "go": _load_parser("tree_sitter_go"),
-    "rust": _load_parser("tree_sitter_rust"),
-    "csharp": _load_parser("tree_sitter_c_sharp"),
-    "kotlin": _load_parser("tree_sitter_kotlin"),
     "c": _load_parser("tree_sitter_c"),
     "cpp": _load_parser("tree_sitter_cpp"),
     "lua": _load_parser("tree_sitter_lua"),
@@ -196,7 +192,11 @@ USING_TREESITTER = _PARSERS["java"] is not None  # kept for callers/tests
 
 def has_parser(lang: str) -> bool:
     if lang in {
+        Language.CSHARP.value,
+        Language.GO.value,
         Language.JAVASCRIPT.value,
+        Language.KOTLIN.value,
+        Language.RUST.value,
         Language.SVELTE.value,
         Language.TSX.value,
         Language.TYPESCRIPT.value,
@@ -246,563 +246,6 @@ def _ast_calls(body, own_name: str, call_kinds, entry_fn) -> list[str]:
 
 def _body_lines(body) -> int:
     return body.end_point[0] - body.start_point[0] + 1 if body is not None else 0
-
-
-# ---------------------------------------------------------------------------
-# Go extraction
-# ---------------------------------------------------------------------------
-
-def _go_vis(name: str) -> str:
-    return "pub" if name[:1].isupper() else "priv"
-
-
-def _go_type_text(node) -> str:
-    return tight_type(_ast_text(node).lstrip("*&"))
-
-
-def _go_params(plist) -> tuple[list[str], dict[str, str]]:
-    """(declared types in order, name->type bindings) from a parameter_list."""
-    types: list[str] = []
-    binds: dict[str, str] = {}
-    if plist is None:
-        return types, binds
-    for p in plist.children:
-        if p.type not in ("parameter_declaration", "variadic_parameter_declaration"):
-            continue
-        t = _go_type_text(_ast_field(p, "type"))
-        if p.type == "variadic_parameter_declaration":
-            t = "..." + t
-        names = [c for c in p.children if c.type == "identifier"]
-        for n in names or [None]:
-            types.append(t)
-            if n is not None:
-                binds[_ast_text(n)] = _base_type(t)
-    return types, binds
-
-
-def _go_result(node) -> str | None:
-    res = _ast_field(node, "result")
-    if res is None:
-        return None
-    if res.type == "parameter_list":
-        types, _ = _go_params(res)
-        return f"({','.join(types)})" if len(types) > 1 else (types[0] if types else None)
-    return _go_type_text(res)
-
-
-def _go_call_entry(n) -> tuple[str, str]:
-    fn = _ast_field(n, "function")
-    if fn is None:
-        return "", ""
-    if fn.type == "selector_expression":
-        name = _ast_text(_ast_field(fn, "field"))
-        op = _ast_field(fn, "operand")
-        entry = (f"{_ast_text(op)}.{name}"
-                 if op is not None and op.type == "identifier" else name)
-        return name, entry
-    if fn.type == "identifier":
-        name = _ast_text(fn)
-        return name, name
-    return "", ""
-
-
-def _go_local_bindings(body) -> dict[str, str]:
-    binds: dict[str, str] = {}
-    if body is None:
-        return binds
-    for d in _ast_collect(body, ("var_spec", "short_var_declaration")):
-        if d.type == "var_spec":
-            t = _ast_field(d, "type")
-            n = _ast_field(d, "name")
-            if t is not None and n is not None:
-                binds[_ast_text(n)] = _base_type(_go_type_text(t))
-            continue
-        left, right = _ast_field(d, "left"), _ast_field(d, "right")
-        if left is None or right is None:
-            continue
-        lids = [c for c in left.children if c.type == "identifier"]
-        lits = _ast_collect(right, ("composite_literal",))
-        if len(lids) == 1 and len(lits) == 1:
-            binds[_ast_text(lids[0])] = _base_type(
-                _go_type_text(_ast_field(lits[0], "type")))
-    return binds
-
-
-def _extract_go(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["go"].parse(text.encode())
-    symbols: list[Symbol] = []
-    struct_fields: dict[str, dict[str, str]] = {}
-    for ts_node in _ast_collect(tree.root_node, ("type_spec",)):
-        name = _ast_text(_ast_field(ts_node, "name"))
-        tnode = _ast_field(ts_node, "type")
-        if tnode is None:
-            continue
-        if tnode.type == "struct_type":
-            components: list[str] = []
-            supers: list[str] = []
-            fields: dict[str, str] = {}
-            for f in _ast_collect(tnode, ("field_declaration",)):
-                ftype = _ast_field(f, "type")
-                fnames = [c for c in f.children if c.type == "field_identifier"]
-                if not fnames:  # embedded type = composition/promotion
-                    supers.append(_base_type(_go_type_text(ftype)))
-                    continue
-                for fn in fnames:
-                    components.append(_go_type_text(ftype))
-                    fields[_ast_text(fn)] = _base_type(_go_type_text(ftype))
-            struct_fields[name] = fields
-            symbols.append(Symbol(
-                name=name, kind="class", file=rel, line=ts_node.start_point[0] + 1,
-                signature=f"struct {name}", params=components, supers=supers,
-                visibility=_go_vis(name), lang="go",
-            ))
-        elif tnode.type == "interface_type":
-            symbols.append(Symbol(
-                name=name, kind="interface", file=rel,
-                line=ts_node.start_point[0] + 1,
-                signature=f"interface {name}",
-                visibility=_go_vis(name), lang="go",
-            ))
-            for m in _ast_collect(tnode, ("method_elem", "method_spec")):
-                mname = _ast_text(_ast_field(m, "name"))
-                params, _ = _go_params(_ast_field(m, "parameters"))
-                returns = _go_result(m)
-                ret_suffix = f":{returns}" if returns else ""
-                symbols.append(Symbol(
-                    name=mname, kind="method", file=rel, line=m.start_point[0] + 1,
-                    signature=f"{mname}({','.join(params)}){ret_suffix}",
-                    params=params, returns=returns,
-                    visibility=_go_vis(mname), container=name, lang="go",
-                ))
-    for fn in _ast_collect(tree.root_node,
-                           ("function_declaration", "method_declaration")):
-        name = _ast_text(_ast_field(fn, "name"))
-        container = None
-        binds: dict[str, str] = {}
-        if fn.type == "method_declaration":
-            rtypes, rbinds = _go_params(_ast_field(fn, "receiver"))
-            container = _base_type(rtypes[0]) if rtypes else None
-            binds.update(rbinds)
-            if container is not None:
-                binds.update(struct_fields.get(container, {}))
-        params, pbinds = _go_params(_ast_field(fn, "parameters"))
-        binds.update(pbinds)
-        body = _ast_field(fn, "body")
-        binds.update(_go_local_bindings(body))
-        returns = _go_result(fn)
-        ret_suffix = f":{returns}" if returns else ""
-        symbols.append(Symbol(
-            name=name, kind="method" if container else "fn", file=rel,
-            line=fn.start_point[0] + 1,
-            signature=f"{name}({','.join(params)}){ret_suffix}",
-            params=params, returns=returns,
-            visibility=_go_vis(name), container=container, lang="go",
-            calls=_ast_calls(body, name, ("call_expression",), _go_call_entry),
-            size=_body_lines(body),
-            bindings=binds,
-        ))
-    return symbols
-
-
-# ---------------------------------------------------------------------------
-# Rust extraction
-# ---------------------------------------------------------------------------
-
-def _rs_vis(node) -> str:
-    return ("pub" if any(c.type == "visibility_modifier" for c in node.children)
-            else "priv")
-
-
-def _rs_params(params_node) -> tuple[list[str], dict[str, str]]:
-    types: list[str] = []
-    binds: dict[str, str] = {}
-    if params_node is None:
-        return types, binds
-    for p in params_node.children:
-        if p.type != "parameter":
-            continue
-        t = tight_type(_ast_text(_ast_field(p, "type")))
-        types.append(t)
-        pat = _ast_field(p, "pattern")
-        if pat is not None and pat.type == "identifier":
-            binds[_ast_text(pat)] = _base_type(t.lstrip("&"))
-    return types, binds
-
-
-def _rs_call_entry(n) -> tuple[str, str]:
-    if n.type == "struct_expression":
-        name = _base_type(_ast_text(_ast_field(n, "name")))
-        return name, name
-    fn = _ast_field(n, "function")
-    if fn is None:
-        return "", ""
-    if fn.type == "field_expression":
-        name = _ast_text(_ast_field(fn, "field"))
-        val = _ast_field(fn, "value")
-        entry = (f"{_ast_text(val)}.{name}"
-                 if val is not None and val.type == "identifier" else name)
-        return name, entry
-    if fn.type == "scoped_identifier":
-        name = _ast_text(_ast_field(fn, "name"))
-        path = _ast_field(fn, "path")
-        prefix = _base_type(_ast_text(path).split("::")[-1]) if path is not None else ""
-        return name, (f"{prefix}.{name}" if prefix else name)
-    if fn.type == "identifier":
-        name = _ast_text(fn)
-        return name, name
-    return "", ""
-
-
-def _rs_local_bindings(body) -> dict[str, str]:
-    binds: dict[str, str] = {}
-    if body is None:
-        return binds
-    for d in _ast_collect(body, ("let_declaration",)):
-        pat = _ast_field(d, "pattern")
-        if pat is None or pat.type != "identifier":
-            continue
-        t = _ast_field(d, "type")
-        val = _ast_field(d, "value")
-        if t is not None:
-            binds[_ast_text(pat)] = _base_type(tight_type(_ast_text(t)).lstrip("&"))
-        elif val is not None and val.type == "struct_expression":
-            binds[_ast_text(pat)] = _base_type(_ast_text(_ast_field(val, "name")))
-    return binds
-
-
-def _rs_fn_symbol(fn, rel: str, container: str | None, vis: str,
-                  extra_binds: dict[str, str] | None = None) -> Symbol:
-    name = _ast_text(_ast_field(fn, "name"))
-    params, binds = _rs_params(_ast_field(fn, "parameters"))
-    body = _ast_field(fn, "body")
-    binds = {**(extra_binds or {}), **binds, **_rs_local_bindings(body)}
-    rt = _ast_field(fn, "return_type")
-    returns = tight_type(_ast_text(rt)) if rt is not None else None
-    ret_suffix = f":{returns}" if returns else ""
-    return Symbol(
-        name=name, kind="method" if container else "fn", file=rel,
-        line=fn.start_point[0] + 1,
-        signature=f"{name}({','.join(params)}){ret_suffix}",
-        params=params, returns=returns,
-        visibility=vis, container=container, lang="rust",
-        calls=_ast_calls(body, name,
-                         ("call_expression", "struct_expression"), _rs_call_entry),
-        size=_body_lines(body),
-        bindings=binds,
-    )
-
-
-def _extract_rust(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["rust"].parse(text.encode())
-    symbols: list[Symbol] = []
-    type_syms: dict[str, Symbol] = {}
-    for tn in _ast_collect(tree.root_node,
-                           ("struct_item", "enum_item", "trait_item")):
-        name = _ast_text(_ast_field(tn, "name"))
-        vis = _rs_vis(tn)
-        line = tn.start_point[0] + 1
-        body = _ast_field(tn, "body")
-        if tn.type == "struct_item":
-            components = [tight_type(_ast_text(_ast_field(f, "type")))
-                          for f in _ast_collect(body, ("field_declaration",))
-                          ] if body is not None else []
-            sym = Symbol(name=name, kind="class", file=rel, line=line,
-                         signature=f"struct {name}", params=components,
-                         visibility=vis, lang="rust")
-        elif tn.type == "enum_item":
-            variants = [_ast_text(_ast_field(v, "name"))
-                        for v in _ast_collect(body, ("enum_variant",))
-                        ] if body is not None else []
-            sym = Symbol(name=name, kind="enum", file=rel, line=line,
-                         signature=f"enum {name}", params=variants,
-                         visibility=vis, lang="rust")
-        else:
-            sym = Symbol(name=name, kind="interface", file=rel, line=line,
-                         signature=f"trait {name}", visibility=vis, lang="rust")
-            for m in _ast_collect(body, ("function_signature_item", "function_item")
-                                  ) if body is not None else []:
-                symbols.append(_rs_fn_symbol(m, rel, name, vis))
-        symbols.append(sym)
-        type_syms[name] = sym
-    for imp in _ast_collect(tree.root_node, ("impl_item",)):
-        container = _base_type(_ast_text(_ast_field(imp, "type")))
-        trait = _ast_field(imp, "trait")
-        if trait is not None and container in type_syms:
-            type_syms[container].supers.append(_base_type(_ast_text(trait)))
-        body = _ast_field(imp, "body")
-        self_bind = {"self": container}
-        for m in (_ast_collect(body, ("function_item",)) if body is not None else []):
-            if m.parent is not None and m.parent.type != "declaration_list":
-                continue  # skip fns nested inside method bodies
-            symbols.append(_rs_fn_symbol(m, rel, container, _rs_vis(m), self_bind))
-    for fn in tree.root_node.children:
-        if fn.type == "function_item":
-            symbols.append(_rs_fn_symbol(fn, rel, None, _rs_vis(fn)))
-    return symbols
-
-
-# ---------------------------------------------------------------------------
-# C# extraction
-# ---------------------------------------------------------------------------
-
-_CS_TYPE_NODE_KINDS = {
-    "class_declaration": "class",
-    "struct_declaration": "class",
-    "interface_declaration": "interface",
-    "record_declaration": "record",
-    "enum_declaration": "enum",
-}
-
-
-def _cs_vis(node) -> str:
-    mods = [_ast_text(c) for c in node.children if c.type == "modifier"]
-    return "priv" if any(m in ("private", "protected") for m in mods) else "pub"
-
-
-def _cs_params(plist) -> tuple[list[str], dict[str, str]]:
-    types: list[str] = []
-    binds: dict[str, str] = {}
-    if plist is None:
-        return types, binds
-    for p in plist.children:
-        if p.type != "parameter":
-            continue
-        t = tight_type(_ast_text(_ast_field(p, "type")))
-        types.append(t)
-        n = _ast_field(p, "name")
-        if n is not None:
-            binds[_ast_text(n)] = _base_type(t)
-    return types, binds
-
-
-def _cs_call_entry(n) -> tuple[str, str]:
-    if n.type == "object_creation_expression":
-        entry = _base_type(_ast_text(_ast_field(n, "type")))
-        return entry, entry
-    fn = _ast_field(n, "function")
-    if fn is None:
-        return "", ""
-    if fn.type == "member_access_expression":
-        name = _ast_text(_ast_field(fn, "name"))
-        expr = _ast_field(fn, "expression")
-        entry = (f"{_ast_text(expr)}.{name}"
-                 if expr is not None and expr.type == "identifier" else name)
-        return name, entry
-    if fn.type == "identifier":
-        name = _ast_text(fn)
-        return name, name
-    return "", ""
-
-
-def _cs_local_bindings(body) -> dict[str, str]:
-    binds: dict[str, str] = {}
-    if body is None:
-        return binds
-    for d in _ast_collect(body, ("variable_declaration",)):
-        t = _ast_text(_ast_field(d, "type"))
-        for dec in _ast_collect(d, ("variable_declarator",)):
-            n = _ast_field(dec, "name")
-            if n is None:
-                continue
-            if t == "var":
-                lits = _ast_collect(dec, ("object_creation_expression",))
-                if len(lits) == 1:
-                    binds[_ast_text(n)] = _base_type(
-                        _ast_text(_ast_field(lits[0], "type")))
-            else:
-                binds[_ast_text(n)] = _base_type(t)
-    return binds
-
-
-def _extract_cs(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["csharp"].parse(text.encode())
-    symbols: list[Symbol] = []
-    for tn in _ast_collect(tree.root_node, _CS_TYPE_NODE_KINDS):
-        kind = _CS_TYPE_NODE_KINDS[tn.type]
-        name = _ast_text(_ast_field(tn, "name"))
-        body = _ast_field(tn, "body")
-        supers = []
-        for c in tn.children:
-            if c.type == "base_list":
-                supers = [_base_type(_ast_text(b)) for b in c.children
-                          if b.type in ("identifier", "generic_name",
-                                        "qualified_name")]
-        params: list[str] = []
-        if kind == "record":
-            for c in tn.children:
-                if c.type == "parameter_list":
-                    params, _ = _cs_params(c)
-        elif kind == "enum" and body is not None:
-            params = [_ast_text(_ast_field(m, "name"))
-                      for m in _ast_collect(body, ("enum_member_declaration",))]
-        symbols.append(Symbol(
-            name=name, kind=kind, file=rel, line=tn.start_point[0] + 1,
-            signature=f"{kind} {name}", params=params, supers=supers,
-            visibility=_cs_vis(tn), lang="csharp",
-        ))
-        if body is None:
-            continue
-        class_binds: dict[str, str] = {}
-        for f in body.children:
-            if f.type == "field_declaration":
-                class_binds.update(_cs_local_bindings(f))
-        for m in body.children:
-            if m.type not in ("method_declaration", "constructor_declaration"):
-                continue
-            mname = _ast_text(_ast_field(m, "name"))
-            mparams, pbinds = _cs_params(_ast_field(m, "parameters"))
-            mbody = _ast_field(m, "body")
-            binds = {**class_binds, **pbinds, **_cs_local_bindings(mbody)}
-            calls = _ast_calls(mbody, mname,
-                               ("invocation_expression",
-                                "object_creation_expression"), _cs_call_entry)
-            if m.type == "constructor_declaration":
-                symbols.append(Symbol(
-                    name=mname, kind="ctor", file=rel, line=m.start_point[0] + 1,
-                    signature=f"{mname}({','.join(mparams)})",
-                    params=mparams, returns=mname,
-                    visibility=_cs_vis(m), container=name, lang="csharp",
-                    calls=calls, bindings=binds,
-                ))
-                continue
-            returns = tight_type(_ast_text(_ast_field(m, "returns")))
-            ret_suffix = f":{returns}" if returns and returns != "void" else ""
-            symbols.append(Symbol(
-                name=mname, kind="method", file=rel, line=m.start_point[0] + 1,
-                signature=f"{mname}({','.join(mparams)}){ret_suffix}",
-                params=mparams, returns=returns,
-                visibility=_cs_vis(m), container=name, lang="csharp",
-                calls=calls, bindings=binds, size=_body_lines(mbody),
-            ))
-    return symbols
-
-
-# ---------------------------------------------------------------------------
-# Kotlin extraction
-# ---------------------------------------------------------------------------
-
-def _kt_vis(node) -> str:
-    for m in node.children:
-        if m.type == "modifiers" and any(
-                _ast_text(c) in ("private", "protected") for c in m.children):
-            return "priv"
-    return "pub"
-
-
-def _kt_params(pnode) -> tuple[list[str], dict[str, str]]:
-    """Types + name bindings from function_value_parameters / class_parameters."""
-    types: list[str] = []
-    binds: dict[str, str] = {}
-    if pnode is None:
-        return types, binds
-    for p in pnode.children:
-        if p.type not in ("parameter", "class_parameter"):
-            continue
-        idents = [c for c in p.children if c.type == "identifier"]
-        tnodes = [c for c in p.children
-                  if c.type in ("user_type", "nullable_type", "function_type")]
-        if not idents or not tnodes:
-            continue
-        t = tight_type(_ast_text(tnodes[-1]))
-        types.append(t)
-        binds[_ast_text(idents[0])] = _base_type(t.rstrip("?"))
-    return types, binds
-
-
-def _kt_return(fn) -> str | None:
-    """Return type: the user_type sibling between the parameter list and the body."""
-    seen_params = False
-    for c in fn.children:
-        if c.type == "function_value_parameters":
-            seen_params = True
-        elif seen_params and c.type in ("user_type", "nullable_type"):
-            return tight_type(_ast_text(c))
-        elif c.type == "function_body":
-            break
-    return None
-
-
-def _kt_call_entry(n) -> tuple[str, str]:
-    head = n.children[0] if n.children else None
-    if head is None:
-        return "", ""
-    if head.type in ("identifier", "simple_identifier"):
-        name = _ast_text(head)
-        return name, name
-    if head.type == "navigation_expression":
-        parts = _ast_text(head).split(".")
-        name = parts[-1]
-        if len(parts) == 2 and _IDENT_RE.fullmatch(parts[0]):
-            return name, f"{parts[0]}.{name}"
-        return name, name
-    return "", ""
-
-
-def _kt_fn_symbol(fn, rel: str, container: str | None, vis: str,
-                  class_binds: dict[str, str]) -> Symbol:
-    name = _ast_text(_ast_field(fn, "name"))
-    pnode = next((c for c in fn.children if c.type == "function_value_parameters"), None)
-    params, binds = _kt_params(pnode)
-    body = next((c for c in fn.children if c.type == "function_body"), None)
-    returns = _kt_return(fn)
-    ret_suffix = f":{returns}" if returns and returns != "Unit" else ""
-    return Symbol(
-        name=name, kind="method" if container else "fn", file=rel,
-        line=fn.start_point[0] + 1,
-        signature=f"{name}({','.join(params)}){ret_suffix}",
-        params=params, returns=returns,
-        visibility=vis, container=container, lang="kotlin",
-        calls=_ast_calls(body, name, ("call_expression",), _kt_call_entry),
-        bindings={**class_binds, **binds},
-        size=(body.end_point[0] - body.start_point[0] + 1) if body is not None else 0,
-    )
-
-
-def _extract_kotlin(text: str, rel: str) -> list[Symbol]:
-    tree = _PARSERS["kotlin"].parse(text.encode())
-    symbols: list[Symbol] = []
-    for tn in _ast_collect(tree.root_node,
-                           ("class_declaration", "object_declaration")):
-        name = _ast_text(_ast_field(tn, "name"))
-        if not name:
-            continue
-        is_iface = any(c.type == "interface" for c in tn.children)
-        is_enum = any(_ast_text(m) == "enum"
-                      for m in _ast_collect(tn, ("class_modifier",)))
-        is_data = any(_ast_text(m) == "data"
-                      for m in _ast_collect(tn, ("class_modifier",)))
-        ctor = next((c for c in tn.children if c.type == "primary_constructor"), None)
-        cparams: list[str] = []
-        class_binds: dict[str, str] = {}
-        if ctor is not None:
-            pl = next((c for c in ctor.children if c.type == "class_parameters"), None)
-            cparams, class_binds = _kt_params(pl)
-        supers = []
-        for ds in tn.children:
-            if ds.type == "delegation_specifiers":
-                supers = [_base_type(re.sub(r"\(.*", "", _ast_text(d)))
-                          for d in ds.children if d.type == "delegation_specifier"]
-        body = next((c for c in tn.children
-                     if c.type in ("class_body", "enum_class_body")), None)
-        if is_enum and body is not None:
-            cparams = [_ast_text(e.children[0])
-                       for e in _ast_collect(body, ("enum_entry",)) if e.children]
-        kind = ("enum" if is_enum else "interface" if is_iface
-                else "record" if is_data else "class")
-        symbols.append(Symbol(
-            name=name, kind=kind, file=rel, line=tn.start_point[0] + 1,
-            signature=f"{kind} {name}", params=cparams, supers=supers,
-            visibility=_kt_vis(tn), lang="kotlin",
-        ))
-        if body is not None:
-            for fn in body.children:
-                if fn.type == "function_declaration":
-                    vis = _kt_vis(fn) if not is_iface else _kt_vis(tn)
-                    symbols.append(_kt_fn_symbol(fn, rel, name, vis, class_binds))
-    for fn in tree.root_node.children:
-        if fn.type == "function_declaration":
-            symbols.append(_kt_fn_symbol(fn, rel, None, _kt_vis(fn), {}))
-    return symbols
 
 
 # ---------------------------------------------------------------------------
@@ -1145,10 +588,6 @@ def _extract_html(text: str, rel: str) -> list[Symbol]:
 
 
 EXTRACTORS = {
-    "kotlin": _extract_kotlin,
-    "go": _extract_go,
-    "rust": _extract_rust,
-    "csharp": _extract_cs,
     "c": _extract_c,
     "cpp": _extract_cpp,
     "lua": _extract_lua,
@@ -1187,12 +626,35 @@ _LEGACY_TYPESCRIPT_LANGUAGES = frozenset(
         Language.VUE,
     }
 )
+_LEGACY_TASK5_LANGUAGES = frozenset(
+    {Language.CSHARP, Language.GO, Language.KOTLIN, Language.RUST}
+)
 
 
 def _legacy_call_name(call) -> str:
-    if call.receiver in {None, "cls", "self"}:
+    if call.receiver in {None, "cls", "self", "this"}:
         return call.name
     return f"{call.receiver}.{call.name}"
+
+
+def _legacy_task5_call_name(language: Language, call) -> str | None:
+    if language is Language.GO and call.kind is CallKind.CONSTRUCT:
+        return None
+    if call.kind is CallKind.CONSTRUCT:
+        return call.name
+    receiver = call.receiver
+    if receiver in {None, "self", "this"}:
+        return call.name
+    if re.fullmatch(r"(?:[^\W\d]|\$)[\w$]*", receiver, re.UNICODE):
+        return f"{receiver}.{call.name}"
+    if (
+        language is Language.RUST
+        and "::" in receiver
+        and "(" not in receiver
+        and "." not in receiver
+    ):
+        return f"{receiver.rsplit('::', 1)[-1]}.{call.name}"
+    return call.name
 
 
 def _legacy_typescript_call_name(call) -> str | None:
@@ -1318,12 +780,23 @@ def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
         )
     else:
         owned = [call for call in file_ir.calls if call.caller == symbol.id]
+        if file_ir.source.language in _LEGACY_TASK5_LANGUAGES:
+            owned.sort(
+                key=lambda call: (
+                    call.span.start_line,
+                    call.span.start_column,
+                    -call.span.end_line,
+                    -call.span.end_column,
+                )
+            )
     result: list[str] = []
     for call in owned:
         if file_ir.source.language is Language.JAVA:
             name = _legacy_java_call_name(file_ir, call)
         elif file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES:
             name = _legacy_typescript_call_name(call)
+        elif file_ir.source.language in _LEGACY_TASK5_LANGUAGES:
+            name = _legacy_task5_call_name(file_ir.source.language, call)
         else:
             name = _legacy_call_name(call)
         if name is None:
@@ -1398,8 +871,174 @@ def _legacy_typescript_bindings(file_ir: CanonicalFileIR, symbol) -> dict[str, s
     return result
 
 
+def _legacy_body_binding_names(file_ir: CanonicalFileIR, symbol, kind: str) -> set[str]:
+    body = next((item for item in file_ir.bodies if item.owner == symbol.id), None)
+    if body is None:
+        return set()
+    return {event.text for event in body.events if event.kind.value == kind}
+
+
+def _legacy_task5_bindings(
+    file_ir: CanonicalFileIR,
+    symbol,
+    interface_paths: set[tuple[str, ...]],
+) -> dict[str, str]:
+    language = file_ir.source.language
+    canonical = {binding.name: binding.type_name for binding in symbol.bindings}
+    parameters = _legacy_body_binding_names(file_ir, symbol, "param")
+    locals_ = _legacy_body_binding_names(file_ir, symbol, "local")
+    if not parameters and not locals_:
+        parameters = set(canonical)
+
+    if language is Language.GO:
+        if symbol.id.container_path in interface_paths:
+            return {}
+        fields = {
+            candidate.name
+            for candidate in file_ir.symbols
+            if candidate.kind is SymbolKind.FIELD
+            and candidate.id.container_path == symbol.id.container_path
+        }
+        allowed = parameters | fields | {
+            name for name in locals_ if canonical.get(name) != "?"
+        }
+        return {name: value for name, value in canonical.items() if name in allowed}
+
+    if language is Language.RUST:
+        allowed = parameters | {
+            name for name in locals_ if canonical.get(name) != "?"
+        }
+        result = {
+            name: value
+            for name, value in canonical.items()
+            if name in allowed and name != "self"
+        }
+        if (
+            symbol.kind is SymbolKind.METHOD
+            and symbol.id.container_path not in interface_paths
+            and symbol.container is not None
+        ):
+            result["self"] = symbol.container
+        return result
+
+    if language is Language.CSHARP:
+        fields = {
+            candidate.name
+            for candidate in file_ir.symbols
+            if candidate.kind in {SymbolKind.CONSTANT, SymbolKind.FIELD}
+            and candidate.id.container_path == symbol.id.container_path
+        }
+        allowed = parameters | fields | {
+            name for name in locals_ if canonical.get(name) != "?"
+        }
+        return {name: value for name, value in canonical.items() if name in allowed}
+
+    enclosing_type = next(
+        (
+            candidate
+            for candidate in file_ir.symbols
+            if candidate.kind
+            in {
+                SymbolKind.CLASS,
+                SymbolKind.ENUM,
+                SymbolKind.INTERFACE,
+                SymbolKind.RECORD,
+            }
+            and (*candidate.id.container_path, candidate.name)
+            == symbol.id.container_path
+        ),
+        None,
+    )
+    constructor = next(
+        (
+            candidate
+            for candidate in file_ir.symbols
+            if candidate.kind is SymbolKind.CONSTRUCTOR
+            and candidate.id.container_path == symbol.id.container_path
+            and enclosing_type is not None
+            and candidate.name == enclosing_type.name
+            and candidate.params == enclosing_type.params
+        ),
+        None,
+    )
+    class_parameters = (
+        {binding.name for binding in constructor.bindings}
+        if constructor is not None
+        else set()
+    )
+    allowed = parameters | class_parameters
+    return {name: value for name, value in canonical.items() if name in allowed}
+
+
+def _legacy_task5_supported(
+    file_ir: CanonicalFileIR,
+    symbol,
+    type_paths: set[tuple[str, ...]],
+    companion_paths: set[tuple[str, ...]],
+) -> bool:
+    language = file_ir.source.language
+    if language not in _LEGACY_TASK5_LANGUAGES:
+        return True
+    if symbol.kind in {SymbolKind.PROPERTY, SymbolKind.TYPE}:
+        return False
+    if (*symbol.id.container_path, symbol.name) in companion_paths:
+        return False
+    if any(
+        symbol.id.container_path[: len(path)] == path for path in companion_paths
+    ):
+        return False
+    if language is Language.KOTLIN and symbol.kind is SymbolKind.CONSTRUCTOR:
+        return False
+    if symbol.kind is SymbolKind.FUNCTION:
+        return not symbol.id.container_path and language in {
+            Language.GO,
+            Language.KOTLIN,
+            Language.RUST,
+        }
+    if symbol.kind in {SymbolKind.METHOD, SymbolKind.CONSTRUCTOR}:
+        if language is Language.RUST:
+            return True
+        return symbol.id.container_path in type_paths
+    return True
+
+
+def _legacy_go_type(type_name: str) -> str:
+    if type_name.startswith("..."):
+        return f"...{type_name[3:].lstrip('*&')}"
+    return type_name.lstrip("*&")
+
+
+def _legacy_go_shape(symbol) -> tuple[list[str], str | None, str]:
+    params = [_legacy_go_type(value) for value in symbol.params]
+    returns = _legacy_go_type(symbol.returns) if symbol.returns is not None else None
+    if symbol.kind in {SymbolKind.FUNCTION, SymbolKind.METHOD}:
+        suffix = f":{returns}" if returns else ""
+        signature = f"{symbol.name}({','.join(params)}){suffix}"
+    else:
+        signature = symbol.signature
+    return params, returns, signature
+
+
 def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
     projected: list[Symbol] = []
+    type_paths = {
+        (*symbol.id.container_path, symbol.name)
+        for symbol in file_ir.symbols
+        if symbol.kind
+        in {
+            SymbolKind.CLASS,
+            SymbolKind.ENUM,
+            SymbolKind.INTERFACE,
+            SymbolKind.RECORD,
+        }
+    }
+    companion_paths = {
+        (*symbol.id.container_path, symbol.name)
+        for symbol in file_ir.symbols
+        if file_ir.source.language is Language.KOTLIN
+        and symbol.kind is SymbolKind.CLASS
+        and "companion" in symbol.modifiers
+    }
     interface_paths = {
         (*symbol.id.container_path, symbol.name)
         for symbol in file_ir.symbols
@@ -1407,6 +1046,13 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
     }
     for symbol in file_ir.symbols:
         if symbol.kind not in _LEGACY_CANONICAL_KINDS:
+            continue
+        if not _legacy_task5_supported(
+            file_ir,
+            symbol,
+            type_paths,
+            companion_paths,
+        ):
             continue
         if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES:
             if symbol.kind is SymbolKind.PROPERTY:
@@ -1429,6 +1075,11 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                 supported = False
             if not supported:
                 continue
+        params, returns, signature = (
+            _legacy_go_shape(symbol)
+            if file_ir.source.language is Language.GO
+            else (list(symbol.params), symbol.returns, symbol.signature)
+        )
         projected.append(
             Symbol(
                 name=symbol.name,
@@ -1439,9 +1090,9 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                 ),
                 file=symbol.file,
                 line=symbol.span.start_line,
-                signature=symbol.signature,
-                params=list(symbol.params),
-                returns=symbol.returns,
+                signature=signature,
+                params=params,
+                returns=returns,
                 visibility=(
                     "pub"
                     if symbol.visibility is Visibility.PUBLIC
@@ -1453,7 +1104,8 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                 ),
                 container=(
                     None
-                    if file_ir.source.language is Language.JAVA
+                    if file_ir.source.language
+                    in {Language.JAVA, *_LEGACY_TASK5_LANGUAGES}
                     and symbol.kind
                     in {
                         SymbolKind.CLASS,
@@ -1476,6 +1128,12 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                 bindings=(
                     _legacy_typescript_bindings(file_ir, symbol)
                     if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES
+                    else _legacy_task5_bindings(
+                        file_ir,
+                        symbol,
+                        interface_paths,
+                    )
+                    if file_ir.source.language in _LEGACY_TASK5_LANGUAGES
                     else {
                         binding.name: binding.type_name
                         for binding in symbol.bindings
@@ -1506,10 +1164,14 @@ def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol
             return []
     rel = path.relative_to(root).as_posix()
     if lang in {
+        Language.CSHARP.value,
+        Language.GO.value,
         Language.HELM.value,
         Language.JAVA.value,
         Language.JAVASCRIPT.value,
+        Language.KOTLIN.value,
         Language.PYTHON.value,
+        Language.RUST.value,
         Language.SVELTE.value,
         Language.TSX.value,
         Language.TYPESCRIPT.value,

@@ -40,14 +40,15 @@ def _canonical_file(path: Path, root: Path):
 class GoExtractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.syms = extract_file(POLY / "sample.go", POLY)
+        cls.result = _canonical_file(POLY / "sample.go", POLY)
+        cls.syms = cls.result.symbols
 
     def test_struct_with_fields_and_interface(self):
         store = next(s for s in self.syms if s.name == "Store")
-        self.assertEqual(store.kind, "class")
-        self.assertEqual(store.params, ["map[string]Item", "int"])
+        self.assertEqual(store.kind, SymbolKind.CLASS)
+        self.assertEqual(store.params, ("map[string]Item", "int"))
         pricer = next(s for s in self.syms if s.name == "Pricer")
-        self.assertEqual(pricer.kind, "interface")
+        self.assertEqual(pricer.kind, SymbolKind.INTERFACE)
         quote = next(s for s in self.syms if s.name == "Quote")
         self.assertEqual(quote.container, "Pricer")
         self.assertEqual(quote.returns, "(int,error)")
@@ -55,30 +56,41 @@ class GoExtractTest(unittest.TestCase):
     def test_method_receiver_and_visibility(self):
         get = next(s for s in self.syms if s.name == "Get")
         self.assertEqual(get.container, "Store")
-        self.assertEqual(get.visibility, "pub")
+        self.assertEqual(get.visibility, Visibility.PUBLIC)
         lookup = next(s for s in self.syms if s.name == "lookup")
-        self.assertEqual(lookup.visibility, "priv")
+        self.assertEqual(lookup.visibility, Visibility.PRIVATE)
 
     def test_receiver_binding_resolves_calls(self):
         get = next(s for s in self.syms if s.name == "Get")
-        self.assertIn("s.lookup", get.calls)
-        self.assertEqual(get.bindings.get("s"), "Store")
+        self.assertIn(
+            ("s", "lookup"),
+            {
+                (call.receiver, call.name)
+                for call in self.result.calls
+                if call.caller == get.id
+            },
+        )
+        self.assertIn(
+            ("s", "Store"),
+            {(binding.name, binding.type_name) for binding in get.bindings},
+        )
 
 
 @_needs("rust")
 class RustExtractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.syms = extract_file(POLY / "sample.rs", POLY)
+        cls.result = _canonical_file(POLY / "sample.rs", POLY)
+        cls.syms = cls.result.symbols
 
     def test_struct_enum_trait(self):
         rat = next(s for s in self.syms if s.name == "Rational")
-        self.assertEqual(rat.kind, "class")
-        self.assertEqual(rat.params, ["i64", "i64"])
+        self.assertEqual(rat.kind, SymbolKind.CLASS)
+        self.assertEqual(rat.params, ("i64", "i64"))
         force = next(s for s in self.syms if s.name == "Force")
-        self.assertEqual(force.params, ["Asserted", "Entailed", "Supported"])
+        self.assertEqual(force.params, ("Asserted", "Entailed", "Supported"))
         pricer = next(s for s in self.syms if s.name == "Pricer")
-        self.assertEqual(pricer.kind, "interface")
+        self.assertEqual(pricer.kind, SymbolKind.INTERFACE)
 
     def test_trait_impl_becomes_super(self):
         rat = next(s for s in self.syms if s.name == "Rational")
@@ -86,38 +98,43 @@ class RustExtractTest(unittest.TestCase):
 
     def test_impl_methods_and_visibility(self):
         of = next(s for s in self.syms if s.name == "of" and s.container == "Rational")
-        self.assertEqual(of.visibility, "pub")
+        self.assertEqual(of.visibility, Visibility.PUBLIC)
         self.assertEqual(of.returns, "Rational")
-        self.assertIn("Rational", of.calls)          # struct literal = construction
+        self.assertIn(
+            "Rational",
+            {call.name for call in self.result.calls if call.caller == of.id},
+        )
         reduce = next(s for s in self.syms if s.name == "reduce")
-        self.assertEqual(reduce.visibility, "priv")
+        self.assertEqual(reduce.visibility, Visibility.PRIVATE)
 
 
 @_needs("csharp")
 class CSharpExtractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.syms = extract_file(POLY / "Sample.cs", POLY)
+        cls.result = _canonical_file(POLY / "Sample.cs", POLY)
+        cls.syms = cls.result.symbols
 
     def test_record_enum_interface_class(self):
         rec = next(s for s in self.syms if s.name == "OrderId")
-        self.assertEqual(rec.kind, "record")
-        self.assertEqual(rec.params, ["string"])
+        self.assertEqual(rec.kind, SymbolKind.RECORD)
+        self.assertEqual(rec.params, ("string",))
         status = next(s for s in self.syms if s.name == "Status")
-        self.assertEqual(status.params, ["New", "Paid"])
+        self.assertEqual(status.params, ("New", "Paid"))
         eng = next(s for s in self.syms if s.name == "PricingEngine")
-        self.assertEqual(eng.supers, ["IPricer"])
+        self.assertEqual(eng.supers, ("IPricer",))
 
     def test_methods_ctor_visibility_calls(self):
         ev = next(s for s in self.syms
                   if s.name == "Evaluate" and s.container == "PricingEngine")
-        self.assertEqual(ev.visibility, "pub")
-        self.assertIn("Compute", ev.calls)
-        self.assertIn("Quote", ev.calls)
+        self.assertEqual(ev.visibility, Visibility.PUBLIC)
+        calls = {call.name for call in self.result.calls if call.caller == ev.id}
+        self.assertIn("Compute", calls)
+        self.assertIn("Quote", calls)
         comp = next(s for s in self.syms if s.name == "Compute")
-        self.assertEqual(comp.visibility, "priv")
-        ctor = next(s for s in self.syms if s.kind == "ctor")
-        self.assertEqual(ctor.params, ["Dictionary<string,long>"])
+        self.assertEqual(comp.visibility, Visibility.PRIVATE)
+        ctor = next(s for s in self.syms if s.kind is SymbolKind.CONSTRUCTOR)
+        self.assertEqual(ctor.params, ("Dictionary<string,long>",))
 
 
 @_needs("c")
@@ -223,32 +240,36 @@ class HelmExtractTest(unittest.TestCase):
 class KotlinExtractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.syms = extract_file(POLY / "Sample.kt", POLY)
+        cls.result = _canonical_file(POLY / "Sample.kt", POLY)
+        cls.syms = cls.result.symbols
 
     def test_data_class_enum_interface(self):
         oid = next(s for s in self.syms if s.name == "OrderId")
-        self.assertEqual(oid.kind, "record")
-        self.assertEqual(oid.params, ["String"])
+        self.assertEqual(oid.kind, SymbolKind.RECORD)
+        self.assertEqual(oid.params, ("String",))
         status = next(s for s in self.syms if s.name == "Status")
-        self.assertEqual(status.params, ["NEW", "PAID"])
+        self.assertEqual(status.params, ("NEW", "PAID"))
         pricer = next(s for s in self.syms if s.name == "Pricer")
-        self.assertEqual(pricer.kind, "interface")
+        self.assertEqual(pricer.kind, SymbolKind.INTERFACE)
 
     def test_class_supers_methods_visibility(self):
         eng = next(s for s in self.syms if s.name == "PricingEngine")
-        self.assertEqual(eng.supers, ["Pricer"])
-        self.assertEqual(eng.params, ["Map<String,Long>"])
+        self.assertEqual(eng.supers, ("Pricer",))
+        self.assertEqual(eng.params, ("Map<String,Long>",))
         quote = next(s for s in self.syms if s.name == "quote"
                      and s.container == "PricingEngine")
-        self.assertEqual(quote.visibility, "pub")
+        self.assertEqual(quote.visibility, Visibility.PUBLIC)
         self.assertEqual(quote.returns, "Long")
-        self.assertIn("compute", quote.calls)
+        self.assertIn(
+            "compute",
+            {call.name for call in self.result.calls if call.caller == quote.id},
+        )
         comp = next(s for s in self.syms if s.name == "compute")
-        self.assertEqual(comp.visibility, "priv")
+        self.assertEqual(comp.visibility, Visibility.PRIVATE)
 
     def test_top_level_fn(self):
         fn = next(s for s in self.syms if s.name == "normalize")
-        self.assertEqual(fn.kind, "fn")
+        self.assertEqual(fn.kind, SymbolKind.FUNCTION)
         self.assertEqual(fn.returns, "List<Long>")
 
 
