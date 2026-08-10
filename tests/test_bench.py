@@ -9,8 +9,14 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmark"))
 
-import bench
+import bench  # type: ignore[import-not-found]
 
+from benchmark.transcript import (
+    ProcessResult,
+    TranscriptSummary,
+    parse_transcript,
+    terminal_succeeded,
+)
 from hologram import (
     CONFIG_NAME,
     Language,
@@ -93,8 +99,9 @@ class TaskLoaderTest(unittest.TestCase):
                 bench.load_tasks(p, corpus_override=Path(tmp))
 
 
+MODEL = "claude-sonnet-5"
 TRANSCRIPT = "\n".join([
-    json.dumps({"type": "system", "subtype": "init"}),
+    json.dumps({"type": "system", "subtype": "init", "model": MODEL}),
     json.dumps({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Read", "input": {"file_path": "a.java"}}]}}),
     json.dumps({"type": "assistant", "message": {"content": [
@@ -116,7 +123,13 @@ TRANSCRIPT = "\n".join([
         {"type": "tool_use", "name": "Edit", "input": {}}]}}),
     json.dumps({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Write", "input": {}}]}}),
-    json.dumps({"type": "result", "num_turns": 7,
+    json.dumps({"type": "assistant", "message": {
+        "model": MODEL,
+        "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "Completed the task."}],
+    }}),
+    json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                "result": "Completed the task.", "num_turns": 7,
                 "usage": {"input_tokens": 91000, "output_tokens": 4200,
                           "cache_creation_input_tokens": 30000,
                           "cache_read_input_tokens": 500000}}),
@@ -125,20 +138,123 @@ TRANSCRIPT = "\n".join([
 
 
 class TranscriptMetricsTest(unittest.TestCase):
+    def test_transcript_records_are_frozen_with_exact_fields(self):
+        self.assertEqual(
+            tuple(field.name for field in dataclasses.fields(ProcessResult)),
+            ("stdout", "stderr", "returncode", "timed_out"),
+        )
+        self.assertEqual(
+            tuple(field.name for field in dataclasses.fields(TranscriptSummary)),
+            (
+                "terminal_status", "terminal_count", "is_error", "stop_reason",
+                "final_answer", "reported_model", "reads", "searches", "edits",
+                "map_hits", "turns", "tokens_in", "tokens_out",
+            ),
+        )
+        result = ProcessResult("", "", 0)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            result.returncode = 1  # type: ignore[misc]
+
     def test_counts_and_usage(self):
-        m = bench.parse_transcript(TRANSCRIPT)
-        self.assertEqual(m["reads"], 3)      # Read ×2 + bash sed -n
-        self.assertEqual(m["searches"], 3)   # Grep + bash grep ×2
-        self.assertEqual(m["edits"], 2)      # Edit + Write
-        self.assertNotIn("digest_hits", m)
-        self.assertEqual(m["turns"], 7)
-        self.assertEqual(m["tokens_in"], 91000 + 30000 + 500000)
-        self.assertEqual(m["tokens_out"], 4200)
+        summary = parse_transcript(TRANSCRIPT, requested_model=MODEL)
+        self.assertIsInstance(summary, TranscriptSummary)
+        self.assertEqual(summary.terminal_status, "success")
+        self.assertEqual(summary.terminal_count, 1)
+        self.assertFalse(summary.is_error)
+        self.assertEqual(summary.stop_reason, "end_turn")
+        self.assertEqual(summary.final_answer, "Completed the task.")
+        self.assertEqual(summary.reported_model, MODEL)
+        self.assertEqual(summary.reads, 3)      # Read ×2 + bash sed -n
+        self.assertEqual(summary.searches, 3)   # Grep + bash grep ×2
+        self.assertEqual(summary.edits, 2)      # Edit + Write
+        self.assertEqual(summary.map_hits, 2)   # PROJECT_DIGEST grep + Read
+        self.assertEqual(summary.turns, 7)
+        self.assertEqual(summary.tokens_in, 91000 + 30000 + 500000)
+        self.assertEqual(summary.tokens_out, 4200)
+        self.assertTrue(terminal_succeeded(ProcessResult(TRANSCRIPT, "", 0), summary))
 
     def test_empty_transcript_gives_zeroes(self):
-        m = bench.parse_transcript("")
-        self.assertEqual(m, {"reads": 0, "searches": 0, "edits": 0,
-                             "turns": 0, "tokens_in": 0, "tokens_out": 0})
+        summary = parse_transcript("", requested_model=MODEL)
+        self.assertEqual(summary.terminal_status, "missing_result")
+        self.assertEqual(summary.terminal_count, 0)
+        self.assertEqual(summary.reads, 0)
+        self.assertEqual(summary.searches, 0)
+        self.assertEqual(summary.edits, 0)
+        self.assertEqual(summary.map_hits, 0)
+        self.assertEqual(summary.turns, 0)
+        self.assertEqual(summary.tokens_in, 0)
+        self.assertEqual(summary.tokens_out, 0)
+
+    def _terminal(
+        self,
+        *,
+        subtype: str = "success",
+        is_error: bool = False,
+        answer: str = "done",
+        stop_reason: str = "end_turn",
+        model: str = MODEL,
+    ) -> str:
+        return "\n".join(
+            (
+                json.dumps({"type": "system", "subtype": "init", "model": model}),
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "model": model,
+                            "stop_reason": stop_reason,
+                            "content": [{"type": "text", "text": answer}],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "subtype": subtype,
+                        "is_error": is_error,
+                        "result": answer,
+                        "num_turns": 1,
+                        "usage": {},
+                    }
+                ),
+            )
+        )
+
+    def test_terminal_failures_are_stable_and_fail_closed(self) -> None:
+        success = self._terminal()
+        cases = {
+            "missing_result": "",
+            "multiple_results": success + "\n" + success.splitlines()[-1],
+            "permission_error": self._terminal(
+                subtype="permission_error", is_error=True
+            ),
+            "error_max_turns": self._terminal(
+                subtype="error_max_turns", is_error=True
+            ),
+            "context_overflow": self._terminal(
+                subtype="context_overflow", is_error=True
+            ),
+            "empty_answer": self._terminal(answer="   "),
+            "stop_reason_tool_use": self._terminal(stop_reason="tool_use"),
+            "model_mismatch": self._terminal(model="claude-sonnet-4"),
+        }
+        for expected, transcript in cases.items():
+            with self.subTest(expected=expected):
+                summary = parse_transcript(transcript, requested_model=MODEL)
+                self.assertEqual(summary.terminal_status, expected)
+                self.assertFalse(
+                    terminal_succeeded(ProcessResult(transcript, "", 0), summary)
+                )
+
+        summary = parse_transcript(success, requested_model=MODEL)
+        self.assertFalse(
+            terminal_succeeded(ProcessResult(success, "failed", 9), summary)
+        )
+        self.assertFalse(
+            terminal_succeeded(
+                ProcessResult(success, "timeout", 0, timed_out=True), summary
+            )
+        )
 
 
 def _render_symbol(name: str, calls: tuple[str, ...] = ()) -> RenderSymbol:
@@ -623,17 +739,19 @@ class RunOneTest(unittest.TestCase):
                 accept_cmd="grep -q average {ws}/svc.py",
                 expect_reuse=("normalize",))
 
-            def fake_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
+            def fake_runner(
+                prompt: str, ws: Path, model: str, max_turns: int
+            ) -> ProcessResult:
                 # the "agent" appends a function that calls normalize
                 (ws / "svc.py").write_text(
                     (ws / "svc.py").read_text()
                     + "\ndef average(xs: list) -> float:\n"
                       "    return sum(normalize(xs)) / len(xs)\n")
-                return TRANSCRIPT
+                return ProcessResult(TRANSCRIPT, "", 0)
 
             row = bench.run_one(repo, task, "C", rep=0,
                                 results_dir=Path(tmp) / "results",
-                                model="sonnet", max_turns=40,
+                                model=MODEL, max_turns=40,
                                 runner=fake_runner)
         self.assertEqual(row["task"], "avg")
         self.assertEqual(row["condition"], "C")
@@ -655,11 +773,11 @@ class RunOneTest(unittest.TestCase):
 
             def fake_runner(prompt, ws, model, max_turns):
                 (ws / "helper.py").write_text("def helper() -> int:\n    return 1\n")
-                return TRANSCRIPT
+                return ProcessResult(TRANSCRIPT, "", 0)
 
             row = bench.run_one(repo, task, "B", rep=0,
                                 results_dir=Path(tmp) / "results",
-                                model="sonnet", max_turns=40, runner=fake_runner)
+                                model=MODEL, max_turns=40, runner=fake_runner)
         self.assertTrue(row["accepted"])   # untracked new file must count
 
     def test_transcript_saved(self):
@@ -672,9 +790,87 @@ class RunOneTest(unittest.TestCase):
             )
             results = Path(tmp) / "results"
             bench.run_one(repo, task, "B", rep=1, results_dir=results,
-                          model="sonnet", max_turns=40,
-                          runner=lambda *a, **k: TRANSCRIPT)
+                          model=MODEL, max_turns=40,
+                          runner=lambda *a, **k: ProcessResult(TRANSCRIPT, "", 0))
             self.assertTrue((results / "noop-B-1.jsonl").exists())
+
+    def test_verifier_passing_max_turn_partial_edit_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            task = bench.Task(
+                id="partial", tier="simple", capability="implementation",
+                kind="reuse", visibility="public", prompt="Add partial().",
+                accept_cmd="grep -q partial {ws}/svc.py",
+                expect_reuse=("normalize",),
+            )
+            transcript = TranscriptMetricsTest()._terminal(
+                subtype="error_max_turns",
+                is_error=True,
+                answer="Partial edit only.",
+            )
+
+            def fake_runner(prompt, ws, model, max_turns):
+                (ws / "svc.py").write_text(
+                    (ws / "svc.py").read_text()
+                    + "\ndef partial() -> None:\n    pass\n"
+                )
+                return ProcessResult(transcript, "", 0)
+
+            row = bench.run_one(
+                repo,
+                task,
+                "B",
+                rep=0,
+                results_dir=Path(tmp) / "results",
+                model=MODEL,
+                max_turns=40,
+                runner=fake_runner,
+            )
+        self.assertEqual(row["terminal_status"], "error_max_turns")
+        self.assertFalse(row["completed"])
+        self.assertTrue(row["verifier_passed"])
+        self.assertFalse(row["accepted"])
+
+    def test_final_answer_is_saved_and_available_to_verifier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            task = bench.Task(
+                id="answer", tier="simple", capability="orientation",
+                kind="navigate", visibility="public", prompt="Answer.",
+                accept_cmd="grep -q 'Completed the task' {answer} && test -d {ws}",
+            )
+            results = Path(tmp) / "results"
+            row = bench.run_one(
+                repo,
+                task,
+                "B",
+                rep=0,
+                results_dir=results,
+                model=MODEL,
+                max_turns=40,
+                runner=lambda *args, **kwargs: ProcessResult(TRANSCRIPT, "", 0),
+                claude_code_version="2.1.224",
+                corpus_revision="a" * 40,
+                seed=20260809,
+                pair_index=7,
+                challenged_tree_sha256="b" * 64,
+                workspace_asset_sha256="c" * 64,
+            )
+            answer = results / "answer-B-0.answer.txt"
+            self.assertEqual(answer.read_text(), "Completed the task.")
+        self.assertTrue(row["completed"])
+        self.assertTrue(row["verifier_passed"])
+        self.assertTrue(row["accepted"])
+        self.assertEqual(row["model"], MODEL)
+        self.assertEqual(row["claude_code_version"], "2.1.224")
+        self.assertEqual(row["corpus_revision"], "a" * 40)
+        self.assertEqual(row["seed"], 20260809)
+        self.assertEqual(row["pair_index"], 7)
+        self.assertEqual(row["challenged_tree_sha256"], "b" * 64)
+        self.assertEqual(row["workspace_asset_sha256"], "c" * 64)
+        self.assertEqual(row["tier"], "simple")
+        self.assertEqual(row["capability"], "orientation")
+        self.assertEqual(row["visibility"], "public")
 
 
 class ReportTest(unittest.TestCase):

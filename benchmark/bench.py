@@ -12,6 +12,7 @@ import difflib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import statistics
@@ -35,12 +36,23 @@ from hologram.render import RenderSymbol, decode_render
 
 if __package__:
     from .schema import Config, Task, load_tasks, resolve_corpus_path
+    from .transcript import ProcessResult, parse_transcript, terminal_succeeded
 else:
+    import schema as _schema  # type: ignore[import-not-found]
+    import transcript as _transcript  # type: ignore[import-not-found]
+
+    sys.modules.setdefault("benchmark.schema", _schema)
+    sys.modules.setdefault("benchmark.transcript", _transcript)
     from schema import (  # type: ignore[import-not-found,no-redef]
         Config,
         Task,
         load_tasks,
         resolve_corpus_path,
+    )
+    from transcript import (  # type: ignore[import-not-found,no-redef]
+        ProcessResult,
+        parse_transcript,
+        terminal_succeeded,
     )
 
 __all__ = ("Config", "Task", "load_tasks")
@@ -48,53 +60,6 @@ __all__ = ("Config", "Task", "load_tasks")
 
 def _hologram_command(*args: str) -> list[str]:
     return [sys.executable, "-m", "hologram", *args]
-
-
-_READ_TOOLS = {"Read"}
-_SEARCH_TOOLS = {"Grep", "Glob"}
-_EDIT_TOOLS = {"Edit", "Write", "NotebookEdit"}
-_BASH_SEARCH = re.compile(r"\b(grep|rg|find|fd|ag)\b")
-_BASH_READ = re.compile(r"\b(cat|head|tail|sed -n|less|more)\b")
-
-
-def parse_transcript(text: str) -> dict:
-    """Tool-call counts and usage from a claude stream-json transcript.
-    Agents search/read through Bash as often as through dedicated tools, so
-    Bash commands are classified too. tokens_in sums fresh input + cache
-    creation + cache reads — the actual context consumption. Tolerant of
-    non-JSON noise lines."""
-    m = {"reads": 0, "searches": 0, "edits": 0, "turns": 0,
-         "tokens_in": 0, "tokens_out": 0}
-    for line in text.splitlines():
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if ev.get("type") == "assistant":
-            for block in (ev.get("message") or {}).get("content", []):
-                if block.get("type") != "tool_use":
-                    continue
-                name = block.get("name", "")
-                if name in _READ_TOOLS:
-                    m["reads"] += 1
-                elif name in _SEARCH_TOOLS:
-                    m["searches"] += 1
-                elif name in _EDIT_TOOLS:
-                    m["edits"] += 1
-                elif name == "Bash":
-                    cmd = (block.get("input") or {}).get("command", "")
-                    if _BASH_SEARCH.search(cmd):
-                        m["searches"] += 1
-                    elif _BASH_READ.search(cmd):
-                        m["reads"] += 1
-        elif ev.get("type") == "result":
-            usage = ev.get("usage") or {}
-            m["turns"] = int(ev.get("num_turns", 0))
-            m["tokens_in"] = (int(usage.get("input_tokens", 0))
-                              + int(usage.get("cache_creation_input_tokens", 0))
-                              + int(usage.get("cache_read_input_tokens", 0)))
-            m["tokens_out"] = int(usage.get("output_tokens", 0))
-    return m
 
 
 def _symbols(rendered: str) -> tuple[RenderSymbol, ...]:
@@ -272,7 +237,12 @@ def drop_workspace(corpus: Path, ws: Path) -> None:
     shutil.rmtree(ws, ignore_errors=True)
 
 
-def claude_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
+def claude_runner(
+    prompt: str,
+    ws: Path,
+    model: str,
+    max_turns: int,
+) -> ProcessResult:
     """The only function that spends tokens. Runs claude headless in the
     workspace; returns the raw stream-json transcript."""
     r = subprocess.run(
@@ -280,7 +250,7 @@ def claude_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
          "--max-turns", str(max_turns), "--model", model,
          "--dangerously-skip-permissions"],
         cwd=ws, capture_output=True, text=True, timeout=1800, check=False)
-    return r.stdout
+    return ProcessResult(r.stdout, r.stderr, r.returncode)
 
 
 def _digest_of(ws: Path) -> str:
@@ -308,27 +278,69 @@ def _digest_of(ws: Path) -> str:
 
 def run_one(corpus: Path, task: Task, condition: str, rep: int,
             results_dir: Path, model: str, max_turns: int,
-            runner=claude_runner) -> dict:
+            runner=claude_runner, *, claude_code_version: str = "",
+            corpus_revision: str = "", seed: int = 0, pair_index: int = 0,
+            challenged_tree_sha256: str = "", workspace_asset_sha256: str = "") -> dict:
     results_dir.mkdir(parents=True, exist_ok=True)
     ws = results_dir / f"ws-{task.id}-{condition}-{rep}"
     make_workspace(corpus, ws, condition)
     try:
         before = _digest_of(ws)
-        transcript = runner(task.prompt, ws, model, max_turns)
-        (results_dir / f"{task.id}-{condition}-{rep}.jsonl").write_text(transcript)
+        process = runner(task.prompt, ws, model, max_turns)
+        if type(process) is not ProcessResult:
+            raise TypeError("benchmark runner must return ProcessResult")
+        transcript_path = results_dir / f"{task.id}-{condition}-{rep}.jsonl"
+        transcript_path.write_text(process.stdout, encoding="utf-8")
+        if process.stderr:
+            (results_dir / f"{task.id}-{condition}-{rep}.stderr.txt").write_text(
+                process.stderr,
+                encoding="utf-8",
+            )
+        summary = parse_transcript(process.stdout, requested_model=model)
+        answer_path = results_dir / f"{task.id}-{condition}-{rep}.answer.txt"
+        answer_path.write_text(summary.final_answer, encoding="utf-8")
         after = _digest_of(ws)
         verdict = judge_reuse(before, after, task.expect_reuse)
         # intent-to-add so brand-new files show up in `git diff`-based acceptance
         subprocess.run(["git", "-C", str(ws), "add", "-N", "."],
                        capture_output=True, check=False)
-        accepted = subprocess.run(
-            task.accept_cmd.format(ws=ws), shell=True,
-            capture_output=True, check=False).returncode == 0
-        metrics = parse_transcript(transcript)
+        verifier = subprocess.run(
+            task.accept_cmd.format(
+                ws=shlex.quote(str(ws.resolve())),
+                answer=shlex.quote(str(answer_path.resolve())),
+            ),
+            shell=True,
+            capture_output=True,
+            check=False,
+        )
+        verifier_passed = verifier.returncode == 0
+        completed = terminal_succeeded(process, summary)
+        accepted = completed and verifier_passed
+        terminal_status = (
+            "timeout"
+            if process.timed_out
+            else f"process_exit_{process.returncode}"
+            if process.returncode != 0
+            else summary.terminal_status
+        )
         return {"task": task.id, "kind": task.kind, "condition": condition,
-                "rep": rep, "accepted": accepted,
+                "rep": rep, "terminal_status": terminal_status,
+                "completed": completed, "verifier_passed": verifier_passed,
+                "accepted": accepted, "model": model,
+                "claude_code_version": claude_code_version,
+                "max_turns": max_turns, "corpus_revision": corpus_revision,
+                "seed": seed, "pair_index": pair_index,
+                "challenged_tree_sha256": challenged_tree_sha256,
+                "workspace_asset_sha256": workspace_asset_sha256,
+                "tier": task.tier, "capability": task.capability,
+                "visibility": task.visibility,
+                "score": 1.0 if verifier_passed else 0.0,
                 "reused": verdict["reused"], "duplicated": verdict["duplicated"],
-                "new_lines": len(verdict["new_lines"]), **metrics}
+                "new_lines": len(verdict["new_lines"]),
+                "reads": summary.reads, "searches": summary.searches,
+                "edits": summary.edits, "map_hits": summary.map_hits,
+                "turns": summary.turns, "tokens_in": summary.tokens_in,
+                "tokens_out": summary.tokens_out}
     finally:
         drop_workspace(corpus, ws)
 
@@ -364,11 +376,28 @@ def report(rows: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _dry_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
+def _dry_runner(
+    prompt: str,
+    ws: Path,
+    model: str,
+    max_turns: int,
+) -> ProcessResult:
     """Zero-cost runner for harness testing: touches nothing, returns a
     minimal valid transcript."""
-    return json.dumps({"type": "result", "num_turns": 0,
-                       "usage": {"input_tokens": 0, "output_tokens": 0}})
+    transcript = "\n".join(
+        (
+            json.dumps({"type": "system", "subtype": "init", "model": model}),
+            json.dumps({"type": "assistant", "message": {
+                "model": model, "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "Dry run complete."}],
+            }}),
+            json.dumps({"type": "result", "subtype": "success",
+                        "is_error": False, "result": "Dry run complete.",
+                        "num_turns": 0,
+                        "usage": {"input_tokens": 0, "output_tokens": 0}}),
+        )
+    )
+    return ProcessResult(transcript, "", 0)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -420,13 +449,17 @@ def main(argv: list[str] | None = None) -> int:
     tasks = [t for t in cfg.tasks if args.only is None or t.id in args.only]
     total = len(tasks) * len(args.conditions) * args.reps
     done = 0
-    for task in tasks:
+    for task_index, task in enumerate(tasks):
         for cond in args.conditions:
             for rep in range(args.reps):
                 done += 1
                 print(f"[{done}/{total}] {task.id} {cond} rep{rep}", flush=True)
                 row = run_one(corpus, task, cond, rep, args.results,
-                              cfg.model, cfg.max_turns, runner=runner)
+                              cfg.model, cfg.max_turns, runner=runner,
+                              claude_code_version=cfg.claude_code_version,
+                              corpus_revision=cfg.corpus.revision,
+                              seed=cfg.seed,
+                              pair_index=task_index * args.reps + rep)
                 with runs_path.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
     return 0
