@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import contextlib
+import dataclasses
+import os
+import stat
+import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
+from typing import BinaryIO, Self, cast
+from unittest import mock
 
 import hologram.context as context_module
 from hologram.context import (
@@ -10,9 +18,17 @@ from hologram.context import (
     CONTEXT_START,
     LEGACY_END,
     LEGACY_START,
+    AtomicWriteError,
     ContextStatus,
     ManagedBlockError,
+    PlannedWrite,
+    atomic_write,
+    commit_writes,
     inspect_managed_block,
+    merge_planned_writes,
+    preflight_atomic_write,
+    preflight_context_writes,
+    read_target_bytes,
     render_managed_block,
     replace_managed_block,
 )
@@ -81,6 +97,39 @@ class _DecodeBomb(bytes):
         raise AssertionError("authored bytes must never be decoded")
 
 
+class _FailingBinaryFile:
+    def __init__(self, wrapped: BinaryIO, stage: str) -> None:
+        self.wrapped = wrapped
+        self.stage = stage
+
+    def write(self, content: bytes) -> int:
+        if self.stage == "write":
+            raise OSError("write boom")
+        if self.stage == "short-write":
+            return self.wrapped.write(content[:-1])
+        return self.wrapped.write(content)
+
+    def flush(self) -> None:
+        if self.stage == "flush":
+            raise OSError("flush boom")
+        self.wrapped.flush()
+
+    def fileno(self) -> int:
+        return self.wrapped.fileno()
+
+    def close(self) -> None:
+        if self.stage == "close":
+            self.wrapped.close()
+            raise OSError("close boom")
+        self.wrapped.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
 class ManagedBlockTest(unittest.TestCase):
     def test_exact_constants_api_enum_and_error_contract(self) -> None:
         self.assertEqual(
@@ -129,9 +178,17 @@ class ManagedBlockTest(unittest.TestCase):
                 "CONTEXT_START",
                 "LEGACY_END",
                 "LEGACY_START",
+                "AtomicWriteError",
                 "ContextStatus",
                 "ManagedBlockError",
+                "PlannedWrite",
+                "atomic_write",
+                "commit_writes",
                 "inspect_managed_block",
+                "merge_planned_writes",
+                "preflight_atomic_write",
+                "preflight_context_writes",
+                "read_target_bytes",
                 "render_managed_block",
                 "replace_managed_block",
             ],
@@ -332,6 +389,661 @@ class ManagedBlockTest(unittest.TestCase):
                     self.assertRaises(TypeError),
                 ):
                     function(b"", malformed_expected)  # type: ignore[arg-type]
+
+
+class AtomicOutputTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def test_planned_write_and_error_contract_are_exact_and_strict(self) -> None:
+        path = self.root / "out.bin"
+        plan = PlannedWrite(path, b"content", 0o640)
+        self.assertEqual(
+            tuple(field.name for field in dataclasses.fields(PlannedWrite)),
+            ("path", "content", "mode"),
+        )
+        self.assertEqual(PlannedWrite.__slots__, ("path", "content", "mode"))
+        self.assertFalse(hasattr(plan, "__dict__"))
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            plan.mode = 0o600  # type: ignore[misc]
+        self.assertTrue(issubclass(AtomicWriteError, OSError))
+
+        invalid = (
+            ("relative.bin", b"x", None),
+            (Path("relative.bin"), b"x", None),
+            (self.root / "a" / ".." / "x", b"x", None),
+            (path, bytearray(b"x"), None),
+            (path, b"x", True),
+            (path, b"x", -1),
+            (path, b"x", 0o10000),
+            (path, b"x", "0644"),
+        )
+        for raw_path, content, mode in invalid:
+            with (
+                self.subTest(path=raw_path, content=content, mode=mode),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                PlannedWrite(raw_path, content, mode)  # type: ignore[arg-type]
+
+    def test_generic_preflight_is_absolute_lexical_and_preserves_modes(self) -> None:
+        existing = self.root / "nested" / "existing.bin"
+        existing.parent.mkdir()
+        existing.write_bytes(b"old")
+        existing.chmod(0o640)
+        missing = self.root / "future" / "missing.bin"
+
+        with (
+            mock.patch.object(
+                Path,
+                "resolve",
+                side_effect=AssertionError("resolve must not be called"),
+            ),
+            mock.patch.object(
+                Path,
+                "read_bytes",
+                side_effect=AssertionError("unsafe read_bytes"),
+            ),
+        ):
+            preserved = preflight_atomic_write(
+                self.root / "nested" / "." / "existing.bin",
+                b"new",
+                root=self.root,
+            )
+            explicit = preflight_atomic_write(
+                existing,
+                b"new",
+                root=self.root,
+                mode=0o600,
+            )
+            planned_missing = preflight_atomic_write(
+                missing,
+                b"raw output",
+                root=self.root,
+            )
+
+        self.assertEqual(
+            preserved,
+            PlannedWrite(Path(os.path.abspath(existing)), b"new", 0o640),
+        )
+        self.assertEqual(explicit.mode, 0o600)
+        self.assertEqual(
+            planned_missing,
+            PlannedWrite(Path(os.path.abspath(missing)), b"raw output", None),
+        )
+        self.assertFalse(missing.parent.exists())
+
+    def test_read_target_bytes_reuses_safe_lexical_validation(self) -> None:
+        existing = self.root / "existing.bin"
+        missing = self.root / "missing" / "target.bin"
+        existing.write_bytes(b"\xffraw")
+
+        with mock.patch.object(
+            Path,
+            "read_bytes",
+            side_effect=AssertionError("unsafe read_bytes"),
+        ):
+            self.assertEqual(
+                read_target_bytes(existing, root=self.root),
+                b"\xffraw",
+            )
+            self.assertIsNone(read_target_bytes(missing, root=self.root))
+
+        outside = self.root.parent / f"{self.root.name}-read-outside"
+        with self.assertRaises(AtomicWriteError):
+            read_target_bytes(outside, root=self.root)
+        link = self.root / "read-link"
+        link.symlink_to(existing.name)
+        with self.assertRaises(AtomicWriteError):
+            read_target_bytes(link, root=self.root)
+
+    def test_preflight_reads_regular_leaf_no_follow_and_detects_swap(self) -> None:
+        path = self.root / "target.bin"
+        path.write_bytes(b"old")
+        real_open = context_module.os.open
+        with mock.patch.object(context_module.os, "open", wraps=real_open) as opened:
+            preflight_atomic_write(path, b"new", root=self.root)
+        flags = opened.call_args.args[1]
+        self.assertTrue(flags & os.O_RDONLY == os.O_RDONLY)
+        if hasattr(os, "O_NOFOLLOW"):
+            self.assertTrue(flags & os.O_NOFOLLOW)
+
+        owned = self.root / "owned.bin"
+        owned.write_bytes(b"owned")
+
+        def swap_then_open(raw_path: object, flags: int) -> int:
+            path.unlink()
+            path.symlink_to(owned.name)
+            return real_open(cast(os.PathLike[str], raw_path), flags)
+
+        with (
+            mock.patch.object(context_module.os, "open", side_effect=swap_then_open),
+            self.assertRaises(AtomicWriteError),
+        ):
+            preflight_atomic_write(path, b"new", root=self.root)
+        self.assertEqual(owned.read_bytes(), b"owned")
+
+    def test_preflight_rejects_outside_symlink_nonregular_and_bad_ancestors(
+        self,
+    ) -> None:
+        outside = self.root.parent / f"{self.root.name}-outside.bin"
+        self.addCleanup(lambda: outside.unlink(missing_ok=True))
+        outside.write_bytes(b"outside")
+        link = self.root / "link.bin"
+        link.symlink_to(outside)
+        directory = self.root / "directory"
+        directory.mkdir()
+        non_directory = self.root / "not-a-directory"
+        non_directory.write_bytes(b"x")
+        ancestor_link = self.root / "linked-dir"
+        ancestor_link.symlink_to(directory.name)
+
+        rejected = (
+            self.root / ".." / outside.name,
+            link,
+            directory,
+            non_directory / "child.bin",
+            ancestor_link / "child.bin",
+        )
+        for path in rejected:
+            with self.subTest(path=path), self.assertRaises(AtomicWriteError):
+                preflight_atomic_write(path, b"new", root=self.root)
+
+        if hasattr(os, "mkfifo"):
+            fifo = self.root / "pipe"
+            os.mkfifo(fifo)
+            with self.assertRaises(AtomicWriteError):
+                preflight_atomic_write(fifo, b"new", root=self.root)
+
+    def test_root_itself_is_trusted_and_missing_descendant_suffix_is_allowed(
+        self,
+    ) -> None:
+        real_root = self.root / "real"
+        real_root.mkdir()
+        lexical_root = self.root / "lexical-root"
+        lexical_root.symlink_to(real_root.name)
+        target = lexical_root / "missing" / "nested" / "out.bin"
+
+        plan = preflight_atomic_write(target, b"new", root=lexical_root)
+
+        self.assertEqual(plan.path, Path(os.path.abspath(target)))
+        self.assertFalse(real_root.joinpath("missing").exists())
+
+    def test_strict_preflight_arguments_and_mode_bounds(self) -> None:
+        path = self.root / "out.bin"
+        for bad_path in ("out.bin", b"out.bin", None):
+            with self.subTest(path=bad_path), self.assertRaises(TypeError):
+                preflight_atomic_write(bad_path, b"x")  # type: ignore[arg-type]
+        for bad_content in ("x", bytearray(b"x"), memoryview(b"x"), None):
+            with self.subTest(content=bad_content), self.assertRaises(TypeError):
+                preflight_atomic_write(path, bad_content)  # type: ignore[arg-type]
+        for bad_root in ("root", b"root", 1):
+            with self.subTest(root=bad_root), self.assertRaises(TypeError):
+                preflight_atomic_write(path, b"x", root=bad_root)  # type: ignore[arg-type]
+        for bad_mode in (True, -1, 0o10000, "0644"):
+            with (
+                self.subTest(mode=bad_mode),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                preflight_atomic_write(path, b"x", mode=bad_mode)  # type: ignore[arg-type]
+
+    def test_context_preflight_transforms_all_targets_sorted_without_mutation(
+        self,
+    ) -> None:
+        expected = render_managed_block("new\n")
+        claude = self.root / "z" / "CLAUDE.md"
+        codex = self.root / "a" / "AGENTS.md"
+        gemini = self.root / "m" / "GEMINI.md"
+        claude.parent.mkdir()
+        codex.parent.mkdir()
+        claude.write_bytes(b"rules\n" + render_managed_block("old\n"))
+        codex.write_bytes(b"rules\n" + _legacy_block())
+        claude.chmod(0o640)
+        codex.chmod(0o600)
+        before = {
+            claude: (claude.read_bytes(), claude.stat()),
+            codex: (codex.read_bytes(), codex.stat()),
+        }
+
+        plans = preflight_context_writes(
+            {"claude": claude, "codex": codex, "gemini": gemini},
+            expected,
+        )
+
+        self.assertEqual(
+            tuple(plan.path for plan in plans),
+            tuple(sorted((claude.absolute(), codex.absolute(), gemini.absolute()))),
+        )
+        by_path = {plan.path: plan for plan in plans}
+        self.assertEqual(by_path[claude.absolute()].content, b"rules\n" + expected)
+        self.assertEqual(by_path[codex.absolute()].content, b"rules\n" + expected)
+        self.assertEqual(by_path[gemini.absolute()].content, expected)
+        self.assertEqual(by_path[claude.absolute()].mode, 0o640)
+        self.assertEqual(by_path[codex.absolute()].mode, 0o600)
+        self.assertIsNone(by_path[gemini.absolute()].mode)
+        self.assertFalse(gemini.parent.exists())
+        for path, (content, metadata) in before.items():
+            after = path.stat()
+            self.assertEqual(path.read_bytes(), content)
+            self.assertEqual(
+                (after.st_ino, after.st_mode, after.st_mtime_ns),
+                (metadata.st_ino, metadata.st_mode, metadata.st_mtime_ns),
+            )
+
+    def test_preflight_apis_reuse_public_reader_and_validate_context_targets(
+        self,
+    ) -> None:
+        expected = render_managed_block("map\n")
+        target = self.root / "target.md"
+        real_reader = read_target_bytes
+        with mock.patch.object(
+            context_module,
+            "read_target_bytes",
+            wraps=real_reader,
+        ) as reader:
+            preflight_atomic_write(target, b"raw", root=self.root)
+            preflight_context_writes({"claude": target}, expected)
+        self.assertEqual(reader.call_count, 2)
+
+        invalid_targets: tuple[object, ...] = (
+            [],
+            {1: target},
+            {"claude": "CLAUDE.md"},
+        )
+        for targets in invalid_targets:
+            with self.subTest(targets=targets), self.assertRaises(TypeError):
+                preflight_context_writes(targets, expected)  # type: ignore[arg-type]
+        with self.assertRaises(ManagedBlockError):
+            preflight_context_writes({}, b"not a block")
+
+    def test_one_malformed_context_aborts_entire_preflight_without_mutation(
+        self,
+    ) -> None:
+        expected = render_managed_block("new\n")
+        valid = self.root / "valid.md"
+        malformed = self.root / "malformed.md"
+        missing = self.root / "missing" / "later.md"
+        valid.write_bytes(render_managed_block("old\n"))
+        malformed.write_bytes(CONTEXT_START + b"\n")
+        before = {
+            valid: (valid.read_bytes(), valid.stat()),
+            malformed: (malformed.read_bytes(), malformed.stat()),
+        }
+
+        with self.assertRaises(ManagedBlockError):
+            preflight_context_writes(
+                {"valid": valid, "malformed": malformed, "missing": missing},
+                expected,
+            )
+
+        self.assertFalse(missing.parent.exists())
+        for path, (content, metadata) in before.items():
+            after = path.stat()
+            self.assertEqual(path.read_bytes(), content)
+            self.assertEqual(
+                (after.st_ino, after.st_mode, after.st_mtime_ns),
+                (metadata.st_ino, metadata.st_mode, metadata.st_mtime_ns),
+            )
+
+    def test_merge_collapses_identical_duplicates_sorts_and_rejects_conflicts(
+        self,
+    ) -> None:
+        left = PlannedWrite((self.root / "z.bin").absolute(), b"z", None)
+        right = PlannedWrite((self.root / "a.bin").absolute(), b"a", 0o600)
+        duplicate = PlannedWrite(left.path, left.content, left.mode)
+        source = [left, right, duplicate]
+
+        merged = merge_planned_writes(iter(source))
+        source.clear()
+
+        self.assertEqual(merged, (right, left))
+        for conflict in (
+            PlannedWrite(left.path, b"different", left.mode),
+            PlannedWrite(left.path, left.content, 0o644),
+        ):
+            with self.subTest(conflict=conflict), self.assertRaises(AtomicWriteError):
+                merge_planned_writes((left, conflict))
+        with self.assertRaises(TypeError):
+            merge_planned_writes((left, object()))  # type: ignore[arg-type]
+
+    def test_identical_atomic_write_preserves_inode_mode_mtime_and_skips_temp(
+        self,
+    ) -> None:
+        path = self.root / "same.bin"
+        path.write_bytes(b"same")
+        path.chmod(0o640)
+        before = path.stat()
+
+        with (
+            mock.patch.object(
+                context_module.tempfile,
+                "mkstemp",
+                side_effect=AssertionError("identical write made a temp"),
+            ),
+            mock.patch.object(
+                context_module.os,
+                "fchmod",
+                side_effect=AssertionError("identical write changed mode"),
+            ),
+        ):
+            changed = atomic_write(path, b"same", mode=0o600)
+
+        after = path.stat()
+        self.assertFalse(changed)
+        self.assertEqual(
+            (after.st_ino, after.st_mode, after.st_mtime_ns),
+            (before.st_ino, before.st_mode, before.st_mtime_ns),
+        )
+
+    def test_atomic_write_uses_same_directory_temp_and_exact_mode_rules(self) -> None:
+        preserved = self.root / "preserved.bin"
+        explicit = self.root / "explicit.bin"
+        defaulted = self.root / "defaulted.bin"
+        preserved.write_bytes(b"old")
+        explicit.write_bytes(b"old")
+        preserved.chmod(0o640)
+        explicit.chmod(0o640)
+        real_mkstemp = context_module.tempfile.mkstemp
+
+        with mock.patch.object(
+            context_module.tempfile,
+            "mkstemp",
+            wraps=real_mkstemp,
+        ) as mkstemp:
+            self.assertTrue(atomic_write(preserved, b"new"))
+            first = mkstemp.call_args
+            self.assertEqual(first.kwargs["prefix"], ".hologram-tmp-")
+            self.assertEqual(Path(first.kwargs["dir"]), preserved.parent)
+        self.assertEqual(stat.S_IMODE(preserved.stat().st_mode), 0o640)
+
+        self.assertTrue(atomic_write(explicit, b"new", mode=0o600))
+        self.assertEqual(stat.S_IMODE(explicit.stat().st_mode), 0o600)
+        self.assertTrue(atomic_write(defaulted, b"new"))
+        self.assertEqual(stat.S_IMODE(defaulted.stat().st_mode), 0o644)
+        self.assertEqual(preserved.read_bytes(), b"new")
+        self.assertEqual(explicit.read_bytes(), b"new")
+        self.assertEqual(defaulted.read_bytes(), b"new")
+        self.assertEqual(list(self.root.glob(".hologram-tmp-*")), [])
+
+    def test_atomic_write_requires_existing_directory_and_rechecks_leaf(self) -> None:
+        missing_parent = self.root / "missing" / "out.bin"
+        with self.assertRaises(AtomicWriteError):
+            atomic_write(missing_parent, b"new")
+        self.assertFalse(missing_parent.parent.exists())
+
+        target = self.root / "target.bin"
+        owned = self.root / "owned.bin"
+        target.write_bytes(b"old")
+        owned.write_bytes(b"owned")
+        plan = preflight_atomic_write(target, b"new", root=self.root)
+        target.unlink()
+        target.symlink_to(owned.name)
+        with self.assertRaises(AtomicWriteError):
+            atomic_write(plan.path, plan.content, mode=plan.mode)
+        self.assertEqual(owned.read_bytes(), b"owned")
+
+    def test_atomic_write_strict_arguments_and_short_write_cleanup(self) -> None:
+        path = self.root / "strict.bin"
+        for bad_path in ("strict.bin", b"strict.bin", None):
+            with self.subTest(path=bad_path), self.assertRaises(TypeError):
+                atomic_write(bad_path, b"x")  # type: ignore[arg-type]
+        for bad_content in ("x", bytearray(b"x"), memoryview(b"x"), None):
+            with self.subTest(content=bad_content), self.assertRaises(TypeError):
+                atomic_write(path, bad_content)  # type: ignore[arg-type]
+        for bad_mode in (True, -1, 0o10000, "0644"):
+            with (
+                self.subTest(mode=bad_mode),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                atomic_write(path, b"x", mode=bad_mode)  # type: ignore[arg-type]
+
+        path.write_bytes(b"original")
+        real_fdopen = context_module.os.fdopen
+
+        def short_fdopen(descriptor: int, mode: str) -> _FailingBinaryFile:
+            return _FailingBinaryFile(
+                cast(BinaryIO, real_fdopen(descriptor, mode)),
+                "short-write",
+            )
+
+        with (
+            mock.patch.object(
+                context_module.os,
+                "fdopen",
+                side_effect=short_fdopen,
+            ),
+            self.assertRaisesRegex(AtomicWriteError, "complete"),
+        ):
+            atomic_write(path, b"replacement")
+        self.assertEqual(path.read_bytes(), b"original")
+        self.assertEqual(list(self.root.glob(".hologram-tmp-*")), [])
+
+    def test_write_flush_fchmod_fsync_close_and_replace_failures_cleanup(
+        self,
+    ) -> None:
+        def failure_injector(
+            failure_stage: str,
+            opener: Callable[[int, str], BinaryIO],
+        ) -> Callable[[int, str], _FailingBinaryFile]:
+            def failing_fdopen(descriptor: int, mode: str) -> _FailingBinaryFile:
+                return _FailingBinaryFile(
+                    opener(descriptor, mode),
+                    failure_stage,
+                )
+
+            return failing_fdopen
+
+        for stage in ("write", "flush", "fchmod", "fsync", "close", "replace"):
+            with self.subTest(stage=stage):
+                path = self.root / f"{stage}.bin"
+                path.write_bytes(b"original")
+                stack = contextlib.ExitStack()
+                self.addCleanup(stack.close)
+                if stage in {"write", "flush", "close"}:
+                    stack.enter_context(
+                        mock.patch.object(
+                            context_module.os,
+                            "fdopen",
+                            side_effect=failure_injector(
+                                stage,
+                                cast(
+                                    Callable[[int, str], BinaryIO],
+                                    context_module.os.fdopen,
+                                ),
+                            ),
+                        )
+                    )
+                else:
+                    stack.enter_context(
+                        mock.patch.object(
+                            context_module.os,
+                            stage,
+                            side_effect=OSError(f"{stage} boom"),
+                        )
+                    )
+
+                with stack, self.assertRaisesRegex(AtomicWriteError, stage):
+                    atomic_write(path, b"replacement")
+
+                self.assertEqual(path.read_bytes(), b"original")
+                self.assertEqual(list(self.root.glob(".hologram-tmp-*")), [])
+
+    def test_atomic_write_completes_durable_temp_before_replace(self) -> None:
+        path = self.root / "ordered.bin"
+        path.write_bytes(b"old")
+        events: list[str] = []
+        real_fdopen = context_module.os.fdopen
+        real_fchmod = context_module.os.fchmod
+        real_fsync = context_module.os.fsync
+        real_replace = context_module.os.replace
+
+        class RecordingFile:
+            def __init__(self, wrapped: BinaryIO) -> None:
+                self.wrapped = wrapped
+
+            def write(self, content: bytes) -> int:
+                events.append("write")
+                return self.wrapped.write(content)
+
+            def flush(self) -> None:
+                events.append("flush")
+                self.wrapped.flush()
+
+            def fileno(self) -> int:
+                return self.wrapped.fileno()
+
+            def close(self) -> None:
+                events.append("close")
+                self.wrapped.close()
+
+        def fdopen(descriptor: int, mode: str) -> RecordingFile:
+            return RecordingFile(cast(BinaryIO, real_fdopen(descriptor, mode)))
+
+        def fchmod(fd: int, mode: int) -> None:
+            events.append("fchmod")
+            real_fchmod(fd, mode)
+
+        def fsync(fd: int) -> None:
+            events.append("fsync")
+            real_fsync(fd)
+
+        def replace(
+            source: str | os.PathLike[str],
+            target: str | os.PathLike[str],
+        ) -> None:
+            events.append("replace")
+            self.assertEqual(Path(source).read_bytes(), b"replacement")
+            real_replace(source, target)
+
+        with (
+            mock.patch.object(context_module.os, "fdopen", side_effect=fdopen),
+            mock.patch.object(context_module.os, "fchmod", side_effect=fchmod),
+            mock.patch.object(context_module.os, "fsync", side_effect=fsync),
+            mock.patch.object(context_module.os, "replace", side_effect=replace),
+        ):
+            self.assertTrue(atomic_write(path, b"replacement"))
+
+        self.assertEqual(
+            events,
+            ["write", "flush", "fchmod", "fsync", "close", "replace"],
+        )
+
+    def test_cleanup_failure_is_not_allowed_to_mask_primary_error(self) -> None:
+        path = self.root / "cleanup.bin"
+        path.write_bytes(b"original")
+        with (
+            mock.patch.object(
+                context_module.os,
+                "replace",
+                side_effect=OSError("replace primary"),
+            ),
+            mock.patch.object(
+                context_module.os,
+                "unlink",
+                side_effect=OSError("cleanup secondary"),
+            ),
+            self.assertRaisesRegex(AtomicWriteError, "replace primary") as caught,
+        ):
+            atomic_write(path, b"replacement")
+
+        self.assertTrue(
+            any(
+                "cleanup secondary" in note
+                for note in getattr(caught.exception, "__notes__", ())
+            )
+        )
+        self.assertEqual(path.read_bytes(), b"original")
+        leftovers = list(self.root.glob(".hologram-tmp-*"))
+        self.assertEqual(len(leftovers), 1)
+        leftovers[0].unlink()
+
+    def test_commit_prevalidates_before_parent_creation_and_merges_conflicts(
+        self,
+    ) -> None:
+        future = self.root / "future" / "nested" / "a.bin"
+        owned = self.root / "owned.bin"
+        owned.write_bytes(b"owned")
+        link = self.root / "bad-link.bin"
+        link.symlink_to(owned.name)
+        writes = (
+            PlannedWrite(future.absolute(), b"future", None),
+            PlannedWrite(link.absolute(), b"bad", None),
+        )
+        with self.assertRaises(AtomicWriteError):
+            commit_writes(writes)
+        self.assertFalse((self.root / "future").exists())
+        self.assertEqual(owned.read_bytes(), b"owned")
+
+        conflict = (
+            PlannedWrite(future.absolute(), b"one", None),
+            PlannedWrite(future.absolute(), b"two", None),
+        )
+        with self.assertRaises(AtomicWriteError):
+            commit_writes(conflict)
+        self.assertFalse((self.root / "future").exists())
+
+    def test_commit_creates_all_missing_parents_and_returns_changed_paths_only(
+        self,
+    ) -> None:
+        same = self.root / "same.bin"
+        first = self.root / "z" / "first.bin"
+        second = self.root / "a" / "nested" / "second.bin"
+        same.write_bytes(b"same")
+        writes = (
+            PlannedWrite(first.absolute(), b"first", 0o600),
+            PlannedWrite(same.absolute(), b"same", None),
+            PlannedWrite(second.absolute(), b"second", None),
+        )
+
+        changed = commit_writes(writes)
+
+        self.assertEqual(changed, (second.absolute(), first.absolute()))
+        self.assertEqual(first.read_bytes(), b"first")
+        self.assertEqual(second.read_bytes(), b"second")
+        self.assertEqual(stat.S_IMODE(first.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(second.stat().st_mode), 0o644)
+
+    def test_commit_stops_after_failure_without_rolling_back_prior_targets(
+        self,
+    ) -> None:
+        first = self.root / "a.bin"
+        second = self.root / "b.bin"
+        third = self.root / "c.bin"
+        for path in (first, second, third):
+            path.write_bytes(b"old")
+        real_atomic_write = context_module.atomic_write
+
+        def fail_second(
+            path: Path,
+            content: bytes,
+            *,
+            mode: int | None = None,
+        ) -> bool:
+            if path == second:
+                raise AtomicWriteError("second target failed")
+            return real_atomic_write(path, content, mode=mode)
+
+        with (
+            mock.patch.object(
+                context_module,
+                "atomic_write",
+                side_effect=fail_second,
+            ),
+            self.assertRaisesRegex(AtomicWriteError, "second target failed"),
+        ):
+            commit_writes(
+                (
+                    PlannedWrite(third.absolute(), b"new-third", None),
+                    PlannedWrite(first.absolute(), b"new-first", None),
+                    PlannedWrite(second.absolute(), b"new-second", None),
+                )
+            )
+
+        self.assertEqual(first.read_bytes(), b"new-first")
+        self.assertEqual(second.read_bytes(), b"old")
+        self.assertEqual(third.read_bytes(), b"old")
+        self.assertIn("earlier", commit_writes.__doc__ or "")
 
 
 if __name__ == "__main__":
