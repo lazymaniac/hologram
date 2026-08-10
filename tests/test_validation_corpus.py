@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import os
 import re
 import subprocess
 import tempfile
 import unittest
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, ClassVar
 from unittest import mock
 
+from hologram.model import Language, SymbolKind, Visibility
 from validation import corpus as corpus_module
 from validation.corpus import (
     build_census,
@@ -23,6 +27,8 @@ from validation.schema import (
     CensusRecord,
     CorpusRegistry,
     CorpusSpec,
+    Exclusion,
+    GoldFact,
     GoldSample,
     load_jsonl,
     write_jsonl,
@@ -32,7 +38,175 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = PROJECT_ROOT / "validation" / "corpora.toml"
 CENSUS_PATH = PROJECT_ROOT / "validation" / "gold" / "census.jsonl"
 SAMPLE_PATH = PROJECT_ROOT / "validation" / "gold" / "sample.jsonl"
+FACTS_PATH = PROJECT_ROOT / "validation" / "gold" / "facts"
+EXCLUSIONS_PATH = PROJECT_ROOT / "validation" / "gold" / "exclusions"
+GOLD_README_PATH = PROJECT_ROOT / "validation" / "gold" / "README.md"
 REVISION = "a" * 40
+
+PUBLIC_CORPORA = (
+    "codecompanion",
+    "cypress",
+    "hologram",
+    "jdb",
+    "kafka-streams-examples",
+)
+CORE_FACT_CATEGORIES = frozenset(
+    {"declaration", "kind", "container", "visibility", "signature"}
+)
+GOLD_CATEGORIES = frozenset(
+    {
+        "declaration",
+        "kind",
+        "container",
+        "visibility",
+        "signature",
+        "relation",
+        "call",
+        "call_order",
+        "strong_x0",
+        "zero_classification",
+        "approximate",
+    }
+)
+CALLABLE_KINDS = frozenset(
+    {SymbolKind.FUNCTION.value, SymbolKind.METHOD.value, SymbolKind.CONSTRUCTOR.value}
+)
+EXCLUSION_REASONS = frozenset(
+    {
+        "ambiguous_call_target",
+        "ambiguous_declaration_identity",
+        "ambiguous_relation_target",
+        "discarded_callable_owner",
+        "external_call_target",
+        "external_relation_target",
+        "ordinary_yaml_not_helm",
+        "reexport_only_no_supported_declaration",
+        "shadowed_callable_declaration",
+        "unresolved_dynamic_target",
+    }
+)
+
+
+def thaw_json(value: object) -> Any:
+    if isinstance(value, Mapping):
+        return {key: thaw_json(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [thaw_json(item) for item in value]
+    return value
+
+
+def canonical_json(value: object) -> str:
+    return json.dumps(
+        thaw_json(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def parse_symbol_id(value: object) -> list[Any]:
+    decoded = json.loads(value) if isinstance(value, str) else thaw_json(value)
+    if not isinstance(decoded, list) or len(decoded) != 6:
+        raise ValueError("SymbolId must be a six-item JSON array")
+    language, file, container, kind, name, signature_key = decoded
+    if language not in {item.value for item in Language}:
+        raise ValueError("SymbolId language is not canonical")
+    if not isinstance(file, str) or not file:
+        raise ValueError("SymbolId file must be nonblank")
+    if not isinstance(container, list) or any(
+        not isinstance(item, str) or not item for item in container
+    ):
+        raise ValueError("SymbolId container must contain nonblank strings")
+    if kind not in {item.value for item in SymbolKind}:
+        raise ValueError("SymbolId kind is not canonical")
+    if not isinstance(name, str) or not name:
+        raise ValueError("SymbolId name must be nonblank")
+    if not isinstance(signature_key, str):
+        raise TypeError("SymbolId signature key must be a string")
+    return decoded
+
+
+def expected_fact_id(fact: GoldFact) -> str:
+    digest = hashlib.sha256(
+        canonical_json(
+            {
+                "expected": fact.expected,
+                "subject": fact.subject,
+                "value": fact.value,
+            }
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{fact.corpus}:{fact.path}:{fact.line}:{fact.category}:{digest}"
+
+
+def expected_exclusion_id(exclusion: Exclusion) -> str:
+    digest = hashlib.sha256(
+        canonical_json({"reason": exclusion.reason, "scope": exclusion.scope}).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:16]
+    line = exclusion.line if exclusion.line is not None else 0
+    return f"{exclusion.corpus}:{exclusion.path}:{line}:exclusion:{digest}"
+
+
+def source_role(path: str) -> str:
+    pure = Path(path)
+    directories = tuple(part.casefold() for part in pure.parts[:-1])
+    if any(part in {"test", "tests", "spec", "specs"} for part in directories):
+        return "test"
+    stem = pure.stem.casefold()
+    if (
+        stem.startswith("test_")
+        or stem.endswith(("_test", ".test", ".spec"))
+        or pure.stem.endswith(("Test", "Tests"))
+    ):
+        return "test"
+    if "generated" in directories:
+        return "generated"
+    return "production"
+
+
+def parse_exclusion_scope(scope: str) -> Any:
+    if scope == "file":
+        return scope
+    try:
+        decoded = json.loads(scope)
+    except json.JSONDecodeError as error:
+        raise ValueError("exclusion scope must be file or canonical JSON") from error
+    if canonical_json(decoded) != scope:
+        raise ValueError("structured exclusion scope must be canonical JSON")
+    if not isinstance(decoded, list) or not decoded:
+        raise ValueError("structured exclusion scope must be a nonempty array")
+    tag = decoded[0]
+    if tag == "fact" and len(decoded) == 4:
+        if decoded[1] not in GOLD_CATEGORIES:
+            raise ValueError("fact exclusion category is invalid")
+        parse_symbol_id(decoded[2])
+        if not isinstance(decoded[3], dict):
+            raise ValueError("fact exclusion value must be an object")
+        return decoded
+    if tag == "category" and len(decoded) == 3:
+        if decoded[1] not in GOLD_CATEGORIES:
+            raise ValueError("category exclusion category is invalid")
+        parse_symbol_id(decoded[2])
+        return decoded
+    if tag == "source_call" and len(decoded) == 4:
+        parse_symbol_id(decoded[1])
+        if (
+            isinstance(decoded[2], bool)
+            or not isinstance(decoded[2], int)
+            or decoded[2] < 0
+            or not isinstance(decoded[3], str)
+            or not decoded[3]
+        ):
+            raise ValueError("source_call exclusion payload is invalid")
+        return decoded
+    if tag == "candidate" and len(decoded) == 3:
+        if any(not isinstance(item, str) or not item for item in decoded[1:]):
+            raise ValueError("candidate exclusion payload is invalid")
+        return decoded
+    raise ValueError("unknown structured exclusion scope")
 
 
 def spec(
@@ -702,6 +876,525 @@ class FrozenInventoryTest(unittest.TestCase):
             frozen_sample,
             select_gold_sample(frozen_census, configured, seed=20260809),
         )
+
+
+class ValidationGoldCoverageTest(unittest.TestCase):
+    registry: ClassVar[CorpusRegistry]
+    census: ClassVar[tuple[CensusRecord, ...]]
+    sample: ClassVar[tuple[GoldSample, ...]]
+    census_by_key: ClassVar[dict[tuple[str, str], CensusRecord]]
+    sample_by_key: ClassVar[dict[tuple[str, str], GoldSample]]
+    facts_by_corpus: ClassVar[dict[str, tuple[GoldFact, ...]]]
+    exclusions_by_corpus: ClassVar[dict[str, tuple[Exclusion, ...]]]
+    facts: ClassVar[tuple[GoldFact, ...]]
+    exclusions: ClassVar[tuple[Exclusion, ...]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.registry = load_registry(REGISTRY_PATH)
+        cls.census = load_jsonl(CENSUS_PATH, CensusRecord)
+        cls.sample = load_jsonl(SAMPLE_PATH, GoldSample)
+        cls.census_by_key = {(row.corpus, row.path): row for row in cls.census}
+        cls.sample_by_key = {(row.corpus, row.path): row for row in cls.sample}
+        cls.facts_by_corpus = {
+            corpus: load_jsonl(FACTS_PATH / f"{corpus}.jsonl", GoldFact)
+            for corpus in PUBLIC_CORPORA
+        }
+        cls.exclusions_by_corpus = {
+            corpus: load_jsonl(
+                EXCLUSIONS_PATH / f"{corpus}.jsonl",
+                Exclusion,
+            )
+            for corpus in PUBLIC_CORPORA
+        }
+        cls.facts = tuple(
+            fact for corpus in PUBLIC_CORPORA for fact in cls.facts_by_corpus[corpus]
+        )
+        cls.exclusions = tuple(
+            exclusion
+            for corpus in PUBLIC_CORPORA
+            for exclusion in cls.exclusions_by_corpus[corpus]
+        )
+
+    def test_public_gold_files_and_readme_are_present(self) -> None:
+        self.assertEqual(
+            {path.stem for path in FACTS_PATH.glob("*.jsonl")} & set(PUBLIC_CORPORA),
+            set(PUBLIC_CORPORA),
+        )
+        self.assertEqual(
+            {path.stem for path in EXCLUSIONS_PATH.glob("*.jsonl")}
+            & set(PUBLIC_CORPORA),
+            set(PUBLIC_CORPORA),
+        )
+        text = GOLD_README_PATH.read_text(encoding="utf-8")
+        normalized_text = " ".join(text.split())
+        for required in (
+            "pinned source",
+            "direct syntax",
+            "lexical order",
+            "Dynamic or ambiguous calls",
+            "complete applicable non-call relation set",
+            "Generated/vendor",
+            "second reviewer",
+            "score pressure is not evidence",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, normalized_text)
+
+    def test_reviewed_public_gold_counts_hashes_and_bytes_are_frozen(self) -> None:
+        expected = {
+            ("facts", "codecompanion"): (
+                1771,
+                "5b01babaf788702ea42fa9f069e71bade456df7976477a1d9d3911322f23f4a6",
+            ),
+            ("facts", "cypress"): (
+                1217,
+                "e13d148fc9af524fb1bc6f197c1cdf47f40b3c71216cbb3d218209552dd18450",
+            ),
+            ("facts", "hologram"): (
+                3380,
+                "34c65c804474ca0ed800ea099b830092c9424c8e2ec13bb8f6f59e0023b4fbb3",
+            ),
+            ("facts", "jdb"): (
+                204,
+                "50684c242fe3449de135dc85d9439f0cf74537646de38f41f09ebb5d5ea8f71e",
+            ),
+            ("facts", "kafka-streams-examples"): (
+                1804,
+                "8d0d5a176e7adecbded88d9d68874fcbe349103b778d4225a3d409de4e3eb6b7",
+            ),
+            ("exclusions", "codecompanion"): (
+                917,
+                "4dc3c86cffc9097e201e4fce4c858a9ce79c27917db2fdc5e1f3d4da0149d0c1",
+            ),
+            ("exclusions", "cypress"): (
+                248,
+                "00428a149f49d81a085ff799814a520a78f3de9c7dcb32da27773a01fca0101d",
+            ),
+            ("exclusions", "hologram"): (
+                1569,
+                "e39bae0a13dbc28ebd2b2f594ad0a553b04e77ce5ccee7d769ff6a2f0d81aab3",
+            ),
+            ("exclusions", "jdb"): (
+                65,
+                "efa207f8634fad189c06f38b2d27dd7f148d0b3efbd5eaa1b9e6e23e55d6d587",
+            ),
+            ("exclusions", "kafka-streams-examples"): (
+                1272,
+                "f3e580be9e42a4454c2b4c917ddfd0383b2933b551ea86b7a07fe991253b9890",
+            ),
+        }
+        roots = {"facts": FACTS_PATH, "exclusions": EXCLUSIONS_PATH}
+        with tempfile.TemporaryDirectory() as tmp:
+            temporary = Path(tmp)
+            for key, (expected_count, expected_hash) in expected.items():
+                kind, corpus = key
+                source = roots[kind] / f"{corpus}.jsonl"
+                raw = source.read_bytes()
+                records: tuple[object, ...]
+                if kind == "facts":
+                    records = load_jsonl(source, GoldFact)
+                else:
+                    records = load_jsonl(source, Exclusion)
+                with self.subTest(kind=kind, corpus=corpus):
+                    self.assertEqual(len(records), expected_count)
+                    self.assertEqual(hashlib.sha256(raw).hexdigest(), expected_hash)
+                    target = temporary / f"{kind}-{corpus}.jsonl"
+                    write_jsonl(target, records)
+                    self.assertEqual(target.read_bytes(), raw)
+
+    def test_fact_metadata_ids_subjects_and_value_shapes_are_canonical(self) -> None:
+        census_paths = {
+            corpus: {row.path: row for row in self.census if row.corpus == corpus}
+            for corpus in PUBLIC_CORPORA
+        }
+        for fact in self.facts:
+            with self.subTest(fact=fact.id):
+                self.assertIn(fact.corpus, PUBLIC_CORPORA)
+                self.assertIn((fact.corpus, fact.path), self.sample_by_key)
+                sample = self.sample_by_key[(fact.corpus, fact.path)]
+                self.assertEqual(fact.revision, sample.revision)
+                self.assertEqual(fact.language, sample.language)
+                self.assertEqual(fact.id, expected_fact_id(fact))
+
+                subject = parse_symbol_id(fact.subject)
+                self.assertEqual(
+                    fact.subject,
+                    json.dumps(subject, ensure_ascii=False, separators=(",", ":")),
+                )
+                self.assertEqual(subject[0], fact.language)
+                self.assertEqual(subject[1], fact.path)
+                value = thaw_json(fact.value)
+
+                if fact.category == "declaration":
+                    self.assertEqual(value, {"name": subject[4]})
+                elif fact.category == "kind":
+                    self.assertEqual(value, {"kind": subject[3]})
+                elif fact.category == "container":
+                    self.assertEqual(value, {"container": subject[2]})
+                elif fact.category == "visibility":
+                    self.assertEqual(set(value), {"visibility"})
+                    self.assertIn(
+                        value["visibility"],
+                        {item.value for item in Visibility},
+                    )
+                elif fact.category == "signature":
+                    self.assertEqual(
+                        set(value),
+                        {"text", "params", "returns", "raises"},
+                    )
+                    self.assertIsInstance(value["text"], str)
+                    self.assertIsInstance(value["params"], list)
+                    self.assertTrue(
+                        all(isinstance(item, str) for item in value["params"])
+                    )
+                    self.assertTrue(
+                        value["returns"] is None or isinstance(value["returns"], str)
+                    )
+                    self.assertIsInstance(value["raises"], list)
+                    self.assertTrue(
+                        all(isinstance(item, str) for item in value["raises"])
+                    )
+                    expected_key = (
+                        f"({','.join(value['params'])})"
+                        if subject[3] in CALLABLE_KINDS
+                        else ""
+                    )
+                    self.assertEqual(subject[5], expected_key)
+                elif fact.category == "relation":
+                    self.assertEqual(set(value), {"kind", "target"})
+                    self.assertIn(
+                        value["kind"],
+                        {"super", "permit", "component", "reexport", "dependency"},
+                    )
+                    target = value["target"]
+                    self.assertIsInstance(target, dict)
+                    if value["kind"] == "dependency":
+                        self.assertEqual(set(target), {"external"})
+                        self.assertIsInstance(target["external"], str)
+                        self.assertTrue(target["external"])
+                    else:
+                        self.assertEqual(set(target), {"symbol"})
+                        target_id = parse_symbol_id(target["symbol"])
+                        target_row = census_paths[fact.corpus].get(target_id[1])
+                        self.assertIsNotNone(target_row)
+                        assert target_row is not None
+                        self.assertEqual(target_id[0], target_row.language)
+                elif fact.category == "call":
+                    self.assertEqual(set(value), {"target", "ordinal"})
+                    target_id = parse_symbol_id(value["target"])
+                    target_row = census_paths[fact.corpus].get(target_id[1])
+                    self.assertIsNotNone(target_row)
+                    assert target_row is not None
+                    self.assertEqual(target_id[0], target_row.language)
+                    self.assertIs(type(value["ordinal"]), int)
+                    self.assertGreaterEqual(value["ordinal"], 0)
+                elif fact.category == "call_order":
+                    self.assertEqual(set(value), {"targets"})
+                    self.assertIsInstance(value["targets"], list)
+                    for target in value["targets"]:
+                        target_id = parse_symbol_id(target)
+                        target_row = census_paths[fact.corpus].get(target_id[1])
+                        self.assertIsNotNone(target_row)
+                        assert target_row is not None
+                        self.assertEqual(target_id[0], target_row.language)
+                elif fact.category == "strong_x0":
+                    self.assertEqual(value, {"classification": "strong"})
+                else:
+                    self.fail(
+                        f"public Task 3 fact uses synthetic-only category "
+                        f"{fact.category!r}"
+                    )
+
+                if fact.category != "strong_x0":
+                    self.assertTrue(fact.expected)
+
+    def test_exclusion_ids_metadata_and_scopes_are_canonical(self) -> None:
+        seen_scopes: set[tuple[str, str, int | None, str]] = set()
+        for exclusion in self.exclusions:
+            with self.subTest(exclusion=exclusion.id):
+                self.assertIn(exclusion.corpus, PUBLIC_CORPORA)
+                census = self.census_by_key.get((exclusion.corpus, exclusion.path))
+                self.assertIsNotNone(census)
+                assert census is not None
+                self.assertEqual(exclusion.revision, census.revision)
+                self.assertEqual(exclusion.language, census.language)
+                self.assertEqual(exclusion.id, expected_exclusion_id(exclusion))
+                scope = parse_exclusion_scope(exclusion.scope)
+                self.assertTrue(
+                    exclusion.reason in EXCLUSION_REASONS
+                    or exclusion.reason.startswith("runtime_reachability_ambiguous:")
+                )
+                if scope == "file":
+                    self.assertIsNone(exclusion.line)
+                else:
+                    self.assertIsNotNone(exclusion.line)
+                    assert isinstance(scope, list)
+                    subject = (
+                        scope[2]
+                        if scope[0] in {"fact", "category"}
+                        else (scope[1] if scope[0] == "source_call" else None)
+                    )
+                    if subject is not None:
+                        owner = parse_symbol_id(subject)
+                        self.assertEqual(owner[0], exclusion.language)
+                        self.assertEqual(owner[1], exclusion.path)
+                        if scope[0] == "source_call":
+                            self.assertIn(owner[3], CALLABLE_KINDS)
+                scope_key = (
+                    exclusion.corpus,
+                    exclusion.path,
+                    exclusion.line,
+                    exclusion.scope,
+                )
+                self.assertNotIn(scope_key, seen_scopes)
+                seen_scopes.add(scope_key)
+
+    def test_every_sample_file_is_covered_and_core_bundles_are_complete(self) -> None:
+        declaration_facts = tuple(
+            fact
+            for fact in self.facts
+            if fact.category == "declaration" and fact.expected
+        )
+        declarations = {(fact.corpus, fact.subject): fact for fact in declaration_facts}
+        self.assertEqual(len(declarations), len(declaration_facts))
+
+        file_exclusions = {
+            (item.corpus, item.path) for item in self.exclusions if item.scope == "file"
+        }
+        covered = {
+            (item.corpus, item.path) for item in declaration_facts
+        } | file_exclusions
+        self.assertEqual(set(self.sample_by_key), covered & set(self.sample_by_key))
+
+        facts_by_subject: dict[tuple[str, str], list[GoldFact]] = {}
+        for fact in self.facts:
+            facts_by_subject.setdefault((fact.corpus, fact.subject), []).append(fact)
+        for key, declaration in declarations.items():
+            with self.subTest(corpus=key[0], subject=key[1]):
+                grouped = facts_by_subject[key]
+                core = [
+                    fact for fact in grouped if fact.category in CORE_FACT_CATEGORIES
+                ]
+                self.assertEqual(
+                    Counter(fact.category for fact in core),
+                    Counter({category: 1 for category in CORE_FACT_CATEGORIES}),
+                )
+                self.assertTrue(all(fact.expected for fact in core))
+                self.assertEqual({fact.line for fact in core}, {declaration.line})
+
+        for fact in self.facts:
+            with self.subTest(subject=fact.subject, category=fact.category):
+                self.assertIn((fact.corpus, fact.subject), declarations)
+                self.assertEqual(
+                    fact.line,
+                    declarations[(fact.corpus, fact.subject)].line,
+                )
+
+    def test_every_callable_has_one_complete_lexical_call_list(self) -> None:
+        facts_by_subject: dict[tuple[str, str], list[GoldFact]] = {}
+        for fact in self.facts:
+            facts_by_subject.setdefault((fact.corpus, fact.subject), []).append(fact)
+
+        callable_subjects = {
+            (fact.corpus, fact.subject)
+            for fact in self.facts
+            if fact.category == "kind"
+            and thaw_json(fact.value)["kind"] in CALLABLE_KINDS
+        }
+        call_subjects = {
+            (fact.corpus, fact.subject)
+            for fact in self.facts
+            if fact.category in {"call", "call_order"}
+        }
+        self.assertEqual(call_subjects, callable_subjects)
+        for key in callable_subjects:
+            with self.subTest(corpus=key[0], subject=key[1]):
+                owned = facts_by_subject[key]
+                order = [fact for fact in owned if fact.category == "call_order"]
+                self.assertEqual(len(order), 1)
+                calls = sorted(
+                    (fact for fact in owned if fact.category == "call"),
+                    key=lambda fact: thaw_json(fact.value)["ordinal"],
+                )
+                self.assertEqual(
+                    [thaw_json(fact.value)["ordinal"] for fact in calls],
+                    list(range(len(calls))),
+                )
+                self.assertEqual(
+                    thaw_json(order[0].value)["targets"],
+                    [thaw_json(fact.value)["target"] for fact in calls],
+                )
+                declaration_line = next(
+                    fact.line for fact in owned if fact.category == "declaration"
+                )
+                self.assertEqual(order[0].line, declaration_line)
+                self.assertTrue(all(fact.line == declaration_line for fact in calls))
+
+    def test_every_policy_strong_candidate_has_a_decision_or_exact_exclusion(
+        self,
+    ) -> None:
+        category_exclusions = {
+            (exclusion.corpus, canonical_json(scope[2]))
+            for exclusion in self.exclusions
+            if isinstance((scope := parse_exclusion_scope(exclusion.scope)), list)
+            and scope[0] == "category"
+            and scope[1] == "strong_x0"
+        }
+        by_subject: dict[tuple[str, str], dict[str, GoldFact]] = {}
+        strong_counts: Counter[tuple[str, str]] = Counter()
+        for fact in self.facts:
+            by_subject.setdefault((fact.corpus, fact.subject), {})[fact.category] = fact
+            if fact.category == "strong_x0":
+                strong_counts[(fact.corpus, fact.subject)] += 1
+
+        self.assertTrue(all(count == 1 for count in strong_counts.values()))
+
+        for key, categories in by_subject.items():
+            kind = thaw_json(categories["kind"].value)["kind"]
+            visibility = thaw_json(categories["visibility"].value)["visibility"]
+            declaration = categories["declaration"]
+            eligible = (
+                source_role(declaration.path) == "production"
+                and visibility
+                not in {Visibility.PUBLIC.value, Visibility.PROTECTED.value}
+                and kind != SymbolKind.REEXPORT.value
+            )
+            if eligible:
+                with self.subTest(corpus=key[0], subject=key[1]):
+                    self.assertTrue(
+                        "strong_x0" in categories
+                        or (key[0], canonical_json(parse_symbol_id(key[1])))
+                        in category_exclusions
+                    )
+            else:
+                self.assertNotIn("strong_x0", categories)
+
+    def test_scoring_exclusions_do_not_overlap_explicit_facts(self) -> None:
+        fact_keys = {
+            (
+                fact.corpus,
+                fact.path,
+                fact.category,
+                fact.subject,
+                canonical_json(fact.value),
+            )
+            for fact in self.facts
+        }
+        category_keys = {
+            (fact.corpus, fact.path, fact.category, fact.subject) for fact in self.facts
+        }
+        for exclusion in self.exclusions:
+            scope = parse_exclusion_scope(exclusion.scope)
+            if not isinstance(scope, list):
+                continue
+            if scope[0] == "fact":
+                fact_key = (
+                    exclusion.corpus,
+                    exclusion.path,
+                    scope[1],
+                    json.dumps(scope[2], ensure_ascii=False, separators=(",", ":")),
+                    canonical_json(scope[3]),
+                )
+                self.assertNotIn(fact_key, fact_keys)
+            elif scope[0] == "category":
+                category_key = (
+                    exclusion.corpus,
+                    exclusion.path,
+                    scope[1],
+                    json.dumps(scope[2], ensure_ascii=False, separators=(",", ":")),
+                )
+                self.assertNotIn(category_key, category_keys)
+
+    def test_exact_ordinary_yaml_exclusions_and_outside_extensions(self) -> None:
+        ordinary = {
+            (item.corpus, item.path, item.line, item.scope, item.reason)
+            for item in self.exclusions
+            if item.reason == "ordinary_yaml_not_helm"
+        }
+        self.assertEqual(
+            ordinary,
+            {
+                ("cypress", "codecov.yml", None, "file", "ordinary_yaml_not_helm"),
+                (
+                    "kafka-streams-examples",
+                    "docker-compose.yml",
+                    None,
+                    "file",
+                    "ordinary_yaml_not_helm",
+                ),
+                (
+                    "kafka-streams-examples",
+                    "service.yml",
+                    None,
+                    "file",
+                    "ordinary_yaml_not_helm",
+                ),
+            },
+        )
+        outside = set(self.registry.outside_candidate_extensions)
+        self.assertFalse(
+            any(Path(row.path).suffix in outside for row in self.census)
+            or any(Path(row.path).suffix in outside for row in self.sample)
+        )
+
+    def test_pinned_source_anchors_when_checkouts_are_available(self) -> None:
+        configured = {spec.name: spec for spec in self.registry.corpora}
+        present = {
+            spec.name: os.environ.get(spec.path_env)
+            for spec in self.registry.corpora
+            if os.environ.get(spec.path_env)
+        }
+        if not present:
+            self.skipTest(
+                "set all HOLOGRAM_VALIDATION_* paths to verify source anchors"
+            )
+        self.assertEqual(set(present), set(configured))
+        roots = {
+            name: resolve_checkout(configured[name], os.environ) for name in configured
+        }
+        for name, root in roots.items():
+            verify_checkout(configured[name], root)
+
+        lines_by_file: dict[tuple[str, str], list[str]] = {}
+        for fact in self.facts:
+            key = (fact.corpus, fact.path)
+            lines = lines_by_file.setdefault(
+                key,
+                (roots[fact.corpus] / fact.path)
+                .read_text(encoding="utf-8")
+                .splitlines(),
+            )
+            self.assertLessEqual(fact.line, len(lines))
+            subject = parse_symbol_id(fact.subject)
+            path_module = Path(fact.path).with_suffix("").as_posix()
+            python_module = path_module.replace("/", ".").removesuffix(".__init__")
+            implicit_module = subject[3] == SymbolKind.MODULE.value and (
+                (fact.language == Language.PYTHON.value and subject[4] == python_module)
+                or (
+                    fact.language
+                    in {
+                        Language.TYPESCRIPT.value,
+                        Language.JAVASCRIPT.value,
+                        Language.TSX.value,
+                    }
+                    and subject[4] == path_module
+                )
+            )
+            if not implicit_module:
+                self.assertIn(subject[4], lines[fact.line - 1])
+
+        for exclusion in self.exclusions:
+            if exclusion.line is None:
+                continue
+            key = (exclusion.corpus, exclusion.path)
+            lines = lines_by_file.setdefault(
+                key,
+                (roots[exclusion.corpus] / exclusion.path)
+                .read_text(encoding="utf-8")
+                .splitlines(),
+            )
+            self.assertLessEqual(exclusion.line, len(lines))
 
 
 class FreezeWriteSafetyTest(unittest.TestCase):
