@@ -5,6 +5,7 @@ import dataclasses
 import inspect
 import io
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from hologram.cli import (
     BuildArtifact,
     command_build,
     command_check,
+    command_init,
     create_artifact,
 )
 from hologram.config import (
@@ -37,6 +39,7 @@ from hologram.context import (
     CONTEXT_START,
     LEGACY_END,
     LEGACY_START,
+    PlannedWrite,
     render_managed_block,
 )
 from hologram.model import Language
@@ -103,6 +106,15 @@ def _file_metadata(path: Path) -> tuple[int, int, int, bytes]:
     )
 
 
+def _git_init(root: Path) -> None:
+    root.mkdir()
+    subprocess.run(
+        ("git", "-C", os.fspath(root), "init", "--quiet"),
+        check=True,
+        capture_output=True,
+    )
+
+
 def _incomplete_error() -> IncompleteBuildError:
     empty = SimpleNamespace(diagnostics=())
     snapshot = cast(
@@ -145,9 +157,11 @@ class BuildCheckServiceTest(unittest.TestCase):
                 "BuildArtifact",
                 "command_build",
                 "command_check",
+                "command_init",
                 "create_artifact",
             ],
         )
+        self.assertIn("command_init", cli_module.__all__)
         self.assertEqual(
             tuple(inspect.signature(create_artifact).parameters),
             ("root", "config"),
@@ -159,6 +173,16 @@ class BuildCheckServiceTest(unittest.TestCase):
             )
             self.assertEqual(
                 signature.parameters["quiet"].kind,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        init_signature = inspect.signature(command_init)
+        self.assertEqual(
+            tuple(init_signature.parameters),
+            ("root", "config_path", "agents", "no_hook", "quiet"),
+        )
+        for name in ("agents", "no_hook", "quiet"):
+            self.assertEqual(
+                init_signature.parameters[name].kind,
                 inspect.Parameter.KEYWORD_ONLY,
             )
 
@@ -937,6 +961,433 @@ class BuildCheckServiceTest(unittest.TestCase):
         self.assertEqual(after.analyzed, before.analyzed)
         self.assertEqual(after.render_ir, before.render_ir)
         self.assertEqual(after.rendered, before.rendered)
+
+
+class InitTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name)
+
+    def test_detects_existing_regular_agent_files_in_fixed_order(self) -> None:
+        root = self.base / "detected"
+        root.mkdir()
+        (root / "GEMINI.md").write_bytes(b"gemini authored\n")
+        (root / "CLAUDE.md").write_bytes(b"claude authored\n")
+        config_path = root / CONFIG_NAME
+
+        with (
+            mock.patch.object(
+                cli_module,
+                "create_artifact",
+                side_effect=_artifact_factory,
+            ) as create,
+            mock.patch.object(
+                cli_module,
+                "preflight_precommit",
+                side_effect=AssertionError("--no-hook touched pre-commit"),
+            ),
+            mock.patch.object(
+                cli_module,
+                "remove_legacy_post_hook_lines",
+                side_effect=AssertionError("--no-hook touched legacy hooks"),
+            ),
+        ):
+            self.assertEqual(
+                command_init(
+                    root,
+                    config_path,
+                    agents=(),
+                    no_hook=True,
+                    quiet=True,
+                ),
+                EXIT_OK,
+            )
+
+        loaded = load_config(root, config_path)
+        expected = dataclasses.replace(
+            default_config(),
+            agents=("claude", "gemini"),
+        )
+        self.assertEqual(loaded, expected)
+        self.assertEqual(config_path.read_bytes(), canonical_config_bytes(expected))
+        create.assert_called_once()
+        self.assertEqual(create.call_args.args, (root.resolve(), expected))
+
+    def test_explicit_agents_are_fixed_order_and_invalid_selections_write_nothing(
+        self,
+    ) -> None:
+        root = self.base / "explicit"
+        root.mkdir()
+        config_path = root / CONFIG_NAME
+        with mock.patch.object(
+            cli_module,
+            "create_artifact",
+            side_effect=_artifact_factory,
+        ):
+            self.assertEqual(
+                command_init(
+                    root,
+                    config_path,
+                    agents=("gemini", "claude"),
+                    no_hook=True,
+                    quiet=True,
+                ),
+                EXIT_OK,
+            )
+        self.assertEqual(
+            load_config(root, config_path).agents,
+            ("claude", "gemini"),
+        )
+
+        for name, agents in (
+            ("none", ()),
+            ("duplicate", ("codex", "codex")),
+            ("unknown", ("copilot",)),
+        ):
+            with self.subTest(name=name):
+                candidate = self.base / name
+                candidate.mkdir()
+                selected = candidate / CONFIG_NAME
+                with (
+                    mock.patch.object(
+                        cli_module,
+                        "create_artifact",
+                        side_effect=AssertionError("invalid selection built artifact"),
+                    ) as create,
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(
+                        command_init(
+                            candidate,
+                            selected,
+                            agents=agents,
+                            no_hook=True,
+                            quiet=True,
+                        ),
+                        EXIT_USAGE,
+                    )
+                create.assert_not_called()
+                self.assertFalse(selected.exists())
+
+    def test_existing_config_is_preserved_and_explicit_agents_must_match(self) -> None:
+        root, config_path, config = _configured_root(
+            self.base,
+            "existing",
+            agents=("claude", "codex"),
+            output="PROJECT_DIGEST.md",
+        )
+        config_path.write_bytes(config_path.read_bytes() + b"# authored formatting\n")
+        before = _file_metadata(config_path)
+        with mock.patch.object(
+            cli_module,
+            "create_artifact",
+            side_effect=_artifact_factory,
+        ):
+            self.assertEqual(
+                command_init(
+                    root,
+                    config_path,
+                    agents=("codex", "claude"),
+                    no_hook=True,
+                    quiet=True,
+                ),
+                EXIT_OK,
+            )
+        self.assertEqual(_file_metadata(config_path), before)
+        self.assertEqual(load_config(root, config_path), config)
+
+        before_tree = _file_metadata(config_path)
+        with (
+            mock.patch.object(
+                cli_module,
+                "create_artifact",
+                side_effect=AssertionError("mismatched config built artifact"),
+            ) as create,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(
+                command_init(
+                    root,
+                    config_path,
+                    agents=("gemini",),
+                    no_hook=True,
+                    quiet=True,
+                ),
+                EXIT_USAGE,
+            )
+        create.assert_not_called()
+        self.assertEqual(_file_metadata(config_path), before_tree)
+
+    def test_incomplete_or_malformed_init_preflights_without_any_commit(self) -> None:
+        incomplete = self.base / "incomplete-init"
+        incomplete.mkdir()
+        incomplete_config = incomplete / CONFIG_NAME
+        with (
+            mock.patch.object(
+                cli_module,
+                "create_artifact",
+                side_effect=_incomplete_error(),
+            ),
+            mock.patch.object(
+                cli_module,
+                "commit_writes",
+                side_effect=AssertionError("incomplete init committed"),
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(
+                command_init(
+                    incomplete,
+                    incomplete_config,
+                    agents=("codex",),
+                    no_hook=True,
+                    quiet=True,
+                ),
+                EXIT_INCOMPLETE,
+            )
+        self.assertFalse(incomplete_config.exists())
+        self.assertFalse((incomplete / "AGENTS.md").exists())
+
+        malformed = self.base / "malformed-init"
+        malformed.mkdir()
+        malformed_config = malformed / CONFIG_NAME
+        context = malformed / "CLAUDE.md"
+        context.write_bytes(CONTEXT_START + b"\n")
+        before = _file_metadata(context)
+        with (
+            mock.patch.object(
+                cli_module,
+                "create_artifact",
+                side_effect=_artifact_factory,
+            ),
+            mock.patch.object(
+                cli_module,
+                "commit_writes",
+                side_effect=AssertionError("malformed init committed"),
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(
+                command_init(
+                    malformed,
+                    malformed_config,
+                    agents=("claude",),
+                    no_hook=True,
+                    quiet=True,
+                ),
+                EXIT_STALE,
+            )
+        self.assertFalse(malformed_config.exists())
+        self.assertEqual(_file_metadata(context), before)
+
+    def test_no_hook_calls_no_hook_or_git_api_and_repeat_is_metadata_stable(
+        self,
+    ) -> None:
+        root = self.base / "no-hook"
+        root.mkdir()
+        config_path = root / CONFIG_NAME
+        with (
+            mock.patch.object(
+                cli_module,
+                "create_artifact",
+                side_effect=_artifact_factory,
+            ) as create,
+            mock.patch.object(
+                cli_module,
+                "render_precommit_command",
+                side_effect=AssertionError("--no-hook rendered hook"),
+            ),
+            mock.patch.object(
+                cli_module,
+                "preflight_precommit",
+                side_effect=AssertionError("--no-hook preflighted hook"),
+            ),
+            mock.patch.object(
+                cli_module,
+                "remove_legacy_post_hook_lines",
+                side_effect=AssertionError("--no-hook inspected hooks"),
+            ),
+        ):
+            self.assertEqual(
+                command_init(
+                    root,
+                    config_path,
+                    agents=("codex",),
+                    no_hook=True,
+                    quiet=True,
+                ),
+                EXIT_OK,
+            )
+            targets = (
+                config_path,
+                root / "AGENTS.md",
+                root / "PROJECT_DIGEST.md",
+            )
+            before = {path: _file_metadata(path) for path in targets}
+            self.assertEqual(
+                command_init(
+                    root,
+                    config_path,
+                    agents=("codex",),
+                    no_hook=True,
+                    quiet=True,
+                ),
+                EXIT_OK,
+            )
+        self.assertEqual({path: _file_metadata(path) for path in targets}, before)
+        self.assertEqual(create.call_count, 2)
+
+    def test_hook_init_preflights_everything_then_commits_root_before_hooks(
+        self,
+    ) -> None:
+        root = self.base / "hooked"
+        _git_init(root)
+        config_path = root / CONFIG_NAME
+        events: list[str] = []
+        real_artifact_preflight = cli_module._preflight_artifact_writes
+        real_precommit = cli_module.preflight_precommit
+        real_cleanup = cli_module.remove_legacy_post_hook_lines
+        real_commit = cli_module.commit_writes
+
+        def artifact_preflight(*args: object, **kwargs: object) -> object:
+            events.append("artifact-preflight")
+            return real_artifact_preflight(*args, **kwargs)  # type: ignore[arg-type]
+
+        def precommit(*args: object, **kwargs: object) -> object:
+            events.append("precommit-preflight")
+            return real_precommit(*args, **kwargs)  # type: ignore[arg-type]
+
+        def cleanup(*args: object, **kwargs: object) -> object:
+            events.append("cleanup-preflight")
+            return real_cleanup(*args, **kwargs)  # type: ignore[arg-type]
+
+        committed: list[tuple[Path, ...]] = []
+
+        def commit(plans: object) -> tuple[Path, ...]:
+            events.append("commit")
+            owned: tuple[PlannedWrite, ...] = tuple(plans)  # type: ignore[arg-type]
+            committed.append(tuple(plan.path for plan in owned))
+            return real_commit(owned)
+
+        with (
+            mock.patch.object(
+                cli_module,
+                "create_artifact",
+                side_effect=_artifact_factory,
+            ) as create,
+            mock.patch.object(
+                cli_module,
+                "_preflight_artifact_writes",
+                side_effect=artifact_preflight,
+            ),
+            mock.patch.object(
+                cli_module,
+                "preflight_precommit",
+                side_effect=precommit,
+            ),
+            mock.patch.object(
+                cli_module,
+                "remove_legacy_post_hook_lines",
+                side_effect=cleanup,
+            ),
+            mock.patch.object(cli_module, "commit_writes", side_effect=commit),
+        ):
+            self.assertEqual(
+                command_init(
+                    root,
+                    config_path,
+                    agents=("codex",),
+                    no_hook=False,
+                    quiet=True,
+                ),
+                EXIT_OK,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "artifact-preflight",
+                "precommit-preflight",
+                "cleanup-preflight",
+                "commit",
+                "commit",
+            ],
+        )
+        self.assertEqual(len(committed), 2)
+        self.assertTrue(all("hooks" not in path.parts for path in committed[0]))
+        self.assertTrue(all("hooks" in path.parts for path in committed[1]))
+        self.assertEqual(create.call_count, 1)
+        hook = root / ".git" / "hooks" / "pre-commit"
+        self.assertTrue(hook.exists())
+        self.assertIn(b" check ", hook.read_bytes())
+        self.assertNotIn(b" build ", hook.read_bytes())
+
+    def test_external_config_requires_no_hook(self) -> None:
+        root = self.base / "external-init"
+        root.mkdir()
+        external = self.base / "external-init.toml"
+        config = dataclasses.replace(default_config(), agents=("codex",))
+        external.write_bytes(canonical_config_bytes(config))
+
+        with (
+            mock.patch.object(
+                cli_module,
+                "create_artifact",
+                side_effect=_artifact_factory,
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(
+                command_init(
+                    root,
+                    external,
+                    agents=(),
+                    no_hook=False,
+                    quiet=True,
+                ),
+                EXIT_USAGE,
+            )
+            self.assertEqual(
+                command_init(
+                    root,
+                    external,
+                    agents=(),
+                    no_hook=True,
+                    quiet=True,
+                ),
+                EXIT_OK,
+            )
+        self.assertEqual(external.read_bytes(), canonical_config_bytes(config))
+
+    def test_external_hook_requirement_precedes_artifact_creation(self) -> None:
+        root = self.base / "external-precedence"
+        root.mkdir()
+        external = self.base / "external-precedence.toml"
+        config = dataclasses.replace(default_config(), agents=("codex",))
+        external.write_bytes(canonical_config_bytes(config))
+
+        with (
+            mock.patch.object(
+                cli_module,
+                "create_artifact",
+                side_effect=AssertionError(
+                    "external hook configuration built artifact"
+                ),
+            ) as create,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(
+                command_init(
+                    root,
+                    external,
+                    agents=(),
+                    no_hook=False,
+                    quiet=True,
+                ),
+                EXIT_USAGE,
+            )
+        create.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import dataclasses
 import os
 import stat
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import pipeline
 from .analysis import AnalyzedProject, analyze_project
-from .config import ConfigError, ProjectConfig, load_config
+from .config import (
+    ALLOWED_AGENTS,
+    ConfigError,
+    ProjectConfig,
+    canonical_config_bytes,
+    default_config,
+    load_config,
+)
 from .context import (
     AGENT_PATHS,
     AtomicWriteError,
@@ -22,6 +31,12 @@ from .context import (
     preflight_context_writes,
     read_target_bytes,
     render_managed_block,
+)
+from .hooks import (
+    UnsupportedHookError,
+    preflight_precommit,
+    remove_legacy_post_hook_lines,
+    render_precommit_command,
 )
 from .pipeline import BuildSnapshot, IncompleteBuildError
 from .render import RenderIR, project_render_ir, render_project
@@ -248,6 +263,114 @@ def _validate_quiet(quiet: object) -> bool:
     return quiet
 
 
+def _validate_boolean(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise _DeliveryUsageError(f"{name} must be bool")
+    return value
+
+
+def _normalize_init_agents(agents: object) -> tuple[str, ...]:
+    if isinstance(agents, (str, bytes)) or not isinstance(agents, Sequence):
+        raise _DeliveryUsageError("agents must be a sequence of agent names")
+    selected: list[str] = []
+    for agent in agents:
+        if not isinstance(agent, str):
+            raise _DeliveryUsageError("agents must contain only strings")
+        if agent not in ALLOWED_AGENTS:
+            raise _DeliveryUsageError(f"unknown agent: {agent}")
+        if agent in selected:
+            raise _DeliveryUsageError(f"duplicate agent: {agent}")
+        selected.append(agent)
+    chosen = frozenset(selected)
+    return tuple(agent for agent in AGENT_PATHS if agent in chosen)
+
+
+def _init_config(
+    root: Path,
+    selected: Path,
+    explicit_agents: tuple[str, ...],
+) -> tuple[ProjectConfig, bytes | None]:
+    metadata = _safe_lstat(selected)
+    if metadata is not None:
+        _require_regular_config(selected)
+        config = load_config(root, selected)
+        if explicit_agents and _normalize_init_agents(config.agents) != explicit_agents:
+            raise _DeliveryUsageError(
+                "explicit agents do not match the existing configuration"
+            )
+        return config, None
+
+    detected = tuple(
+        agent
+        for agent, relative in AGENT_PATHS.items()
+        if (
+            (agent_metadata := _safe_lstat(root / relative)) is not None
+            and stat.S_ISREG(agent_metadata.st_mode)
+        )
+    )
+    selected_agents = explicit_agents or detected
+    if not selected_agents:
+        raise _DeliveryUsageError(
+            "no agent context files detected; select at least one agent"
+        )
+    config = dataclasses.replace(default_config(), agents=selected_agents)
+    return config, canonical_config_bytes(config)
+
+
+def _run_init(
+    root: object,
+    config_path: object,
+    *,
+    agents: object,
+    no_hook: object,
+) -> tuple[Path, ...]:
+    skip_hook = _validate_boolean(no_hook, "no_hook")
+    explicit_agents = _normalize_init_agents(agents)
+    resolved = _resolved_root(root)
+    selected = _selected_config(resolved, config_path)
+    config, config_content = _init_config(resolved, selected, explicit_agents)
+    _reject_config_collision(resolved, selected, config)
+    command: bytes | None = None
+    if not skip_hook:
+        command = render_precommit_command(
+            root=resolved,
+            config_path=selected,
+            python=Path(sys.executable),
+        )
+
+    artifact = create_artifact(resolved, config)
+    root_plans = list(_preflight_artifact_writes(resolved, artifact))
+    if config_content is not None:
+        try:
+            selected.relative_to(resolved)
+        except ValueError:
+            config_root = None
+        else:
+            config_root = resolved
+        root_plans.append(
+            preflight_atomic_write(
+                selected,
+                config_content,
+                root=config_root,
+            )
+        )
+    planned_root = merge_planned_writes(root_plans)
+
+    planned_hooks: tuple[PlannedWrite, ...] = ()
+    if command is not None:
+        planned_hooks = merge_planned_writes(
+            (
+                preflight_precommit(resolved, command),
+                *remove_legacy_post_hook_lines(resolved),
+            )
+        )
+
+    changed = list(commit_writes(planned_root))
+    if planned_hooks:
+        changed.extend(commit_writes(planned_hooks))
+    return tuple(changed)
+
+
 def _diagnose(error: BaseException) -> None:
     message = str(error) or error.__class__.__name__
     print(f"hologram: {message}", file=sys.stderr)
@@ -296,6 +419,44 @@ def command_check(root: Path, config_path: Path, *, quiet: bool) -> int:
     return EXIT_OK
 
 
+def command_init(
+    root: Path,
+    config_path: Path,
+    *,
+    agents: Sequence[str],
+    no_hook: bool,
+    quiet: bool,
+) -> int:
+    """Initialize canonical delivery targets and an optional read-only hook."""
+
+    try:
+        silent = _validate_quiet(quiet)
+        changed = _run_init(
+            root,
+            config_path,
+            agents=agents,
+            no_hook=no_hook,
+        )
+    except ManagedBlockError as error:
+        _diagnose(error)
+        return EXIT_STALE
+    except (
+        ConfigError,
+        AtomicWriteError,
+        UnsupportedHookError,
+        _DeliveryUsageError,
+        OSError,
+    ) as error:
+        _diagnose(error)
+        return EXIT_USAGE
+    except (IncompleteBuildError, _ArtifactError) as error:
+        _diagnose(error)
+        return EXIT_INCOMPLETE
+    if not silent:
+        print(f"hologram: init complete ({len(changed)} target(s) updated)")
+    return EXIT_OK
+
+
 __all__ = [
     "EXIT_INCOMPLETE",
     "EXIT_OK",
@@ -304,5 +465,6 @@ __all__ = [
     "BuildArtifact",
     "command_build",
     "command_check",
+    "command_init",
     "create_artifact",
 ]
