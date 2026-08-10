@@ -150,7 +150,7 @@ def ast_text(node: object | None) -> str:
 _ast_text = ast_text
 
 
-def ast_field(node: object | None, name: str) -> object | None:
+def ast_field(node: object | None, name: str) -> Any | None:
     if node is None:
         return None
     field = getattr(node, "child_by_field_name", None)
@@ -160,13 +160,13 @@ def ast_field(node: object | None, name: str) -> object | None:
 _ast_field = ast_field
 
 
-def ast_collect(root: object | None, kinds: Iterable[str]) -> list[object]:
+def ast_collect(root: object | None, kinds: Iterable[str]) -> list[Any]:
     """Collect matching descendants in byte source order."""
     if root is None:
         return []
     selected = frozenset(kinds)
     stack = [root]
-    found: list[object] = []
+    found: list[Any] = []
     while stack:
         node = stack.pop()
         if getattr(node, "type", None) in selected:
@@ -459,6 +459,7 @@ _TYPE_KINDS = frozenset(
         "implicit_type",
         "integral_type",
         "nullable_type",
+        "nested_type_identifier",
         "placeholder_type_specifier",
         "predefined_type",
         "primitive_type",
@@ -1176,6 +1177,8 @@ def _body_parts(source: SourceFile, callable_node: object) -> tuple[object, ...]
     if not roots:
         roots.extend(_child_roots(callable_node, _BODY_KINDS))
     callable_kind = str(getattr(callable_node, "type", ""))
+    if callable_kind == "program":
+        return (callable_node,)
     extra_kinds = _ADDITIONAL_BODY_CHILD_KINDS.get(source.language, {}).get(
         callable_kind,
         frozenset(),
@@ -1516,13 +1519,24 @@ def _generic_argument_context_for_child(
 
 
 class _TreeSitterBodyEventWalker:
-    def __init__(self, source: SourceFile, callable_node: object) -> None:
+    def __init__(
+        self,
+        source: SourceFile,
+        callable_node: object,
+        *,
+        owned_boundaries: Iterable[object] = (),
+        include_anonymous: bool = False,
+    ) -> None:
         self.source = source
         self.callable_node = callable_node
         self.events: list[BodyEvent] = []
         self._events_seen: set[BodyEvent] = set()
         self.parameter_keys: frozenset[tuple[int, int, str]] = frozenset()
         self.local_keys: frozenset[tuple[int, int, str]] = frozenset()
+        self.owned_boundary_keys = frozenset(
+            _node_key(node) for node in owned_boundaries
+        )
+        self.include_anonymous = include_anonymous
 
     def event(self, kind: BodyEventKind, text: str, node: object) -> None:
         event = BodyEvent(kind, text, node_span(self.source, node))
@@ -1554,8 +1568,12 @@ class _TreeSitterBodyEventWalker:
         generic_argument_context: bool = False,
     ) -> None:
         kind = str(getattr(node, "type", ""))
-        boundary_kinds = _OWNED_BOUNDARIES_BY_LANGUAGE[self.source.language]
-        if not is_root and kind in boundary_kinds:
+        if not is_root and _owned_boundary(
+            self.source,
+            node,
+            self.owned_boundary_keys,
+            include_anonymous=self.include_anonymous,
+        ):
             return
 
         control = _CONTROL_KINDS_BY_LANGUAGE[self.source.language].get(kind)
@@ -1651,9 +1669,71 @@ class _TreeSitterBodyEventWalker:
             self.event(BodyEventKind.CONTROL_EXIT, control, node)
 
 
-def body_events(source: SourceFile, callable_node: object) -> tuple[BodyEvent, ...]:
+def _owned_boundary(
+    source: SourceFile,
+    node: object,
+    explicit: frozenset[tuple[int, int, str]],
+    *,
+    include_anonymous: bool,
+) -> bool:
+    key = _node_key(node)
+    if key in explicit:
+        return True
+    kind = key[2]
+    if kind not in _OWNED_BOUNDARIES_BY_LANGUAGE[source.language]:
+        return False
+    if not include_anonymous or source.language not in {
+        Language.TYPESCRIPT,
+        Language.JAVASCRIPT,
+        Language.TSX,
+        Language.VUE,
+        Language.SVELTE,
+    }:
+        return True
+    return kind not in _CALLABLE_KINDS_BY_LANGUAGE[source.language]
+
+
+def owned_nodes(
+    source: SourceFile,
+    callable_node: object,
+    *,
+    owned_boundaries: Iterable[object] = (),
+    include_anonymous: bool = False,
+) -> tuple[Any, ...]:
+    """Return parameter/body nodes owned by one named or module declaration."""
+    explicit = frozenset(_node_key(node) for node in owned_boundaries)
+    roots = (*_parameter_parts(source, callable_node), *_body_parts(source, callable_node))
+    found: list[Any] = []
+    stack = list(reversed(roots))
+    root_keys = frozenset(_node_key(root) for root in roots)
+    while stack:
+        node = stack.pop()
+        if _node_key(node) not in root_keys and _owned_boundary(
+            source,
+            node,
+            explicit,
+            include_anonymous=include_anonymous,
+        ):
+            continue
+        found.append(node)
+        stack.extend(reversed(tuple(getattr(node, "children", ()))))
+    return tuple(found)
+
+
+def body_events(
+    source: SourceFile,
+    callable_node: object,
+    *,
+    owned_boundaries: Iterable[object] = (),
+    include_anonymous: bool = False,
+) -> tuple[BodyEvent, ...]:
     """Emit facts from one Tree-sitter callable without entering nested callables."""
-    return _TreeSitterBodyEventWalker(source, callable_node).walk()
+    return _TreeSitterBodyEventWalker(
+        source,
+        callable_node,
+        owned_boundaries=owned_boundaries,
+        include_anonymous=include_anonymous,
+    ).walk()
 
 
 tree_sitter_body_events = body_events
@@ -1670,6 +1750,7 @@ __all__ = [
     "grammar_version",
     "load_parser",
     "node_span",
+    "owned_nodes",
     "parser_versions",
     "tree_sitter_body_events",
 ]

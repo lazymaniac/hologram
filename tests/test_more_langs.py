@@ -1,11 +1,15 @@
+import hashlib
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import hologram  # noqa: E402
-from hologram import extract_file  # noqa: E402
+import hologram
+from hologram import extract_file
+from hologram.model import SourceFile, SourceRole, SymbolKind, Visibility
+from hologram.parsers.api import extract_file as extract_canonical_file
+from hologram.scan import detect_language
 
 POLY = Path(__file__).resolve().parent / "fixtures" / "polyglot"
 
@@ -13,6 +17,23 @@ POLY = Path(__file__).resolve().parent / "fixtures" / "polyglot"
 def _needs(lang):
     return unittest.skipUnless(hologram.has_parser(lang),
                                f"tree-sitter grammar for {lang} not installed")
+
+
+def _canonical_file(path: Path, root: Path):
+    raw = path.read_bytes()
+    language = detect_language(path)
+    if language is None:
+        raise AssertionError(f"unknown fixture language: {path}")
+    return extract_canonical_file(
+        SourceFile(
+            path,
+            path.relative_to(root).as_posix(),
+            language,
+            SourceRole.PRODUCTION,
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+        )
+    )
 
 
 @_needs("go")
@@ -235,50 +256,58 @@ class KotlinExtractTest(unittest.TestCase):
 class TsGapsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.syms = extract_file(POLY / "barrel.ts", POLY)
+        cls.result = _canonical_file(POLY / "barrel.ts", POLY)
+        cls.syms = cls.result.symbols
 
     def test_type_aliases(self):
         uid = next(s for s in self.syms if s.name == "UserId")
-        self.assertEqual(uid.kind, "type")
-        self.assertEqual(uid.params, ["string"])
-        self.assertEqual(uid.visibility, "pub")
+        self.assertEqual(uid.kind, SymbolKind.TYPE)
+        self.assertEqual(uid.params, ("string",))
+        self.assertEqual(uid.visibility, Visibility.PUBLIC)
 
     def test_object_literal_api(self):
         api = next(s for s in self.syms if s.name == "api")
-        self.assertEqual(api.kind, "class")
+        self.assertEqual(api.kind, SymbolKind.CLASS)
         get = next(s for s in self.syms if s.name == "get")
         self.assertEqual(get.container, "api")
-        self.assertIn("fetchIt", get.calls)
+        self.assertIn(
+            "fetchIt",
+            {call.name for call in self.result.calls if call.caller == get.id},
+        )
         post = next(s for s in self.syms if s.name == "post")
         self.assertEqual(post.container, "api")
         self.assertEqual(post.returns, "string")
 
     def test_reexports(self):
-        reex = {s.name for s in self.syms if s.kind == "reexport"}
+        reex = {s.name for s in self.syms if s.kind is SymbolKind.REEXPORT}
         self.assertEqual(reex, {"OrderId", "PriceQuote"})
 
 
 @_needs("tsx")
 class TsxExtractTest(unittest.TestCase):
     def test_jsx_component_arrow_extracted(self):
-        syms = extract_file(POLY / "Button.tsx", POLY)
-        btn = next(s for s in syms if s.name == "Button")
-        self.assertEqual(btn.kind, "fn")
-        self.assertEqual(btn.visibility, "pub")
+        syms = _canonical_file(POLY / "Button.tsx", POLY).symbols
+        btn = next(
+            s
+            for s in syms
+            if s.name == "Button" and s.kind is SymbolKind.FUNCTION
+        )
+        self.assertEqual(btn.kind, SymbolKind.FUNCTION)
+        self.assertEqual(btn.visibility, Visibility.PUBLIC)
         self.assertIn("track", {s.name for s in syms})
 
 
 @_needs("vue")
 class SfcExtractTest(unittest.TestCase):
     def test_component_symbol_and_script_contents(self):
-        syms = extract_file(POLY / "Panel.vue", POLY)
+        syms = _canonical_file(POLY / "Panel.vue", POLY).symbols
         comp = next(s for s in syms if s.name == "Panel")
-        self.assertEqual(comp.kind, "class")
+        self.assertEqual(comp.kind, SymbolKind.CLASS)
         use = next(s for s in syms if s.name == "usePanel")
-        self.assertEqual(use.kind, "fn")
-        self.assertEqual(use.visibility, "pub")
+        self.assertEqual(use.kind, SymbolKind.FUNCTION)
+        self.assertEqual(use.visibility, Visibility.PUBLIC)
         self.assertEqual(use.returns, "string")
-        self.assertGreater(use.line, 1)   # offset into the SFC preserved
+        self.assertGreater(use.span.start_line, 1)   # offset into the SFC preserved
 
 
 if __name__ == "__main__":

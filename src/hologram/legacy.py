@@ -34,6 +34,7 @@ from .config import (
 )
 from .model import FileIR as CanonicalFileIR
 from .model import CallKind, Language, SourceFile, SymbolKind, Visibility
+from .parsers.api import DEFAULT_REGISTRY
 from .parsers.api import extract_file as extract_canonical_file
 from .state import compute_state, read_digest_state
 
@@ -180,8 +181,6 @@ _GRAMMAR_MODULES = {
 
 _PARSERS = {
     "java": _load_parser("tree_sitter_java"),
-    "typescript": _load_parser("tree_sitter_typescript", "language_typescript"),
-    "tsx": _load_parser("tree_sitter_typescript", "language_tsx"),
     "go": _load_parser("tree_sitter_go"),
     "rust": _load_parser("tree_sitter_rust"),
     "csharp": _load_parser("tree_sitter_c_sharp"),
@@ -191,13 +190,19 @@ _PARSERS = {
     "lua": _load_parser("tree_sitter_lua"),
     "html": _load_parser("tree_sitter_html"),
 }
-_PARSERS["javascript"] = _PARSERS["typescript"]
-_PARSERS["vue"] = _PARSERS["svelte"] = _PARSERS["typescript"]
 
 USING_TREESITTER = _PARSERS["java"] is not None  # kept for callers/tests
 
 
 def has_parser(lang: str) -> bool:
+    if lang in {
+        Language.JAVASCRIPT.value,
+        Language.SVELTE.value,
+        Language.TSX.value,
+        Language.TYPESCRIPT.value,
+        Language.VUE.value,
+    }:
+        return DEFAULT_REGISTRY.has_parser(Language(lang))
     return _PARSERS.get(lang) is not None
 
 
@@ -241,285 +246,6 @@ def _ast_calls(body, own_name: str, call_kinds, entry_fn) -> list[str]:
 
 def _body_lines(body) -> int:
     return body.end_point[0] - body.start_point[0] + 1 if body is not None else 0
-
-
-# ---------------------------------------------------------------------------
-# TypeScript / JavaScript extraction
-# ---------------------------------------------------------------------------
-
-_TS_TYPE_NODE_KINDS = {
-    "class_declaration": "class",
-    "abstract_class_declaration": "class",
-    "interface_declaration": "interface",
-    "enum_declaration": "enum",
-}
-
-
-def _ts_exported(n) -> bool:
-    return n.parent is not None and n.parent.type == "export_statement"
-
-
-def _ts_params(node) -> list[str]:
-    """Declared parameter types from a formal_parameters node; `?` when untyped."""
-    raw = _ast_text(node)
-    if raw.startswith("("):
-        raw = raw[1:-1]
-    types = []
-    for p in _split_top_commas(raw, "<([{", ">)]}"):
-        p = re.sub(r"^(private|public|protected|readonly)\s+", "", p.strip())
-        p = p.split("=")[0]
-        types.append(tight_type(p.split(":", 1)[1].strip()) if ":" in p else "?")
-    return types
-
-
-def _ts_return(node) -> str | None:
-    rt = _ast_field(node, "return_type")
-    return tight_type(_ast_text(rt).lstrip(":").strip()) if rt is not None else None
-
-
-def _ts_call_entry(n) -> tuple[str, str]:
-    if n.type == "new_expression":
-        entry = re.sub(r"<.*", "", _ast_text(_ast_field(n, "constructor")))
-        return entry, entry
-    fn = _ast_field(n, "function")
-    if fn is None:
-        return "", ""
-    if fn.type == "member_expression":
-        name = _ast_text(_ast_field(fn, "property"))
-        obj = _ast_field(fn, "object")
-        entry = (f"{_ast_text(obj)}.{name}"
-                 if obj is not None and obj.type == "identifier" else name)
-        return name, entry
-    if fn.type == "identifier":
-        name = _ast_text(fn)
-        return name, name
-    return "", ""
-
-
-def _ts_calls(body, own_name: str) -> list[str]:
-    return _ast_calls(body, own_name, ("call_expression", "new_expression"),
-                      _ts_call_entry)
-
-
-def _ts_param_bindings(params_node) -> dict[str, str]:
-    binds: dict[str, str] = {}
-    if params_node is None:
-        return binds
-    for p in params_node.children:
-        if p.type in ("required_parameter", "optional_parameter"):
-            pat, t = _ast_field(p, "pattern"), _ast_field(p, "type")
-            if pat is not None and pat.type == "identifier" and t is not None:
-                binds[_ast_text(pat)] = _base_type(_ast_text(t).lstrip(":").strip())
-    return binds
-
-
-def _ts_class_bindings(body) -> dict[str, str]:
-    """Typed fields, including constructor parameter properties (private x: T)."""
-    binds: dict[str, str] = {}
-    for c in (body.children if body is not None else ()):
-        if c.type == "public_field_definition":
-            n, t = _ast_field(c, "name"), _ast_field(c, "type")
-            if n is not None and t is not None:
-                binds[_ast_text(n)] = _base_type(_ast_text(t).lstrip(":").strip())
-        if c.type == "method_definition" and _ast_text(_ast_field(c, "name")) == "constructor":
-            for p in (_ast_field(c, "parameters") or c).children:
-                if p.type == "required_parameter" and any(
-                        ch.type == "accessibility_modifier" for ch in p.children):
-                    binds.update(_ts_param_bindings_one(p))
-    return binds
-
-
-def _ts_param_bindings_one(p) -> dict[str, str]:
-    pat, t = _ast_field(p, "pattern"), _ast_field(p, "type")
-    if pat is not None and pat.type == "identifier" and t is not None:
-        return {_ast_text(pat): _base_type(_ast_text(t).lstrip(":").strip())}
-    return {}
-
-
-def _ts_local_bindings(body) -> dict[str, str]:
-    binds: dict[str, str] = {}
-    if body is None:
-        return binds
-    for dec in _ast_collect(body, ("variable_declarator",)):
-        n, t, val = _ast_field(dec, "name"), _ast_field(dec, "type"), _ast_field(dec, "value")
-        if n is None or n.type != "identifier":
-            continue
-        if t is not None:
-            binds[_ast_text(n)] = _base_type(_ast_text(t).lstrip(":").strip())
-        elif val is not None and val.type == "new_expression":
-            binds[_ast_text(n)] = _base_type(_ast_text(_ast_field(val, "constructor")))
-    return binds
-
-
-def _ts_fn_symbol(node, rel: str, container: str | None, visibility: str,
-                  class_binds: dict[str, str] | None = None,
-                  name: str | None = None, fn_node=None) -> Symbol:
-    """Function/method Symbol. `fn_node` carries params/body when the name lives on a
-    different node (arrow assigned to a const or a class field)."""
-    fn = fn_node if fn_node is not None else node
-    name = name if name is not None else _ast_text(_ast_field(node, "name"))
-    params = _ts_params(_ast_field(fn, "parameters"))
-    returns = _ts_return(fn)
-    body = _ast_field(fn, "body")
-    ret_suffix = f":{returns}" if returns and returns != "void" else ""
-    return Symbol(
-        name=name, kind="method" if container else "fn", file=rel,
-        line=node.start_point[0] + 1,
-        signature=f"{name}({','.join(params)}){ret_suffix}",
-        params=params, returns=returns,
-        visibility=visibility, container=container, lang="typescript",
-        calls=_ts_calls(body, name), size=_body_lines(body),
-        bindings={**(class_binds or {}),
-                  **_ts_param_bindings(_ast_field(fn, "parameters")),
-                  **_ts_local_bindings(body)},
-    )
-
-
-_TS_FN_VALUES = ("arrow_function", "function_expression")
-
-
-def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
-    """Module-scope `const f = (…) => …` plus object-literal APIs
-    (`export const api = { get(){}, … }`). Nested closures are deliberately
-    excluded — only declarations at program/export level count."""
-    symbols = []
-    for top in root_node.children:
-        exported = top.type == "export_statement"
-        decls = top.children if exported else [top]
-        for decl in decls:
-            if decl.type not in ("lexical_declaration", "variable_declaration"):
-                continue
-            for d in decl.children:
-                if d.type != "variable_declarator":
-                    continue
-                name = _ast_text(_ast_field(d, "name"))
-                val = _ast_field(d, "value")
-                if val is None:
-                    continue
-                if val.type in _TS_FN_VALUES:
-                    symbols.append(_ts_fn_symbol(
-                        d, rel, None, "pub" if exported else "priv",
-                        name=name, fn_node=val))
-                elif val.type == "object":
-                    fns = []
-                    for c in val.children:
-                        if c.type == "method_definition":
-                            fns.append((_ast_text(_ast_field(c, "name")), c, c))
-                        elif c.type == "pair":
-                            v = _ast_field(c, "value")
-                            if v is not None and v.type in _TS_FN_VALUES:
-                                fns.append((_ast_text(_ast_field(c, "key")), c, v))
-                    if not fns:
-                        continue  # plain config object, not an API
-                    symbols.append(Symbol(
-                        name=name, kind="class", file=rel, line=d.start_point[0] + 1,
-                        signature=f"const {name}",
-                        visibility="pub" if exported else "priv", lang="typescript"))
-                    for mname, node, fn_node in fns:
-                        symbols.append(_ts_fn_symbol(
-                            node, rel, name, "pub", name=mname, fn_node=fn_node))
-    return symbols
-
-
-def _ts_aliases_and_reexports(root_node, rel: str) -> list[Symbol]:
-    symbols = []
-    for al in _ast_collect(root_node, ("type_alias_declaration",)):
-        target = tight_type(_ast_text(_ast_field(al, "value")))[:40]
-        symbols.append(Symbol(
-            name=_ast_text(_ast_field(al, "name")), kind="type", file=rel,
-            line=al.start_point[0] + 1,
-            signature=f"type {_ast_text(_ast_field(al, 'name'))}",
-            params=[target] if target else [],
-            visibility="pub" if _ts_exported(al) else "priv", lang="typescript"))
-    for ex in root_node.children:
-        if ex.type != "export_statement" or _ast_field(ex, "source") is None:
-            continue  # only `export … from './x'` barrels
-        for spec in _ast_collect(ex, ("export_specifier",)):
-            nm = _ast_field(spec, "alias") or _ast_field(spec, "name")
-            if nm is not None:
-                symbols.append(Symbol(
-                    name=_ast_text(nm), kind="reexport", file=rel,
-                    line=ex.start_point[0] + 1, signature=_ast_text(nm),
-                    visibility="pub", lang="typescript"))
-    return symbols
-
-
-def _extract_ts(text: str, rel: str, lang: str = "typescript") -> list[Symbol]:
-    tree = _PARSERS[lang].parse(text.encode())
-    symbols: list[Symbol] = []
-    for tn in _ast_collect(tree.root_node, _TS_TYPE_NODE_KINDS):
-        kind = _TS_TYPE_NODE_KINDS[tn.type]
-        name = _ast_text(_ast_field(tn, "name"))
-        body = _ast_field(tn, "body")
-        header_end = body.start_byte if body is not None else tn.end_byte
-        header = text.encode()[tn.start_byte:header_end].decode(errors="replace")
-        supers, _ = _heritage(header)
-        params: list[str] = []
-        if kind == "enum" and body is not None:
-            params = [_ast_text(_ast_field(c, "name") or c)
-                      for c in body.children
-                      if c.type in ("enum_assignment", "property_identifier")]
-        symbols.append(Symbol(
-            name=name, kind=kind, file=rel, line=tn.start_point[0] + 1,
-            signature=f"{kind} {name}", params=params, supers=supers,
-            visibility="pub" if _ts_exported(tn) else "priv", lang="typescript",
-        ))
-        if kind == "class" and body is not None:
-            class_binds = _ts_class_bindings(body)
-            for c in body.children:
-                if c.type == "public_field_definition":
-                    val = _ast_field(c, "value")
-                    if val is not None and val.type in _TS_FN_VALUES:
-                        vis = "priv" if any(ch.type == "accessibility_modifier"
-                                            and _ast_text(ch) == "private"
-                                            for ch in c.children) else "pub"
-                        symbols.append(_ts_fn_symbol(
-                            c, rel, name, vis, class_binds,
-                            name=_ast_text(_ast_field(c, "name")), fn_node=val))
-                    continue
-                if c.type != "method_definition":
-                    continue
-                mname = _ast_text(_ast_field(c, "name"))
-                if mname == "constructor":
-                    symbols.append(Symbol(
-                        name=name, kind="ctor", file=rel, line=c.start_point[0] + 1,
-                        signature=f"{name}({','.join(_ts_params(_ast_field(c, 'parameters')))})",
-                        params=_ts_params(_ast_field(c, "parameters")), returns=name,
-                        container=name, lang="typescript",
-                    ))
-                    continue
-                vis = "priv" if any(ch.type == "accessibility_modifier"
-                                    and _ast_text(ch) == "private"
-                                    for ch in c.children) else "pub"
-                symbols.append(_ts_fn_symbol(c, rel, name, vis, class_binds))
-    for fn in _ast_collect(tree.root_node, ("function_declaration",)):
-        symbols.append(_ts_fn_symbol(
-            fn, rel, None, "pub" if _ts_exported(fn) else "priv"))
-    symbols.extend(_ts_top_level_arrows(tree.root_node, rel))
-    symbols.extend(_ts_aliases_and_reexports(tree.root_node, rel))
-    return symbols
-
-
-def _extract_tsx(text: str, rel: str) -> list[Symbol]:
-    return _extract_ts(text, rel, "tsx")
-
-
-_SFC_SCRIPT_RE = re.compile(r"<script[^>]*>(.*?)</script>", re.S | re.I)
-
-
-def _extract_sfc(text: str, rel: str) -> list[Symbol]:
-    """Vue/Svelte single-file components: the component itself plus everything the
-    TS extractor finds inside its <script> blocks (line numbers preserved)."""
-    stem = Path(rel).stem
-    symbols = [Symbol(name=stem, kind="class", file=rel, line=1,
-                      signature=f"component {stem}", visibility="pub",
-                      lang=Path(rel).suffix.lstrip("."))]
-    for m in _SFC_SCRIPT_RE.finditer(text):
-        offset = text.count("\n", 0, m.start(1))
-        for s in _extract_ts(m.group(1), rel):
-            s.line += offset
-            symbols.append(s)
-    return symbols
 
 
 # ---------------------------------------------------------------------------
@@ -1419,11 +1145,6 @@ def _extract_html(text: str, rel: str) -> list[Symbol]:
 
 
 EXTRACTORS = {
-    "typescript": _extract_ts,
-    "javascript": _extract_ts,
-    "tsx": _extract_tsx,
-    "vue": _extract_sfc,
-    "svelte": _extract_sfc,
     "kotlin": _extract_kotlin,
     "go": _extract_go,
     "rust": _extract_rust,
@@ -1457,12 +1178,39 @@ _LEGACY_CALLABLE_KINDS = frozenset(
         SymbolKind.PROPERTY,
     }
 )
+_LEGACY_TYPESCRIPT_LANGUAGES = frozenset(
+    {
+        Language.JAVASCRIPT,
+        Language.SVELTE,
+        Language.TSX,
+        Language.TYPESCRIPT,
+        Language.VUE,
+    }
+)
 
 
 def _legacy_call_name(call) -> str:
     if call.receiver in {None, "cls", "self"}:
         return call.name
     return f"{call.receiver}.{call.name}"
+
+
+def _legacy_typescript_call_name(call) -> str | None:
+    if call.kind is CallKind.CONSTRUCT:
+        return re.sub(r"<.*", "", call.name)
+    if not re.fullmatch(r"(?:[^\W\d]|\$)[\w$]*", call.name, re.UNICODE):
+        return None
+    if (
+        call.receiver is not None
+        and call.receiver != "this"
+        and re.fullmatch(
+            r"(?:[^\W\d]|\$)[\w$]*",
+            call.receiver,
+            re.UNICODE,
+        )
+    ):
+        return f"{call.receiver}.{call.name}"
+    return call.name
 
 
 def _legacy_span_bytes(file_ir: CanonicalFileIR, span) -> bytes:
@@ -1567,11 +1315,12 @@ def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
         owned = [call for call in file_ir.calls if call.caller == symbol.id]
     result: list[str] = []
     for call in owned:
-        name = (
-            _legacy_java_call_name(file_ir, call)
-            if file_ir.source.language is Language.JAVA
-            else _legacy_call_name(call)
-        )
+        if file_ir.source.language is Language.JAVA:
+            name = _legacy_java_call_name(file_ir, call)
+        elif file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES:
+            name = _legacy_typescript_call_name(call)
+        else:
+            name = _legacy_call_name(call)
         if name is None:
             continue
         if name == symbol.name or name in result:
@@ -1580,11 +1329,88 @@ def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
     return result[:12]
 
 
+def _legacy_typescript_lang(file_ir: CanonicalFileIR, symbol) -> str:
+    language = file_ir.source.language
+    if language in {Language.VUE, Language.SVELTE} and symbol.signature.startswith(
+        "component "
+    ):
+        return language.value
+    return Language.TYPESCRIPT.value
+
+
+def _legacy_typescript_bindings(file_ir: CanonicalFileIR, symbol) -> dict[str, str]:
+    if symbol.kind not in _LEGACY_CALLABLE_KINDS:
+        return {binding.name: binding.type_name for binding in symbol.bindings}
+    if symbol.kind is SymbolKind.CONSTRUCTOR:
+        return {}
+    body = next((body for body in file_ir.bodies if body.owner == symbol.id), None)
+    parameter_names = (
+        {
+            event.text
+            for event in body.events
+            if event.kind.value == "param"
+        }
+        if body is not None
+        else set()
+    )
+    declaration = _legacy_span_bytes(file_ir, symbol.span).decode(
+        "utf-8",
+        errors="replace",
+    )
+    simple_parameters = {
+        name
+        for name in parameter_names
+        if re.search(
+            rf"(?:^|[(,])\s*(?:(?:private|protected|public|readonly)\s+)*"
+            rf"{re.escape(name)}\??\s*:",
+            declaration,
+        )
+    }
+    explicit_class_bindings = {
+        candidate.name
+        for candidate in file_ir.symbols
+        if candidate.id.container_path == symbol.id.container_path
+        and candidate.kind in {SymbolKind.FIELD, SymbolKind.PROPERTY}
+        and candidate.returns is not None
+    }
+    class_binding_names = {
+        candidate.name
+        for candidate in file_ir.symbols
+        if candidate.id.container_path == symbol.id.container_path
+        and candidate.kind in {SymbolKind.FIELD, SymbolKind.PROPERTY}
+    }
+    result: dict[str, str] = {}
+    for binding in symbol.bindings:
+        if binding.name in parameter_names:
+            if binding.name in simple_parameters:
+                result[binding.name] = binding.type_name
+            continue
+        if binding.name in class_binding_names:
+            if binding.name in explicit_class_bindings:
+                result[binding.name] = binding.type_name
+            continue
+        result[binding.name] = binding.type_name
+    return result
+
+
 def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
     projected: list[Symbol] = []
+    interface_paths = {
+        (*symbol.id.container_path, symbol.name)
+        for symbol in file_ir.symbols
+        if symbol.kind is SymbolKind.INTERFACE
+    }
     for symbol in file_ir.symbols:
         if symbol.kind not in _LEGACY_CANONICAL_KINDS:
             continue
+        if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES:
+            if symbol.kind is SymbolKind.PROPERTY:
+                continue
+            if (
+                symbol.kind is SymbolKind.METHOD
+                and symbol.id.container_path in interface_paths
+            ):
+                continue
         if file_ir.source.language is Language.PYTHON:
             if symbol.kind in {
                 SymbolKind.CLASS,
@@ -1633,15 +1459,29 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                     }
                     else symbol.container
                 ),
-                lang=symbol.lang.value,
+                lang=(
+                    _legacy_typescript_lang(file_ir, symbol)
+                    if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES
+                    else symbol.lang.value
+                ),
                 calls=_legacy_calls(file_ir, symbol),
                 supers=list(symbol.supers),
                 permits=list(symbol.permits),
                 raises=list(symbol.raises),
-                bindings={
-                    binding.name: binding.type_name for binding in symbol.bindings
-                },
-                size=symbol.body_lines,
+                bindings=(
+                    _legacy_typescript_bindings(file_ir, symbol)
+                    if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES
+                    else {
+                        binding.name: binding.type_name
+                        for binding in symbol.bindings
+                    }
+                ),
+                size=(
+                    0
+                    if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES
+                    and symbol.kind is SymbolKind.CONSTRUCTOR
+                    else symbol.body_lines
+                ),
             )
         )
     return projected
@@ -1663,7 +1503,12 @@ def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol
     if lang in {
         Language.HELM.value,
         Language.JAVA.value,
+        Language.JAVASCRIPT.value,
         Language.PYTHON.value,
+        Language.SVELTE.value,
+        Language.TSX.value,
+        Language.TYPESCRIPT.value,
+        Language.VUE.value,
     }:
         raw = text.encode("utf-8")
         source = SourceFile(
