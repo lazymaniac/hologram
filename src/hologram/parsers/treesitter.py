@@ -80,8 +80,10 @@ def _optional_module(
 ) -> object | None:
     try:
         return loader(name)
-    except ImportError:
-        return None
+    except ModuleNotFoundError as error:
+        if error.name == name:
+            return None
+        raise
 
 
 def load_parser(
@@ -535,9 +537,15 @@ _BODY_KINDS = frozenset(
 _ADDITIONAL_BODY_CHILD_KINDS: Mapping[Language, Mapping[str, frozenset[str]]] = (
     MappingProxyType(
         {
+            Language.CPP: MappingProxyType(
+                {"function_definition": frozenset({"field_initializer_list"})}
+            ),
+            Language.CSHARP: MappingProxyType(
+                {"constructor_declaration": frozenset({"constructor_initializer"})}
+            ),
             Language.KOTLIN: MappingProxyType(
                 {"secondary_constructor": frozenset({"constructor_delegation_call"})}
-            )
+            ),
         }
     )
 )

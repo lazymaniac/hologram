@@ -4,7 +4,9 @@ import dataclasses
 import importlib
 import sys
 from collections.abc import Callable, Iterable, Mapping
+from itertools import pairwise
 from pathlib import Path
+from threading import RLock
 from types import MappingProxyType
 from typing import Protocol
 
@@ -60,8 +62,10 @@ def _optional_module(
 ) -> object | None:
     try:
         return loader(name)
-    except ImportError:
-        return None
+    except ModuleNotFoundError as error:
+        if error.name == name:
+            return None
+        raise
 
 
 def _extractors(
@@ -76,6 +80,20 @@ def _extractors(
     return extractor if callable(extractor) else None
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ParserState:
+    available: bool
+    parser: object | None
+    error: Exception | None
+    version: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ExtractorState:
+    extractor: Extractor | None
+    error: Exception | None
+
+
 class ParserRegistry:
     def __init__(
         self,
@@ -85,34 +103,43 @@ class ParserRegistry:
         self._module_loader = (
             importlib.import_module if module_loader is None else module_loader
         )
-        self._parser_cache: dict[Language, object | None] = {}
-        self._parser_errors: dict[Language, Exception] = {}
-        self._version_cache: dict[Language, str] = {}
-        self._extractor_cache: dict[Language, Extractor | None] = {}
-        self._extractor_errors: dict[Language, Exception] = {}
+        self._locks = {language: RLock() for language in Language}
+        self._parser_states: dict[Language, _ParserState] = {
+            Language.PYTHON: _ParserState(
+                True,
+                None,
+                None,
+                f"stdlib-ast-{sys.version_info.major}.{sys.version_info.minor}",
+            ),
+            Language.HELM: _ParserState(True, None, None, "builtin"),
+        }
+        self._extractor_states: dict[Language, _ExtractorState] = {}
 
     def has_parser(self, language: Language) -> bool:
-        if language in {Language.PYTHON, Language.HELM}:
-            return True
-        return self.parser_for(language) is not None
+        return self._parser_state_for(language).available
 
     def parser_for(self, language: Language) -> object | None:
-        if language in {Language.PYTHON, Language.HELM}:
-            return None
-        if language in self._parser_cache:
-            return self._parser_cache[language]
-        try:
-            parser = load_parser(language, self._module_loader)
-        except Exception as error:  # noqa: BLE001 - cached discovery boundary
-            self._parser_cache[language] = None
-            self._parser_errors[language] = error
-            self._version_cache[language] = "missing"
-            return None
-        self._parser_cache[language] = parser
-        self._version_cache[language] = (
-            grammar_version(language) if parser is not None else "missing"
-        )
-        return parser
+        return self._parser_state_for(language).parser
+
+    def _parser_state_for(self, language: Language) -> _ParserState:
+        state = self._parser_states.get(language)
+        if state is not None:
+            return state
+        with self._locks[language]:
+            state = self._parser_states.get(language)
+            if state is not None:
+                return state
+            try:
+                parser = load_parser(language, self._module_loader)
+                state = (
+                    _ParserState(True, parser, None, grammar_version(language))
+                    if parser is not None
+                    else _ParserState(False, None, None, "missing")
+                )
+            except Exception as error:  # noqa: BLE001 - cached discovery boundary
+                state = _ParserState(False, None, error, "missing")
+            self._parser_states[language] = state
+            return state
 
     def versions(self) -> Mapping[str, str]:
         versions = {
@@ -121,28 +148,37 @@ class ParserRegistry:
         return MappingProxyType(dict(sorted(versions.items())))
 
     def _reported_version(self, language: Language) -> str:
-        if language is Language.PYTHON:
-            return f"stdlib-ast-{sys.version_info.major}.{sys.version_info.minor}"
-        if language is Language.HELM:
-            return "builtin"
-        cached = self._version_cache.get(language)
-        return cached if cached is not None else grammar_version(language)
+        with self._locks[language]:
+            state = self._parser_states.get(language)
+            return state.version if state is not None else grammar_version(language)
 
     def _extractor_for(self, language: Language) -> Extractor | None:
-        if language not in self._extractor_cache:
+        return self._extractor_state_for(language).extractor
+
+    def _extractor_state_for(self, language: Language) -> _ExtractorState:
+        state = self._extractor_states.get(language)
+        if state is not None:
+            return state
+        with self._locks[language]:
+            state = self._extractor_states.get(language)
+            if state is not None:
+                return state
             try:
                 extractor = _extractors(language, self._module_loader)
             except Exception as error:  # noqa: BLE001 - cached discovery boundary
-                extractor = None
-                self._extractor_errors[language] = error
-            self._extractor_cache[language] = extractor
-        return self._extractor_cache[language]
+                state = _ExtractorState(None, error)
+            else:
+                state = _ExtractorState(extractor, None)
+            self._extractor_states[language] = state
+            return state
 
     def _parser_error(self, language: Language) -> Exception | None:
-        return self._parser_errors.get(language)
+        state = self._parser_states.get(language)
+        return state.error if state is not None else None
 
     def _extractor_error(self, language: Language) -> Exception | None:
-        return self._extractor_errors.get(language)
+        state = self._extractor_states.get(language)
+        return state.error if state is not None else None
 
 
 DEFAULT_REGISTRY = ParserRegistry()
@@ -177,21 +213,24 @@ def extract_file(
     registry: ParserProvider = DEFAULT_REGISTRY,
 ) -> FileIR:
     language = source.language
-    try:
-        has_parser = registry.has_parser(language)
-    except Exception as error:  # noqa: BLE001 - provider discovery boundary
-        return _error_file(
-            source,
-            registry,
-            "parser-crash",
-            f"{source.file}: {language.value} parser discovery crashed: "
-            f"{type(error).__name__}: {error}",
-        )
-    parser_error = (
-        registry._parser_error(language)
-        if isinstance(registry, ParserRegistry)
-        else None
-    )
+    if isinstance(registry, ParserRegistry):
+        parser_state = registry._parser_state_for(language)
+        has_parser = parser_state.available
+        parser = parser_state.parser
+        parser_error = parser_state.error
+    else:
+        try:
+            has_parser = registry.has_parser(language)
+            parser = registry.parser_for(language) if has_parser else None
+        except Exception as error:  # noqa: BLE001 - provider discovery boundary
+            return _error_file(
+                source,
+                registry,
+                "parser-crash",
+                f"{source.file}: {language.value} parser discovery crashed: "
+                f"{type(error).__name__}: {error}",
+            )
+        parser_error = None
     if parser_error is not None:
         return _error_file(
             source,
@@ -207,35 +246,22 @@ def extract_file(
             "missing-parser",
             f"{source.file}: parser is unavailable for {language.value}",
         )
-    try:
-        parser = registry.parser_for(language)
-    except Exception as error:  # noqa: BLE001 - provider discovery boundary
-        return _error_file(
-            source,
-            registry,
-            "parser-crash",
-            f"{source.file}: {language.value} parser discovery crashed: "
-            f"{type(error).__name__}: {error}",
-        )
-    try:
-        extractor = (
-            registry._extractor_for(language)
-            if isinstance(registry, ParserRegistry)
-            else _extractors(language)
-        )
-    except Exception as error:  # noqa: BLE001 - extractor discovery boundary
-        return _error_file(
-            source,
-            registry,
-            "extractor-crash",
-            f"{source.file}: {language.value} extractor discovery crashed: "
-            f"{type(error).__name__}: {error}",
-        )
-    extractor_error = (
-        registry._extractor_error(language)
-        if isinstance(registry, ParserRegistry)
-        else None
-    )
+    if isinstance(registry, ParserRegistry):
+        extractor_state = registry._extractor_state_for(language)
+        extractor = extractor_state.extractor
+        extractor_error = extractor_state.error
+    else:
+        try:
+            extractor = _extractors(language)
+        except Exception as error:  # noqa: BLE001 - extractor discovery boundary
+            return _error_file(
+                source,
+                registry,
+                "extractor-crash",
+                f"{source.file}: {language.value} extractor discovery crashed: "
+                f"{type(error).__name__}: {error}",
+            )
+        extractor_error = None
     if extractor_error is not None:
         return _error_file(
             source,
@@ -279,10 +305,11 @@ def extract_project(
     *,
     registry: ParserProvider = DEFAULT_REGISTRY,
 ) -> ProjectIR:
-    files = tuple(
-        extract_file(source, registry=registry)
-        for source in sorted(sources, key=lambda item: item.file)
-    )
+    ordered_sources = tuple(sorted(sources, key=lambda item: item.file))
+    for previous, current in pairwise(ordered_sources):
+        if previous.file == current.file:
+            raise ValueError(f"duplicate SourceFile.file {current.file!r}")
+    files = tuple(extract_file(source, registry=registry) for source in ordered_sources)
     diagnostics = tuple(
         diagnostic for file_ir in files for diagnostic in file_ir.diagnostics
     )

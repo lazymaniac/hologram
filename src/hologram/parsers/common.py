@@ -6,7 +6,10 @@ import re
 import tokenize
 import unicodedata
 from bisect import bisect_right
+from collections import OrderedDict
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from threading import RLock
 from typing import TypeVar
 
 from hologram.model import (
@@ -151,14 +154,19 @@ def utf8_byte_column(line: str, character_column: int) -> int:
     return len(line[:character_column].encode("utf-8"))
 
 
-def span_from_character_columns(
+def _python_physical_lines(text: str) -> tuple[str, ...]:
+    """Split only the three newline forms recognized by Python source."""
+    return tuple(re.split(r"\r\n|\r|\n", text))
+
+
+def _span_from_character_columns(
     source: SourceFile,
+    lines: tuple[str, ...],
     start_line: int,
     start_column: int,
     end_line: int,
     end_column: int,
 ) -> SourceSpan:
-    lines = source.text.splitlines()
     if start_line < 1 or end_line < 1:
         raise ValueError("source lines must be positive")
     try:
@@ -172,6 +180,81 @@ def span_from_character_columns(
         utf8_byte_column(start_text, start_column),
         end_line,
         utf8_byte_column(end_text, end_column),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _PythonSourceContext:
+    lines: tuple[str, ...]
+    line_offsets: tuple[int, ...]
+    tokens: tuple[tuple[str, SourceSpan], ...]
+
+
+_PYTHON_SOURCE_CONTEXT_LIMIT = 64
+_PYTHON_SOURCE_CONTEXTS: OrderedDict[SourceFile, _PythonSourceContext] = OrderedDict()
+_PYTHON_SOURCE_CONTEXT_LOCK = RLock()
+_IGNORED_PYTHON_TOKENS = frozenset(
+    {
+        tokenize.COMMENT,
+        tokenize.DEDENT,
+        tokenize.ENDMARKER,
+        tokenize.INDENT,
+        tokenize.NEWLINE,
+        tokenize.NL,
+    }
+)
+
+
+def _build_python_source_context(source: SourceFile) -> _PythonSourceContext:
+    lines = _python_physical_lines(source.text)
+    offsets = [0]
+    offsets.extend(match.end() for match in re.finditer(rb"\r\n|\r|\n", source.raw))
+    if len(lines) != len(offsets):
+        raise AssertionError("Python physical-line table is inconsistent")
+    reader = io.StringIO(source.text, newline=None).readline
+    tokens = tuple(
+        (
+            token.string,
+            _span_from_character_columns(
+                source,
+                lines,
+                token.start[0],
+                token.start[1],
+                token.end[0],
+                token.end[1],
+            ),
+        )
+        for token in tokenize.generate_tokens(reader)
+        if token.type not in _IGNORED_PYTHON_TOKENS
+    )
+    return _PythonSourceContext(lines, tuple(offsets), tokens)
+
+
+def _python_source_context(source: SourceFile) -> _PythonSourceContext:
+    with _PYTHON_SOURCE_CONTEXT_LOCK:
+        context = _PYTHON_SOURCE_CONTEXTS.pop(source, None)
+        if context is None:
+            context = _build_python_source_context(source)
+        _PYTHON_SOURCE_CONTEXTS[source] = context
+        if len(_PYTHON_SOURCE_CONTEXTS) > _PYTHON_SOURCE_CONTEXT_LIMIT:
+            _PYTHON_SOURCE_CONTEXTS.popitem(last=False)
+        return context
+
+
+def span_from_character_columns(
+    source: SourceFile,
+    start_line: int,
+    start_column: int,
+    end_line: int,
+    end_column: int,
+) -> SourceSpan:
+    return _span_from_character_columns(
+        source,
+        _python_physical_lines(source.text),
+        start_line,
+        start_column,
+        end_line,
+        end_column,
     )
 
 
@@ -284,39 +367,11 @@ class _AstBodyEventWalker:
         self.callable_node = callable_node
         self.events: list[BodyEvent] = []
         self._events_seen: set[BodyEvent] = set()
-        offsets = [0]
-        for line in source.raw.splitlines(keepends=True):
-            offsets.append(offsets[-1] + len(line))
-        self._line_offsets = tuple(offsets)
-        self._tokens = self._source_tokens()
+        context = _python_source_context(source)
+        self._line_offsets = context.line_offsets
+        self._tokens = context.tokens
         self._external_bindings = self._declared_external_bindings()
         self._comprehension_targets = self._comprehension_target_nodes()
-
-    def _source_tokens(self) -> tuple[tuple[tokenize.TokenInfo, SourceSpan], ...]:
-        ignored = {
-            tokenize.COMMENT,
-            tokenize.DEDENT,
-            tokenize.ENDMARKER,
-            tokenize.INDENT,
-            tokenize.NEWLINE,
-            tokenize.NL,
-        }
-        return tuple(
-            (
-                token,
-                span_from_character_columns(
-                    self.source,
-                    token.start[0],
-                    token.start[1],
-                    token.end[0],
-                    token.end[1],
-                ),
-            )
-            for token in tokenize.generate_tokens(
-                io.StringIO(self.source.text).readline
-            )
-            if token.type not in ignored
-        )
 
     def _owned_nodes(self) -> Iterable[ast.AST]:
         roots = getattr(self.callable_node, "body", ())
@@ -391,10 +446,10 @@ class _AstBodyEventWalker:
         normalized = unicodedata.normalize("NFKC", name)
         matches = tuple(
             span
-            for token, span in self._tokens
+            for token_text, span in self._tokens
             if self._start(span) >= start
             and self._end(span) <= end
-            and unicodedata.normalize("NFKC", token.string) == normalized
+            and unicodedata.normalize("NFKC", token_text) == normalized
         )
         if not matches:
             raise AssertionError(
@@ -458,14 +513,14 @@ class _AstBodyEventWalker:
     ) -> SourceSpan:
         parts = text.split()
         candidates = tuple(
-            (token, span)
-            for token, span in self._tokens
+            (token_text, span)
+            for token_text, span in self._tokens
             if self._start(span) >= start and self._end(span) <= end
         )
         matches: list[SourceSpan] = []
         for index in range(len(candidates) - len(parts) + 1):
             selected = candidates[index : index + len(parts)]
-            if [token.string for token, _ in selected] != parts:
+            if [token_text for token_text, _ in selected] != parts:
                 continue
             matches.append(
                 SourceSpan(
@@ -488,8 +543,8 @@ class _AstBodyEventWalker:
         end = self._start(ast_span(self.source, node))
         matches = tuple(
             span
-            for token, span in self._tokens
-            if token.string == text and self._end(span) <= end
+            for token_text, span in self._tokens
+            if token_text == text and self._end(span) <= end
         )
         if not matches:
             raise AssertionError(
@@ -498,8 +553,8 @@ class _AstBodyEventWalker:
             )
         selected = matches[-1]
         intervening = tuple(
-            token
-            for token, span in self._tokens
+            token_text
+            for token_text, span in self._tokens
             if self._start(span) >= self._end(selected) and self._end(span) <= end
         )
         if intervening:
@@ -528,7 +583,7 @@ class _AstBodyEventWalker:
         if len(parts) == 1:
             pattern = re.escape(parts[0])
         else:
-            separator = rb"(?:\s|\\\r?\n|#[^\r\n]*(?:\r?\n|$))+"
+            separator = rb"(?:\s|\\(?:\r\n|\r|\n)|#[^\r\n]*(?:\r\n|\r|\n|$))+"
             pattern = separator.join(re.escape(part) for part in parts)
         spans: list[SourceSpan] = []
         for match in re.finditer(pattern, segment):
@@ -572,6 +627,34 @@ class _AstBodyEventWalker:
             node,
             span=self.prefix_operator_span(text, node),
         )
+
+    def dict_unpack_operator_event(
+        self,
+        value: ast.AST,
+        previous_value: ast.AST | None,
+        dictionary: ast.Dict,
+    ) -> None:
+        container = ast_span(self.source, dictionary)
+        start = (
+            self._end(ast_span(self.source, previous_value))
+            if previous_value is not None
+            else self._start(container)
+        )
+        span = self._operator_span_in_range(
+            "**",
+            start,
+            self._start(ast_span(self.source, value)),
+            context="dict unpack entry",
+        )
+        self.event(BodyEventKind.OPERATOR, "**", value, span=span)
+
+    def visit_formatted_value(self, node: ast.FormattedValue) -> None:
+        self.visit(node.value)
+        if not isinstance(node.format_spec, ast.JoinedStr):
+            return
+        for value in node.format_spec.values:
+            if isinstance(value, ast.FormattedValue):
+                self.visit_formatted_value(value)
 
     def control(
         self,
@@ -739,12 +822,14 @@ class _AstBodyEventWalker:
             self.visit(node.value)
             return
         if isinstance(node, ast.Dict):
+            previous_value: ast.AST | None = None
             for key, value in zip(node.keys, node.values, strict=True):
                 if key is None:
-                    self.prefix_operator_event("**", value)
+                    self.dict_unpack_operator_event(value, previous_value, node)
                 else:
                     self.visit(key)
                 self.visit(value)
+                previous_value = value
             return
         if isinstance(node, ast.Name):
             kind = (
@@ -774,7 +859,7 @@ class _AstBodyEventWalker:
             self.event(BodyEventKind.LITERAL, "<string>", node)
             for value in node.values:
                 if isinstance(value, ast.FormattedValue):
-                    self.visit(value.value)
+                    self.visit_formatted_value(value)
             return
         if isinstance(node, ast.MatchAs):
             if node.pattern is not None:

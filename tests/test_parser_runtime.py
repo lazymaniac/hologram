@@ -3,7 +3,9 @@ import hashlib
 import inspect
 import subprocess
 import sys
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
@@ -12,6 +14,8 @@ from unittest.mock import patch
 from hologram.model import (
     BodyEventKind,
     BodyIR,
+    CallKind,
+    CallRef,
     Diagnostic,
     DiagnosticSeverity,
     FileIR,
@@ -24,6 +28,8 @@ from hologram.model import (
     SourceSpan,
     SymbolKind,
 )
+from hologram.parsers import api as api_runtime
+from hologram.parsers import common as common_runtime
 from hologram.parsers import treesitter as treesitter_runtime
 from hologram.parsers.api import (
     EXTRACTOR_VERSIONS,
@@ -115,7 +121,46 @@ class _FakeParser:
         self.language = language
 
 
+class _DiscoveryGate:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.calls = 0
+        self.entered = threading.Event()
+        self.duplicate = threading.Event()
+        self.release = threading.Event()
+
+    def block(self) -> None:
+        with self._lock:
+            self.calls += 1
+            if self.calls > 1:
+                self.duplicate.set()
+        self.entered.set()
+        if not self.release.wait(5):
+            raise AssertionError("discovery gate timed out")
+
+
 class ParserRuntimeTest(unittest.TestCase):
+    def run_discovery_pair(
+        self,
+        operation: Any,
+        gate: _DiscoveryGate,
+    ) -> tuple[object, object]:
+        ready = threading.Barrier(3)
+
+        def worker() -> object:
+            ready.wait(timeout=5)
+            return operation()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = (executor.submit(worker), executor.submit(worker))
+            ready.wait(timeout=5)
+            self.assertTrue(gate.entered.wait(5))
+            duplicate = gate.duplicate.wait(0.2)
+            gate.release.set()
+            results = tuple(future.result(timeout=5) for future in futures)
+        self.assertFalse(duplicate)
+        return cast(tuple[object, object], results)
+
     def test_missing_grammar_is_a_diagnostic_not_process_exit(self) -> None:
         snapshot = source()
         registry = ParserRegistry(module_loader=lambda name: None)
@@ -198,6 +243,70 @@ class ParserRuntimeTest(unittest.TestCase):
             ["error-a.py", "error-z.py"],
         )
         self.assertFalse(project.complete)
+
+    def test_project_materializes_once_and_rejects_duplicate_file_keys(self) -> None:
+        loader_calls: list[str] = []
+        yielded: list[str] = []
+        first = source(Language.PYTHON, file="duplicate.py", raw=b"first = 1\n")
+        second_raw = b"second = 2\n"
+        second = SourceFile(
+            Path("/other/duplicate.py"),
+            "duplicate.py",
+            Language.PYTHON,
+            SourceRole.PRODUCTION,
+            second_raw,
+            hashlib.sha256(second_raw).hexdigest(),
+        )
+
+        def duplicates() -> Any:
+            for snapshot in (first, second):
+                yielded.append(snapshot.file)
+                yield snapshot
+
+        registry = ParserRegistry(module_loader=lambda name: loader_calls.append(name))
+        with self.assertRaisesRegex(
+            ValueError,
+            r"^duplicate SourceFile\.file 'duplicate\.py'$",
+        ):
+            extract_project(Path("/repo"), duplicates(), registry=registry)
+
+        self.assertEqual(yielded, ["duplicate.py", "duplicate.py"])
+        self.assertEqual(loader_calls, [])
+
+        extracted: list[str] = []
+
+        def fake_extract(snapshot: SourceFile, parser: object | None) -> FileIR:
+            extracted.append(snapshot.file)
+            return FileIR(snapshot)
+
+        def load(name: str) -> object | None:
+            if name == "hologram.parsers.python":
+                return SimpleNamespace(extract=fake_extract)
+            return None
+
+        distinct = (
+            source(Language.PYTHON, file="b/item.py", raw=b"b = 1\n"),
+            source(Language.PYTHON, file="a/item.py", raw=b"a = 1\n"),
+        )
+        iterations = 0
+
+        def generated() -> Any:
+            nonlocal iterations
+            iterations += 1
+            yield from distinct
+
+        project = extract_project(
+            Path("/repo"),
+            generated(),
+            registry=ParserRegistry(module_loader=load),
+        )
+
+        self.assertEqual(iterations, 1)
+        self.assertEqual(extracted, ["a/item.py", "b/item.py"])
+        self.assertEqual(
+            [file_ir.source.file for file_ir in project.files],
+            ["a/item.py", "b/item.py"],
+        )
 
     def test_extractor_exception_becomes_source_retaining_diagnostic(self) -> None:
         snapshot = source(Language.PYTHON, file="answer.py", raw=b"answer = 42\n")
@@ -438,6 +547,287 @@ if parsers.ParserRegistry is not hologram.parsers.ParserRegistry:
         self.assertIsNone(registry.parser_for(Language.GO))
         self.assertEqual(calls.count("tree_sitter_go"), 1)
 
+    def test_optional_imports_only_suppress_the_requested_module(self) -> None:
+        direct_cases = (
+            (Language.JAVA, "tree_sitter_java", "missing-parser"),
+            (Language.PYTHON, "hologram.parsers.python", "missing-extractor"),
+        )
+        for language, target, expected_code in direct_cases:
+            with self.subTest(direct=target):
+                calls = 0
+
+                def missing(name: str, target: str = target) -> object | None:
+                    nonlocal calls
+                    if name == target:
+                        calls += 1
+                        raise ModuleNotFoundError(
+                            f"No module named {name!r}",
+                            name=name,
+                        )
+                    return None
+
+                file = "probe.py" if language is Language.PYTHON else "Probe.java"
+                snapshot = source(language, file=file)
+                registry = ParserRegistry(module_loader=missing)
+                results = (
+                    extract_file(snapshot, registry=registry),
+                    extract_file(snapshot, registry=registry),
+                )
+
+                self.assertEqual(calls, 1)
+                self.assertEqual(
+                    [result.diagnostics[0].code for result in results],
+                    [expected_code, expected_code],
+                )
+
+        failure_cases = (
+            (
+                Language.JAVA,
+                "tree_sitter_java",
+                ModuleNotFoundError("missing dependency", name="grammar_dependency"),
+                "parser-crash",
+            ),
+            (
+                Language.JAVA,
+                "tree_sitter_java",
+                ImportError("broken ABI"),
+                "parser-crash",
+            ),
+            (
+                Language.PYTHON,
+                "hologram.parsers.python",
+                ModuleNotFoundError("missing dependency", name="extractor_dependency"),
+                "extractor-crash",
+            ),
+            (
+                Language.PYTHON,
+                "hologram.parsers.python",
+                ImportError("broken ABI"),
+                "extractor-crash",
+            ),
+        )
+        for language, target, failure, expected_code in failure_cases:
+            with self.subTest(failure=type(failure).__name__, target=target):
+                calls = 0
+
+                def broken(
+                    name: str,
+                    target: str = target,
+                    failure: Exception = failure,
+                ) -> object | None:
+                    nonlocal calls
+                    if name == target:
+                        calls += 1
+                        raise failure
+                    return None
+
+                file = "probe.py" if language is Language.PYTHON else "Probe.java"
+                snapshot = source(language, file=file)
+                registry = ParserRegistry(module_loader=broken)
+                results = (
+                    extract_file(snapshot, registry=registry),
+                    extract_file(snapshot, registry=registry),
+                )
+
+                self.assertEqual(calls, 1)
+                for result in results:
+                    diagnostic = result.diagnostics[0]
+                    self.assertEqual(diagnostic.code, expected_code)
+                    self.assertIn(type(failure).__name__, diagnostic.message)
+                    self.assertIn(str(failure), diagnostic.message)
+
+    def test_concurrent_parser_success_is_constructed_once(self) -> None:
+        gate = _DiscoveryGate()
+        capsule = object()
+        runtime_calls = 0
+
+        def load(name: str) -> object | None:
+            nonlocal runtime_calls
+            if name == "tree_sitter_java":
+                gate.block()
+                return SimpleNamespace(language=lambda: capsule)
+            if name == "tree_sitter":
+                runtime_calls += 1
+                return SimpleNamespace(Language=_FakeLanguage, Parser=_FakeParser)
+            return None
+
+        registry = ParserRegistry(module_loader=load)
+        with patch.object(
+            api_runtime, "grammar_version", return_value="runtime/grammar"
+        ):
+            first, second = self.run_discovery_pair(
+                lambda: registry.parser_for(Language.JAVA),
+                gate,
+            )
+
+        self.assertEqual(gate.calls, 1)
+        self.assertEqual(runtime_calls, 1)
+        self.assertIs(first, second)
+        self.assertIs(first, registry.parser_for(Language.JAVA))
+        self.assertIsNone(registry._parser_error(Language.JAVA))
+
+    def test_concurrent_parser_error_is_published_once(self) -> None:
+        gate = _DiscoveryGate()
+
+        def load(name: str) -> object | None:
+            if name == "tree_sitter_java":
+                gate.block()
+                raise RuntimeError("gated parser failure")
+            return None
+
+        registry = ParserRegistry(module_loader=load)
+        first, second = self.run_discovery_pair(
+            lambda: registry.parser_for(Language.JAVA),
+            gate,
+        )
+
+        self.assertEqual(gate.calls, 1)
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        error = registry._parser_error(Language.JAVA)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIs(error, registry._parser_error(Language.JAVA))
+        self.assertIsNone(registry.parser_for(Language.JAVA))
+
+    def test_concurrent_extractor_success_is_imported_once(self) -> None:
+        gate = _DiscoveryGate()
+
+        def fake_extract(snapshot: SourceFile, parser: object | None) -> FileIR:
+            return FileIR(snapshot)
+
+        def load(name: str) -> object | None:
+            if name == "hologram.parsers.python":
+                gate.block()
+                return SimpleNamespace(extract=fake_extract)
+            return None
+
+        registry = ParserRegistry(module_loader=load)
+        first, second = self.run_discovery_pair(
+            lambda: registry._extractor_for(Language.PYTHON),
+            gate,
+        )
+
+        self.assertEqual(gate.calls, 1)
+        self.assertIs(first, fake_extract)
+        self.assertIs(second, fake_extract)
+        self.assertIs(first, registry._extractor_for(Language.PYTHON))
+        self.assertIsNone(registry._extractor_error(Language.PYTHON))
+
+    def test_concurrent_extractor_error_is_published_once(self) -> None:
+        gate = _DiscoveryGate()
+
+        def load(name: str) -> object | None:
+            if name == "hologram.parsers.python":
+                gate.block()
+                raise RuntimeError("gated extractor failure")
+            return None
+
+        registry = ParserRegistry(module_loader=load)
+        first, second = self.run_discovery_pair(
+            lambda: registry._extractor_for(Language.PYTHON),
+            gate,
+        )
+
+        self.assertEqual(gate.calls, 1)
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        error = registry._extractor_error(Language.PYTHON)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertIs(error, registry._extractor_error(Language.PYTHON))
+        self.assertIsNone(registry._extractor_for(Language.PYTHON))
+
+    def test_parser_initialization_locks_are_per_language(self) -> None:
+        grammar_gate = threading.Barrier(2)
+        capsules = {
+            "tree_sitter_java": object(),
+            "tree_sitter_go": object(),
+        }
+
+        def load(name: str) -> object | None:
+            if name in capsules:
+                grammar_gate.wait(timeout=5)
+                return SimpleNamespace(language=lambda: capsules[name])
+            if name == "tree_sitter":
+                return SimpleNamespace(Language=_FakeLanguage, Parser=_FakeParser)
+            return None
+
+        registry = ParserRegistry(module_loader=load)
+        with (
+            patch.object(
+                api_runtime, "grammar_version", return_value="runtime/grammar"
+            ),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            futures = (
+                executor.submit(registry.parser_for, Language.JAVA),
+                executor.submit(registry.parser_for, Language.GO),
+            )
+            results = tuple(future.result(timeout=5) for future in futures)
+
+        self.assertTrue(all(result is not None for result in results))
+
+    def test_parser_version_failure_is_atomically_fail_closed(self) -> None:
+        capsule = object()
+        version_entered = threading.Event()
+        version_release = threading.Event()
+        version_calls = 0
+
+        def load(name: str) -> object | None:
+            modules = {
+                "tree_sitter_java": SimpleNamespace(language=lambda: capsule),
+                "tree_sitter": SimpleNamespace(
+                    Language=_FakeLanguage,
+                    Parser=_FakeParser,
+                ),
+            }
+            return modules.get(name)
+
+        def broken_version(language: Language) -> str:
+            nonlocal version_calls
+            version_calls += 1
+            version_entered.set()
+            if not version_release.wait(5):
+                raise AssertionError("version gate timed out")
+            raise RuntimeError("metadata discovery broke")
+
+        registry = ParserRegistry(module_loader=load)
+
+        def discover() -> object:
+            try:
+                return registry.parser_for(Language.JAVA)
+            except RuntimeError as error:  # captured to expose partial publication
+                return error
+
+        second_done = threading.Event()
+
+        def second_discover() -> object:
+            try:
+                return discover()
+            finally:
+                second_done.set()
+
+        with (
+            patch.object(api_runtime, "grammar_version", side_effect=broken_version),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            first_future = executor.submit(discover)
+            self.assertTrue(version_entered.wait(5))
+            second_future = executor.submit(second_discover)
+            published_early = second_done.wait(0.2)
+            version_release.set()
+            results = (
+                first_future.result(timeout=5),
+                second_future.result(timeout=5),
+            )
+
+        self.assertFalse(published_early)
+        self.assertEqual(results, (None, None))
+        self.assertEqual(version_calls, 1)
+        error = registry._parser_error(Language.JAVA)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertEqual(registry.versions()["java"], "missing")
+        self.assertIsNone(registry.parser_for(Language.JAVA))
+
     def test_builtin_parsers_do_not_load_modules(self) -> None:
         calls: list[str] = []
         registry = ParserRegistry(module_loader=lambda name: calls.append(name))
@@ -636,6 +1026,174 @@ class ParserHelperTest(unittest.TestCase):
                 ("=", token_span(snapshot, 2, "=")),
                 ("**", token_span(snapshot, 2, "**")),
             ),
+        )
+
+    def test_python_physical_lines_only_split_cr_and_lf(self) -> None:
+        special = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+        raw = (f'def run():\n    text = "before{special}after"; target()\n').encode()
+        cases = (
+            ("special.py", raw, 2, raw.split(b"\n")[1].find(b"target")),
+            (
+                "cr-only.py",
+                b"def run():\r    value = 1\r    target()\r",
+                3,
+                4,
+            ),
+            (
+                "crlf.py",
+                b"def run():\r\n    value = 1\r\n    target()\r\n",
+                3,
+                4,
+            ),
+        )
+        for file, case_raw, line, column in cases:
+            with self.subTest(file=file):
+                snapshot = source(Language.PYTHON, file=file, raw=case_raw)
+                callable_node = ast.parse(snapshot.text).body[0]
+                events = ast_body_events(snapshot, callable_node)
+                target = next(
+                    event
+                    for event in events
+                    if event.kind is BodyEventKind.CALL and event.text == "target"
+                )
+
+                self.assertEqual(
+                    target.span,
+                    SourceSpan(file, line, column, line, column + len("target()")),
+                )
+                context = common_runtime._python_source_context(snapshot)
+                self.assertEqual(context.lines[-1], "")
+
+    def test_parenthesized_dict_unpack_uses_the_entry_prefix_span(self) -> None:
+        raw = (
+            b"def run(left, right, base, exponent):\n"
+            b"    first = {**(left)}\n"
+            b"    second = {**(((right)))}\n"
+            b"    third = {**((base ** exponent))}\n"
+        )
+        snapshot = source(Language.PYTHON, file="unpack.py", raw=raw)
+        callable_node = ast.parse(snapshot.text).body[0]
+
+        operators = tuple(
+            (event.text, event.span)
+            for event in ast_body_events(snapshot, callable_node)
+            if event.kind is BodyEventKind.OPERATOR and event.text == "**"
+        )
+
+        self.assertEqual(
+            operators,
+            (
+                ("**", token_span(snapshot, 2, "**")),
+                ("**", token_span(snapshot, 3, "**")),
+                ("**", token_span(snapshot, 4, "**", occurrence=1)),
+                ("**", token_span(snapshot, 4, "**", occurrence=2)),
+            ),
+        )
+
+    def test_nested_format_spec_keeps_one_literal_and_exact_call_facts(self) -> None:
+        raw = b'def run(value):\n    rendered = f"{value:{width()}}"\n'
+        snapshot = source(Language.PYTHON, file="format_spec.py", raw=raw)
+        callable_node = ast.parse(snapshot.text).body[0]
+        width_call = next(
+            node for node in ast.walk(callable_node) if isinstance(node, ast.Call)
+        )
+        width_name = cast(ast.Name, width_call.func)
+        events = ast_body_events(snapshot, callable_node)
+        owner = symbol_id(snapshot, (), SymbolKind.FUNCTION, "run", ("value",))
+        width_span = ast_span(snapshot, width_call)
+        name_span = ast_span(snapshot, width_name)
+        file_ir = FileIR(
+            snapshot,
+            calls=(
+                CallRef(
+                    owner,
+                    width_span,
+                    "width",
+                    None,
+                    CallKind.CALL,
+                    0,
+                ),
+            ),
+            references=(
+                reference(
+                    owner,
+                    name_span,
+                    "width",
+                    None,
+                    ReferenceKind.NAME,
+                    context=ReferenceContext.CODE,
+                    confidence=ReferenceConfidence.DEFINITE,
+                ),
+            ),
+            bodies=(BodyIR(owner, ast_span(snapshot, callable_node), events),),
+        )
+
+        assert_body_fact_events(self, file_ir)
+        self.assertEqual(
+            [event.text for event in events if event.kind is BodyEventKind.LITERAL],
+            ["<string>"],
+        )
+        event_pairs = {(event.kind, event.span) for event in events}
+        self.assertIn((BodyEventKind.CALL, width_span), event_pairs)
+        self.assertIn((BodyEventKind.NAME, name_span), event_pairs)
+
+    def test_python_source_context_is_single_flight_and_bounded(self) -> None:
+        raw = b"\n".join(
+            b"def function_%d(value):\n    return value + %d\n" % (index, index)
+            for index in range(8)
+        )
+        snapshot = source(Language.PYTHON, file="context-cache.py", raw=raw)
+        with common_runtime._PYTHON_SOURCE_CONTEXT_LOCK:
+            for cached_source in tuple(common_runtime._PYTHON_SOURCE_CONTEXTS):
+                if cached_source.file == snapshot.file:
+                    common_runtime._PYTHON_SOURCE_CONTEXTS.pop(cached_source)
+        callables = tuple(
+            node
+            for node in ast.parse(snapshot.text).body
+            if isinstance(node, ast.FunctionDef)
+        )
+        ready = threading.Barrier(len(callables))
+
+        def walk(callable_node: ast.FunctionDef) -> tuple[Any, ...]:
+            ready.wait(timeout=5)
+            return ast_body_events(snapshot, callable_node)
+
+        original_generate = common_runtime.tokenize.generate_tokens
+        with (
+            patch.object(
+                common_runtime.tokenize,
+                "generate_tokens",
+                wraps=original_generate,
+            ) as generate_tokens,
+            ThreadPoolExecutor(max_workers=len(callables)) as executor,
+        ):
+            results = tuple(executor.map(walk, callables))
+            first_context = common_runtime._python_source_context(snapshot)
+            equivalent = SourceFile(
+                snapshot.path,
+                snapshot.file,
+                snapshot.language,
+                snapshot.role,
+                snapshot.raw,
+                snapshot.sha256,
+            )
+            second_context = common_runtime._python_source_context(equivalent)
+            changed = source(
+                Language.PYTHON,
+                file="context-cache.py",
+                raw=raw + b"\n# changed\n",
+            )
+            changed_callable = ast.parse(changed.text).body[0]
+            ast_body_events(changed, changed_callable)
+            changed_context = common_runtime._python_source_context(changed)
+
+        self.assertTrue(all(result for result in results))
+        self.assertEqual(generate_tokens.call_count, 2)
+        self.assertIs(first_context, second_context)
+        self.assertIsNot(first_context, changed_context)
+        self.assertLessEqual(
+            len(common_runtime._PYTHON_SOURCE_CONTEXTS),
+            common_runtime._PYTHON_SOURCE_CONTEXT_LIMIT,
         )
 
     def test_stdlib_operator_events_use_each_exact_source_token_span(self) -> None:
@@ -2351,6 +2909,69 @@ class ParserHelperTest(unittest.TestCase):
                 event_spans = {event.span for event in events}
                 for line, name in excluded_names:
                     self.assertNotIn(token_span(snapshot, line, name), event_spans)
+
+    def test_constructor_initializer_roots_precede_owned_bodies(self) -> None:
+        cases = (
+            (
+                Language.CPP,
+                (
+                    b"class Probe { int field; public:\n"
+                    b"  Probe(): field(initialize([]() { hidden(); return 1; })) "
+                    b"{ visible(); }\n"
+                    b"};\n"
+                ),
+                ("function_definition",),
+                "call_expression",
+            ),
+            (
+                Language.CSHARP,
+                (
+                    b"class Probe : Base {\n"
+                    b"  Probe() : base(initialize(() => hidden())) { visible(); }\n"
+                    b"}\n"
+                ),
+                ("constructor_declaration",),
+                "invocation_expression",
+            ),
+            (
+                Language.KOTLIN,
+                (
+                    b"class Probe(val value: Int) {\n"
+                    b"  constructor(): this(initialize()) { visible() }\n"
+                    b"}\n"
+                ),
+                ("secondary_constructor",),
+                "call_expression",
+            ),
+        )
+        for language, raw, callable_kinds, call_kind in cases:
+            with self.subTest(language=language):
+                snapshot, tree, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                calls = tuple(
+                    event for event in events if event.kind is BodyEventKind.CALL
+                )
+
+                self.assertEqual(
+                    [event.text for event in calls], ["initialize", "visible"]
+                )
+                self.assertNotIn("hidden", {event.text for event in events})
+                nodes = {
+                    node.text.split(b"(", 1)[0].decode(): node
+                    for node in ast_collect(tree.root_node, (call_kind,))
+                    if node.text.startswith((b"initialize(", b"visible("))
+                }
+                self.assertEqual(
+                    [event.span for event in calls],
+                    [
+                        node_span(snapshot, nodes["initialize"]),
+                        node_span(snapshot, nodes["visible"]),
+                    ],
+                )
 
     def test_tree_sitter_construction_kinds_use_exact_expression_spans(self) -> None:
         cases = (
