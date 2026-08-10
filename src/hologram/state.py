@@ -8,9 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ProjectConfig, canonical_config_bytes
-from .model import Diagnostic, IR_SCHEMA_VERSION
+from .model import IR_SCHEMA_VERSION, Diagnostic
 from .scan import ScanEntry, ScanResult, ScanStatus
-
 
 STATE_FORMAT_VERSION = "hologram-state-v3"
 STATE_HEADER_RE = re.compile(
@@ -31,7 +30,7 @@ class StateResult:
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
 
 
-def _feed(hasher: "hashlib._Hash", label: str, value: bytes) -> None:
+def _feed(hasher: hashlib._Hash, label: str, value: bytes) -> None:
     label_bytes = label.encode("utf-8")
     hasher.update(len(label_bytes).to_bytes(4, "big"))
     hasher.update(label_bytes)
@@ -70,7 +69,7 @@ def _version_bytes(
 
 
 def _status_bytes(entry: ScanEntry) -> bytes:
-    return f"{entry.status.value}\0{entry.reason or ''}".encode("utf-8")
+    return f"{entry.status.value}\0{entry.reason or ''}".encode()
 
 
 def _reject_duplicate_files(scan_result: ScanResult) -> None:
@@ -81,7 +80,7 @@ def _reject_duplicate_files(scan_result: ScanResult) -> None:
             duplicates.add(entry.file)
         seen.add(entry.file)
     if duplicates:
-        duplicate = sorted(duplicates)[0]
+        duplicate = min(duplicates)
         raise ValueError(f"duplicate ScanEntry.file {duplicate!r}")
 
 
@@ -110,7 +109,9 @@ def compute_state(
         key=lambda entry: entry.file,
     )
     active_languages = {
-        entry.language.value for entry in language_entries
+        active_language.value
+        for entry in language_entries
+        if (active_language := entry.language) is not None
     }
     _feed(
         hasher,
@@ -145,11 +146,11 @@ def compute_state(
     )
     for entry in included:
         _feed(hasher, f"entry-status:{entry.file}", _status_bytes(entry))
-        language = entry.language.value if entry.language is not None else ""
+        language_value = entry.language.value if entry.language is not None else ""
         _feed(
             hasher,
             f"entry-language:{entry.file}",
-            language.encode("utf-8"),
+            language_value.encode("utf-8"),
         )
 
     for entry in included:

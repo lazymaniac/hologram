@@ -205,12 +205,16 @@ class GitDiscoveryTest(unittest.TestCase):
                 root = Path(tmp)
                 (root / "fallback.py").write_text("FALLBACK = True\n")
 
-                def run(argv: list[str], **kwargs: object):
+                def run(
+                    argv: list[str],
+                    _failure=failure,
+                    **kwargs: object,
+                ):
                     if "rev-parse" in argv:
                         return subprocess.CompletedProcess(argv, 0, b"true\n", b"")
-                    if isinstance(failure, BaseException):
-                        raise failure
-                    return failure
+                    if isinstance(_failure, BaseException):
+                        raise _failure
+                    return _failure
 
                 with mock.patch("hologram.scan.subprocess.run", side_effect=run):
                     result = scan_project(root, _config(exclude=()))
@@ -790,9 +794,8 @@ class LegacyAdapterTest(unittest.TestCase):
             hologram.legacy.scan,
             "scan_project",
             return_value=failed,
-        ):
-            with self.assertRaisesRegex(SystemExit, "could not read source"):
-                hologram.legacy.scan_files(Path("/repo"), default_config())
+        ), self.assertRaisesRegex(SystemExit, "could not read source"):
+            hologram.legacy.scan_files(Path("/repo"), default_config())
 
 
 if __name__ == "__main__":

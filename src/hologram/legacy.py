@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """hologram: compress a codebase into a single markdown signature listing for LLM sessions.
 
 Deterministic. One layout: a path-compressed package trie of public signatures,
@@ -23,7 +22,7 @@ import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -99,7 +98,7 @@ def scan_files(root: Path, config: ProjectConfig | None = None) -> list[Path]:
 
 _STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'')
 _LINE_COMMENT_RE = re.compile(r"//[^\n]*|#[^\n]*")
-_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 
 
@@ -817,8 +816,8 @@ def _legacy_cpp_declaration_provenance(
         _function_parts,
         _parameters,
         _qualified_parts,
-        _signature_parameter_type,
         _Scopes,
+        _signature_parameter_type,
     )
 
     root = parser.parse(source.raw).root_node  # type: ignore[attr-defined]
@@ -1225,7 +1224,7 @@ def estimate_tokens(text: str) -> int:
 def git_head(root: Path) -> str:
     try:
         r = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-                           capture_output=True, text=True, timeout=10)
+                           capture_output=True, text=True, timeout=10, check=False)
         return r.stdout.strip() or "worktree"
     except (OSError, subprocess.TimeoutExpired):
         return "worktree"
@@ -1406,11 +1405,20 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             if s.visibility != "priv":
                 continue
             if s.container and s.kind == "method":
-                key = (str(Path(s.file).parent), s.container, s.lang)
-                priv_methods_by_owner.setdefault(key, []).append(s.name)
+                private_method_key = (
+                    str(Path(s.file).parent),
+                    s.container,
+                    s.lang,
+                )
+                priv_methods_by_owner.setdefault(private_method_key, []).append(
+                    s.name
+                )
             elif s.container is None and s.kind in TYPE_KINDS + ("fn",):
-                key = (str(Path(s.file).parent), Path(s.file).name)
-                priv_top_by_file.setdefault(key, []).append(s.name)
+                private_top_key = (
+                    str(Path(s.file).parent),
+                    Path(s.file).name,
+                )
+                priv_top_by_file.setdefault(private_top_key, []).append(s.name)
 
     # Calls already contain resolver-produced project targets. Rendering only
     # deduplicates them before the temporary transitive-reduction pass.
@@ -1444,10 +1452,17 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     ctors_by_owner: dict[tuple[str, str, str], list[str]] = {}
     for s in prod:
-        if s.kind == "ctor" or (s.kind == "method" and s.name == "__init__"):
-            key = (str(Path(s.file).parent), s.container, s.lang)
-            if len(s.params) > len(ctors_by_owner.get(key, [])):
-                ctors_by_owner[key] = s.params
+        is_constructor = s.kind == "ctor" or (
+            s.kind == "method" and s.name == "__init__"
+        )
+        if is_constructor and s.container is not None:
+            constructor_key = (
+                str(Path(s.file).parent),
+                s.container,
+                s.lang,
+            )
+            if len(s.params) > len(ctors_by_owner.get(constructor_key, [])):
+                ctors_by_owner[constructor_key] = s.params
 
     payload_by_dir: dict[str, list[str]] = {}
     for d, types in sorted(types_by_dir.items()):
@@ -1458,8 +1473,14 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 payload.append(_sig_line(t, t.name, False))
                 continue
             components = t.params or ctors_by_owner.get((d, t.name, t.lang), [])
-            key = (t.kind, t.visibility, tuple(components), tuple(t.supers), tuple(t.permits))
-            groups.setdefault(key, []).append(t)
+            group_key = (
+                t.kind,
+                t.visibility,
+                tuple(components),
+                tuple(t.supers),
+                tuple(t.permits),
+            )
+            groups.setdefault(group_key, []).append(t)
         for (kind, vis, components, supers, permits), members in groups.items():
             members.sort(key=lambda s: s.name)
             names = ",".join(("-" if vis == "priv" else "") + m.name for m in members)
@@ -1478,24 +1499,31 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             # member's remaining methods print on its own `Name: …` line.
             member_methods = {id(m): methods_by_owner.get((d, m.name, m.lang), [])
                               for m in members}
-            head = members[0]
-            def _priv_line(m: Symbol, prefix: str = "") -> str | None:
-                names_only = priv_methods_by_owner.get((d, m.name, m.lang))
+            head_symbol = members[0]
+
+            def _priv_line(
+                m: Symbol,
+                prefix: str = "",
+                directory: str = d,
+            ) -> str | None:
+                names_only = priv_methods_by_owner.get(
+                    (directory, m.name, m.lang)
+                )
                 if not names_only:
                     return None
                 return f" {prefix}- {','.join(dict.fromkeys(names_only))}"
 
             if len(members) == 1:
-                for ms in member_methods[id(head)]:
-                    payload.append(" " + _sig_line(ms, head.name, False))
-                if (pl := _priv_line(head)) is not None:
+                for ms in member_methods[id(head_symbol)]:
+                    payload.append(" " + _sig_line(ms, head_symbol.name, False))
+                if (pl := _priv_line(head_symbol)) is not None:
                     payload.append(pl)
                 continue
             normed = {id(m): [_sig_line(ms, m.name, True)
                               for ms in member_methods[id(m)]] for m in members}
             shared = set.intersection(*(set(v) for v in normed.values()))
             emitted: set[str] = set()
-            for line in normed[id(head)]:
+            for line in normed[id(head_symbol)]:
                 if line in shared and line not in emitted:
                     payload.append(" " + line)
                     emitted.add(line)
@@ -1515,8 +1543,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     reex_by_file: dict[tuple[str, str], list[str]] = {}
     for s in prod:
         if s.kind == "reexport":
-            key = (str(Path(s.file).parent), Path(s.file).name)
-            names_r = reex_by_file.setdefault(key, [])
+            reexport_key = (str(Path(s.file).parent), Path(s.file).name)
+            names_r = reex_by_file.setdefault(reexport_key, [])
             if s.name not in names_r:
                 names_r.append(s.name)
     for (d, fname), names_r in sorted(reex_by_file.items()):
@@ -1529,6 +1557,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             if _is_test_path(s.file) and s.kind in ("fn", "method"):
                 owner = re.sub(r"(Test|Tests|IT|Spec)$", "",
                                s.container or Path(s.file).stem) or s.container
+                if owner is None:
+                    continue
                 if s.name not in by_owner.setdefault(owner, []):
                     by_owner[owner].append(s.name)
         blines = []
@@ -1547,7 +1577,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     if loc is None:
         loc = _total_loc(files)
     state_part = f" · state={state}" if state else ""
-    head = (f"# {root.name} @{git_head(root)} {date.today().isoformat()} · "
+    today = datetime.now(UTC).astimezone().date()
+    header = (f"# {root.name} @{git_head(root)} {today.isoformat()} · "
             f"{loc:,} LOC{state_part} · regen: {regen_cmd}\n"
             "· legend: (C)lass (R)ecord (I)nterface (E)num (F)n (T)ype-alias · "
             "(R: …)=components (C: …)=ctor deps (E: …)=values · "
@@ -1564,7 +1595,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             "heavily-used types → grep '×' · a class's internals → its '- ' line · "
             "module coupling → the 'deps' line\n")
     dep_part = ("\n".join(deps) + "\n") if deps else ""
-    return head + dep_part + "\n".join(_tree_lines(payload_by_dir)) + tail + "\n"
+    return header + dep_part + "\n".join(_tree_lines(payload_by_dir)) + tail + "\n"
 
 
 def _build_digest(
@@ -1884,7 +1915,7 @@ def _run_cli(argv: list[str] | None = None) -> int:
             r = subprocess.run(
                 ["git", "-C", str(root), "worktree", "add", "--detach", "-f",
                  str(wt), args.rev],
-                capture_output=True, text=True)
+                capture_output=True, text=True, check=False)
             if r.returncode != 0:
                 raise SystemExit(f"git worktree failed: {r.stderr.strip()}")
             try:
@@ -1904,7 +1935,8 @@ def _run_cli(argv: list[str] | None = None) -> int:
                 )
             finally:
                 subprocess.run(["git", "-C", str(root), "worktree", "remove",
-                                "--force", str(wt)], capture_output=True)
+                                "--force", str(wt)], capture_output=True,
+                               check=False)
         body_old = old.splitlines()[2:]  # drop header+legend: date/state/path noise
         body_new = new.splitlines()[2:]
         for ln in difflib.unified_diff(body_old, body_new, fromfile=args.rev,

@@ -10,7 +10,6 @@ from typing import TypeVar
 
 from .model import Language
 
-
 CONFIG_NAME = ".hologram.toml"
 CONFIG_SCHEMA_VERSION = 2
 ALLOWED_AGENTS = frozenset({"claude", "codex", "gemini"})
@@ -280,7 +279,7 @@ def _toml_array(values: tuple[str, ...]) -> str:
 
 def render_config(config: ProjectConfig) -> str:
     agents = tuple(sorted(config.agents))
-    languages = tuple(sorted((language.value for language in config.languages)))
+    languages = tuple(sorted(language.value for language in config.languages))
     lines = [
         f"schema_version = {config.schema_version}",
         f"agents = {_toml_array(agents)}",
@@ -319,7 +318,8 @@ def create_default_manifest(root: Path) -> bool:
     except BaseException as error:
         try:
             os.close(fd)
-        except BaseException as close_error:
+        except BaseException as close_error:  # noqa: BLE001
+            # Preserve the primary write failure even if cleanup is interrupted.
             error.add_note(
                 f"closing configuration manifest failed: {close_error!r}"
             )

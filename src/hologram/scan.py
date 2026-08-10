@@ -6,12 +6,13 @@ import hashlib
 import os
 import stat
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from functools import lru_cache
+from functools import cache
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Mapping, TypeVar
+from typing import TypeVar
 
 from .config import ProjectConfig
 from .model import (
@@ -21,7 +22,6 @@ from .model import (
     SourceFile,
     SourceRole,
 )
-
 
 _T = TypeVar("_T")
 
@@ -183,6 +183,7 @@ def _probe_git_worktree(root: Path) -> _GitProbeResult:
             argv,
             capture_output=True,
             timeout=60,
+            check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as error:
         return _GitProbeResult(_GitProbeStatus.INDETERMINATE, str(error))
@@ -212,7 +213,12 @@ def _git_files(root: Path) -> tuple[list[str] | None, str | None]:
         "-z",
     ]
     try:
-        result = subprocess.run(argv, capture_output=True, timeout=60)
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
     except (OSError, subprocess.TimeoutExpired) as error:
         return None, str(error)
     if result.returncode != 0:
@@ -281,7 +287,7 @@ def _glob_match(file: str, pattern: str) -> bool:
     path_parts = PurePosixPath(file).parts
     pattern_parts = PurePosixPath(pattern).parts
 
-    @lru_cache(maxsize=None)
+    @cache
     def match(path_index: int, pattern_index: int) -> bool:
         if pattern_index == len(pattern_parts):
             return path_index == len(path_parts)
@@ -499,7 +505,7 @@ def _classify_discovery(
             continue
 
         path, unsafe_reason = _candidate_path(root, file)
-        language = detect_language(PurePosixPath(file))
+        language = detect_language(Path(file))
 
         if unsafe_reason is not None:
             entry = ScanEntry(
@@ -617,7 +623,7 @@ def _classify_discovery(
             )
         )
 
-    return ScanResult(entries, diagnostics, not diagnostics)
+    return ScanResult(tuple(entries), tuple(diagnostics), not diagnostics)
 
 
 def _root_failure(root: Path, detail: str | None) -> ScanResult:

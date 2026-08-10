@@ -10,9 +10,9 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import hologram  # noqa: E402
-import hologram.config as config_module  # noqa: E402
-from hologram.config import (  # noqa: E402
+import hologram
+import hologram.config as config_module
+from hologram.config import (
     ALLOWED_AGENTS,
     CONFIG_NAME,
     CONFIG_SCHEMA_VERSION,
@@ -23,8 +23,7 @@ from hologram.config import (  # noqa: E402
     load_config,
     render_config,
 )
-from hologram.model import Language  # noqa: E402
-
+from hologram.model import Language
 
 VALID = """schema_version = 2
 agents = ["claude", "codex", "gemini"]
@@ -313,16 +312,25 @@ output = "digest.md"
                 target.write_bytes(b"target-owned")
                 real_open = os.open
 
-                def racing_open(path, flags, mode):
-                    self.assertEqual(Path(path), manifest)
+                def racing_open(
+                    path,
+                    flags,
+                    mode,
+                    *,
+                    expected_manifest=manifest,
+                    expected_kind=raced_kind,
+                    expected_target=target,
+                    opener=real_open,
+                ):
+                    self.assertEqual(Path(path), expected_manifest)
                     self.assertTrue(flags & os.O_CREAT)
                     self.assertTrue(flags & os.O_EXCL)
                     self.assertEqual(mode, 0o644)
-                    if raced_kind == "file":
-                        manifest.write_bytes(b"raced-file")
+                    if expected_kind == "file":
+                        expected_manifest.write_bytes(b"raced-file")
                     else:
-                        manifest.symlink_to(target.name)
-                    return real_open(path, flags, mode)
+                        expected_manifest.symlink_to(expected_target.name)
+                    return opener(path, flags, mode)
 
                 with mock.patch.object(
                     config_module.os,
@@ -355,9 +363,8 @@ output = "digest.md"
                 config_module.os,
                 "write",
                 side_effect=failing_write,
-            ):
-                with self.assertRaisesRegex(OSError, "injected write failure"):
-                    config_module.create_default_manifest(root)
+            ), self.assertRaisesRegex(OSError, "injected write failure"):
+                config_module.create_default_manifest(root)
 
             self.assertEqual(
                 manifest.read_bytes(),
@@ -382,9 +389,9 @@ output = "digest.md"
                     "close",
                     side_effect=secondary,
                 ) as close,
+                self.assertRaises(OSError) as caught,
             ):
-                with self.assertRaises(OSError) as caught:
-                    config_module.create_default_manifest(root)
+                config_module.create_default_manifest(root)
 
             close.assert_called_once()
             self.assertIs(caught.exception, primary)
@@ -437,9 +444,9 @@ output = "digest.md"
                     "close",
                     side_effect=racing_close,
                 ),
+                self.assertRaisesRegex(OSError, "injected write failure"),
             ):
-                with self.assertRaisesRegex(OSError, "injected write failure"):
-                    config_module.create_default_manifest(root)
+                config_module.create_default_manifest(root)
 
             self.assertEqual(manifest.read_bytes(), replacement)
 

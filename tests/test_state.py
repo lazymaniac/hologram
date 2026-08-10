@@ -13,7 +13,6 @@ from hologram import (
     Diagnostic,
     DiagnosticSeverity,
     Language,
-    ProjectConfig,
     ScanEntry,
     ScanResult,
     ScanStatus,
@@ -28,7 +27,6 @@ from hologram.state import (
     compute_state,
     read_digest_state,
 )
-
 
 _UNSET = object()
 
@@ -579,12 +577,14 @@ class StateTest(unittest.TestCase):
             None,
         )
         for entries in ((indexed, excluded), (excluded, indexed)):
-            with self.subTest(order=tuple(entry.status for entry in entries)):
-                with self.assertRaisesRegex(
+            with (
+                self.subTest(order=tuple(entry.status for entry in entries)),
+                self.assertRaisesRegex(
                     ValueError,
                     r"duplicate ScanEntry\.file 'duplicate\.py'",
-                ):
-                    self.compute(scan_result=ScanResult(entries, (), True))
+                ),
+            ):
+                self.compute(scan_result=ScanResult(entries, (), True))
 
     def test_indexed_helm_source_bytes_change_state(self) -> None:
         first = self.compute(
@@ -701,21 +701,23 @@ class ReadDigestStateTest(unittest.TestCase):
 
     def test_nonmissing_read_errors_are_not_masked(self) -> None:
         for error in (PermissionError("denied"), OSError("I/O failure")):
-            with self.subTest(error=type(error).__name__):
-                with mock.patch.object(
+            with (
+                self.subTest(error=type(error).__name__),
+                mock.patch.object(
                     Path,
                     "open",
                     side_effect=error,
-                ):
-                    with self.assertRaises(type(error)):
-                        read_digest_state(self.path)
+                ),
+                self.assertRaises(type(error)),
+            ):
+                read_digest_state(self.path)
 
     def test_invalid_utf8_is_treated_as_missing_state(self) -> None:
         self.path.write_bytes(b"\xff")
         self.assertIsNone(read_digest_state(self.path))
 
     def test_invalid_or_huge_body_is_not_read_or_decoded(self) -> None:
-        header = f"# project · state={self.digest} · regen: x\n".encode("utf-8")
+        header = f"# project · state={self.digest} · regen: x\n".encode()
         self.path.write_bytes(header + b"\xff" * (1024 * 1024))
         self.assertEqual(read_digest_state(self.path), self.digest)
 

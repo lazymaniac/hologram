@@ -6,7 +6,6 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
-
 IR_SCHEMA_VERSION = 2
 
 _T = TypeVar("_T")
