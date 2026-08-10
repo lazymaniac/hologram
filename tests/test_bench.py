@@ -37,40 +37,60 @@ from hologram.render import (
 
 class TaskLoaderTest(unittest.TestCase):
     def _taskfile(self, tmp: Path) -> Path:
+        corpus = tmp / "corpus"
+        corpus.mkdir()
         p = tmp / "tasks.json"
         p.write_text(json.dumps({
-            "corpus": "~/workspace/some-private-repo",
-            "model": "sonnet",
+            "schema_version": 2,
+            "corpus": {
+                "name": "example",
+                "visibility": "public",
+                "url": "https://example.com/example.git",
+                "revision": "a" * 40,
+                "path_env": "HOLOGRAM_BENCH_EXAMPLE",
+            },
+            "model": "claude-sonnet-5",
+            "claude_code_version": "2.1.224",
             "max_turns": 40,
+            "conditions": ["B", "C"],
+            "reps": 1,
+            "seed": 20260809,
             "tasks": [
-                {"id": "weighted-avg", "kind": "reuse",
+                {"id": "weighted-avg", "tier": "simple",
+                 "capability": "implementation", "kind": "reuse",
+                 "visibility": "public",
                  "prompt": "Add a weighted average.",
-                 "accept_cmd": "grep -rq weightedAverage {ws}/src",
+                 "accept_cmd": "grep -rq weightedAverage {ws}",
                  "expect_reuse": ["normalize", "add"]},
-                {"id": "find-lifecycle", "kind": "navigate",
+                {"id": "find-lifecycle", "tier": "complex",
+                 "capability": "orientation", "kind": "navigate",
+                 "visibility": "public",
                  "prompt": "Where is record lifecycle handled?",
-                 "accept_cmd": "true",
-                 "expect_reuse": []},
+                 "accept_cmd": "verify-answer {ws} {answer}"},
             ],
         }))
         return p
 
     def test_loads_tasks_and_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = bench.load_tasks(self._taskfile(Path(tmp)))
-        self.assertEqual(cfg.model, "sonnet")
+            root = Path(tmp)
+            cfg = bench.load_tasks(
+                self._taskfile(root),
+                corpus_override=root / "corpus",
+            )
+        self.assertEqual(cfg.model, "claude-sonnet-5")
         self.assertEqual(cfg.max_turns, 40)
         self.assertEqual(len(cfg.tasks), 2)
         self.assertEqual(cfg.tasks[0].id, "weighted-avg")
-        self.assertEqual(cfg.tasks[0].expect_reuse, ["normalize", "add"])
-        self.assertTrue(str(cfg.corpus).startswith("/"))  # ~ expanded
+        self.assertEqual(cfg.tasks[0].expect_reuse, ("normalize", "add"))
+        self.assertEqual(cfg.corpus.name, "example")
 
     def test_missing_required_field_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "bad.json"
-            p.write_text(json.dumps({"corpus": ".", "tasks": [{"id": "x"}]}))
-            with self.assertRaises(SystemExit):
-                bench.load_tasks(p)
+            p.write_text(json.dumps({"schema_version": 2}))
+            with self.assertRaises(ValueError):
+                bench.load_tasks(p, corpus_override=Path(tmp))
 
 
 TRANSCRIPT = "\n".join([
@@ -597,10 +617,11 @@ class RunOneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             task = bench.Task(
-                id="avg", kind="reuse",
+                id="avg", tier="simple", capability="implementation",
+                kind="reuse", visibility="public",
                 prompt="Add average() that reuses normalize.",
                 accept_cmd="grep -q average {ws}/svc.py",
-                expect_reuse=["normalize"])
+                expect_reuse=("normalize",))
 
             def fake_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
                 # the "agent" appends a function that calls normalize
@@ -626,10 +647,11 @@ class RunOneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             task = bench.Task(
-                id="newfile", kind="reuse",
+                id="newfile", tier="simple", capability="implementation",
+                kind="reuse", visibility="public",
                 prompt="Add a helper in a new module.",
                 accept_cmd="git -C {ws} diff --stat | grep -q .",
-                expect_reuse=[])
+                expect_reuse=("normalize",))
 
             def fake_runner(prompt, ws, model, max_turns):
                 (ws / "helper.py").write_text("def helper() -> int:\n    return 1\n")
@@ -643,8 +665,11 @@ class RunOneTest(unittest.TestCase):
     def test_transcript_saved(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
-            task = bench.Task(id="noop", kind="navigate", prompt="look around",
-                              accept_cmd="true", expect_reuse=[])
+            task = bench.Task(
+                id="noop", tier="simple", capability="orientation",
+                kind="navigate", visibility="public", prompt="look around",
+                accept_cmd="test -d {ws}",
+            )
             results = Path(tmp) / "results"
             bench.run_one(repo, task, "B", rep=1, results_dir=results,
                           model="sonnet", max_turns=40,
@@ -677,26 +702,58 @@ class ReportTest(unittest.TestCase):
         self.assertIn("no runs", bench.report([]))
 
 
+def _write_tiered_taskfile(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "corpus": {
+                    "name": "example",
+                    "visibility": "public",
+                    "url": "https://example.com/example.git",
+                    "revision": "a" * 40,
+                    "path_env": "HOLOGRAM_BENCH_EXAMPLE",
+                },
+                "tasks": [
+                    {
+                        "id": "noop-simple",
+                        "tier": "simple",
+                        "capability": "implementation",
+                        "kind": "reuse",
+                        "visibility": "public",
+                        "prompt": "Exercise the simple harness path.",
+                        "accept_cmd": "test -d {ws}",
+                        "expect_reuse": ["normalize"],
+                    },
+                    {
+                        "id": "noop-complex",
+                        "tier": "complex",
+                        "capability": "implementation",
+                        "kind": "reuse",
+                        "visibility": "public",
+                        "prompt": "Exercise the complex harness path.",
+                        "accept_cmd": "test -d {ws}",
+                        "expect_reuse": ["normalize"],
+                    },
+                ],
+                "model": "claude-sonnet-5",
+                "claude_code_version": "2.1.224",
+                "max_turns": 40,
+                "conditions": ["B", "C"],
+                "reps": 1,
+                "seed": 20260809,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class CliTest(unittest.TestCase):
     def test_active_condition_defaults_are_b_and_c_and_a_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             taskfile = Path(tmp) / "tasks.json"
-            taskfile.write_text(
-                json.dumps(
-                    {
-                        "corpus": str(repo),
-                        "tasks": [
-                            {
-                                "id": "noop",
-                                "kind": "navigate",
-                                "prompt": "count files",
-                                "accept_cmd": "true",
-                            }
-                        ],
-                    }
-                )
-            )
+            _write_tiered_taskfile(taskfile)
             results = Path(tmp) / "results"
             row = {
                 "task": "noop",
@@ -714,6 +771,10 @@ class CliTest(unittest.TestCase):
                         [
                             "run",
                             str(taskfile),
+                            "--corpus",
+                            str(repo),
+                            "--only",
+                            "noop-simple",
                             "--results",
                             str(results),
                             "--dry-run",
@@ -728,6 +789,8 @@ class CliTest(unittest.TestCase):
                     [
                         "run",
                         str(taskfile),
+                        "--corpus",
+                        str(repo),
                         "--results",
                         str(results),
                         "--conditions",
@@ -741,16 +804,13 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             taskfile = Path(tmp) / "tasks.json"
-            taskfile.write_text(json.dumps({
-                "corpus": str(repo),
-                "tasks": [{"id": "noop", "kind": "navigate",
-                           "prompt": "count files",
-                           "accept_cmd": "true", "expect_reuse": []}],
-            }))
+            _write_tiered_taskfile(taskfile)
             results = Path(tmp) / "results"
             code = bench.main(["run", str(taskfile),
+                               "--corpus", str(repo),
                                "--results", str(results),
                                "--conditions", "C", "--reps", "1",
+                               "--only", "noop-simple",
                                "--dry-run"])
             self.assertEqual(code, 0)
             rows = [json.loads(l) for l in

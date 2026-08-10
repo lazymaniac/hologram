@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import os
 import re
 import shutil
 import stat
@@ -18,7 +19,8 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from dataclasses import dataclass, field, replace
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 from hologram.config import CONFIG_NAME, canonical_config_bytes, default_config
@@ -31,41 +33,21 @@ from hologram.context import (
 )
 from hologram.render import RenderSymbol, decode_render
 
+if __package__:
+    from .schema import Config, Task, load_tasks, resolve_corpus_path
+else:
+    from schema import (  # type: ignore[import-not-found,no-redef]
+        Config,
+        Task,
+        load_tasks,
+        resolve_corpus_path,
+    )
+
+__all__ = ("Config", "Task", "load_tasks")
+
 
 def _hologram_command(*args: str) -> list[str]:
     return [sys.executable, "-m", "hologram", *args]
-
-
-@dataclass
-class Task:
-    id: str
-    kind: str                 # "reuse" | "navigate"
-    prompt: str
-    accept_cmd: str           # shell; {ws} is replaced with the workspace path
-    expect_reuse: list[str] = field(default_factory=list)
-
-
-@dataclass
-class Config:
-    corpus: Path
-    tasks: list[Task]
-    model: str = "sonnet"
-    max_turns: int = 40
-
-
-def load_tasks(path: Path) -> Config:
-    data = json.loads(path.read_text())
-    try:
-        tasks = [Task(id=t["id"], kind=t["kind"], prompt=t["prompt"],
-                      accept_cmd=t["accept_cmd"],
-                      expect_reuse=t.get("expect_reuse", []))
-                 for t in data["tasks"]]
-        return Config(corpus=Path(data["corpus"]).expanduser().resolve(),
-                      tasks=tasks,
-                      model=data.get("model", "sonnet"),
-                      max_turns=int(data.get("max_turns", 40)))
-    except KeyError as e:
-        raise SystemExit(f"task file {path}: missing field {e}")
 
 
 _READ_TOOLS = {"Read"}
@@ -127,7 +109,7 @@ def _short_display_name(value: str) -> str:
     return value.split("|", 1)[0].rsplit(".", 1)[-1].rsplit(":", 1)[-1].lower()
 
 
-def judge_reuse(before: str, after: str, expect_reuse: list[str]) -> dict:
+def judge_reuse(before: str, after: str, expect_reuse: Sequence[str]) -> dict:
     """Compare decoded canonical maps around one benchmark run."""
 
     old_ids = frozenset(symbol.symbol_id for symbol in _symbols(before))
@@ -394,6 +376,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_run = sub.add_parser("run")
     p_run.add_argument("taskfile", type=Path)
+    p_run.add_argument("--corpus", type=Path)
     p_run.add_argument("--results", type=Path,
                        default=Path(__file__).parent / "results")
     p_run.add_argument(
@@ -421,7 +404,16 @@ def main(argv: list[str] | None = None) -> int:
         print(out.read_text())
         return 0
 
-    cfg = load_tasks(args.taskfile)
+    cfg = load_tasks(
+        args.taskfile,
+        corpus_override=args.corpus,
+        environ=os.environ,
+    )
+    corpus = resolve_corpus_path(
+        cfg.corpus,
+        corpus_override=args.corpus,
+        environ=os.environ,
+    )
     runner = _dry_runner if args.dry_run else claude_runner
     runs_path = args.results / "runs.jsonl"
     args.results.mkdir(parents=True, exist_ok=True)
@@ -433,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
             for rep in range(args.reps):
                 done += 1
                 print(f"[{done}/{total}] {task.id} {cond} rep{rep}", flush=True)
-                row = run_one(cfg.corpus, task, cond, rep, args.results,
+                row = run_one(corpus, task, cond, rep, args.results,
                               cfg.model, cfg.max_turns, runner=runner)
                 with runs_path.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
