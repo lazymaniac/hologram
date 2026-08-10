@@ -13,36 +13,48 @@ import json
 import os
 import re
 import shlex
-import shutil
-import stat
 import statistics
 import subprocess
 import sys
 import tempfile
-import tomllib
 from collections.abc import Sequence
 from dataclasses import replace
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from hologram.config import CONFIG_NAME, canonical_config_bytes, default_config
-from hologram.context import (
-    AGENT_PATHS,
-    ContextStatus,
-    inspect_managed_block,
-    read_target_bytes,
-    render_managed_block,
-)
 from hologram.render import RenderSymbol, decode_render
 
 if __package__:
+    from .corpus import (
+        drop_workspace,
+        make_workspace,
+        prepare_public_corpus,
+        schedule_runs,
+        verify_prepared_corpus,
+        workspace_provenance,
+    )
+    from .corpus import workspace_asset_sha256 as workspace_asset_digest
     from .schema import Config, Task, load_tasks, resolve_corpus_path
     from .transcript import ProcessResult, parse_transcript, terminal_succeeded
 else:
+    import corpus as _corpus  # type: ignore[import-not-found]
     import schema as _schema  # type: ignore[import-not-found]
     import transcript as _transcript  # type: ignore[import-not-found]
 
+    sys.modules.setdefault("benchmark.corpus", _corpus)
     sys.modules.setdefault("benchmark.schema", _schema)
     sys.modules.setdefault("benchmark.transcript", _transcript)
+    from corpus import (  # type: ignore[import-not-found,no-redef]
+        drop_workspace,
+        make_workspace,
+        prepare_public_corpus,
+        schedule_runs,
+        verify_prepared_corpus,
+        workspace_provenance,
+    )
+    from corpus import (  # type: ignore[import-not-found,no-redef]
+        workspace_asset_sha256 as workspace_asset_digest,
+    )
     from schema import (  # type: ignore[import-not-found,no-redef]
         Config,
         Task,
@@ -56,6 +68,8 @@ else:
     )
 
 __all__ = ("Config", "Task", "load_tasks")
+
+_HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _hologram_command(*args: str) -> list[str]:
@@ -102,139 +116,6 @@ def judge_reuse(before: str, after: str, expect_reuse: Sequence[str]) -> dict:
     return {"new_lines": new_symbols,
             "reused": sorted(set(reused)),
             "duplicated": sorted(set(duplicated))}
-
-
-_BASE_CLAUDE_MD = """# Working notes
-
-Complete the requested task directly. Keep changes minimal and idiomatic.
-"""
-_EMPTY_MANAGED_BLOCK = render_managed_block("")
-
-
-def _declared_corpus_output(ws: Path) -> Path | None:
-    manifest = ws / CONFIG_NAME
-    try:
-        manifest_stat = manifest.lstat()
-    except FileNotFoundError:
-        return None
-    if not stat.S_ISREG(manifest_stat.st_mode):
-        return None
-
-    raw = read_target_bytes(manifest)
-    if raw is None:
-        return None
-    try:
-        data = tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
-        return None
-    schema = data.get("schema_version")
-    output = data.get("output")
-    if (
-        isinstance(schema, bool)
-        or not isinstance(schema, int)
-        or schema != 2
-        or not isinstance(output, str)
-    ):
-        return None
-
-    relative = PurePosixPath(output)
-    if (
-        not output
-        or not relative.parts
-        or relative.is_absolute()
-        or ".." in relative.parts
-        or "\\" in output
-        or re.match(r"^[A-Za-z]:", output)
-        or output != relative.as_posix()
-        or relative.suffix != ".md"
-        or any(character in output for character in "*?[]")
-    ):
-        return None
-    return ws.joinpath(*relative.parts)
-
-
-def _benchmark_claude_bytes(ws: Path) -> bytes:
-    claude = b""
-    for agent, relative in AGENT_PATHS.items():
-        existing = read_target_bytes(ws / relative)
-        if existing is None:
-            continue
-        if inspect_managed_block(existing, _EMPTY_MANAGED_BLOCK) is not ContextStatus.MISSING:
-            raise ValueError(f"preexisting Hologram context in {relative}")
-        if agent == "claude":
-            claude = existing
-
-    standalone = ws / "PROJECT_DIGEST.md"
-    try:
-        standalone.lstat()
-    except FileNotFoundError:
-        pass
-    else:
-        raise ValueError("preexisting Hologram standalone map in PROJECT_DIGEST.md")
-
-    declared_output = _declared_corpus_output(ws)
-    if (
-        declared_output is not None
-        and read_target_bytes(declared_output, root=ws) is not None
-    ):
-        raise ValueError(f"preexisting Hologram standalone map in {declared_output}")
-    return claude
-
-
-def _append_benchmark_instructions(authored: bytes) -> bytes:
-    instructions = _BASE_CLAUDE_MD.encode("utf-8")
-    if not authored:
-        return instructions
-    separator = b"\n" if authored.endswith((b"\n", b"\r")) else b"\n\n"
-    return authored + separator + instructions
-
-
-def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
-    """Detached git worktree of the corpus, prepared for one condition.
-    B = control; C = a managed canonical map in CLAUDE.md. The corpus's own
-    CLAUDE.md is preserved, and the setup is committed in the detached worktree
-    so that any later `git diff` shows exactly what the agent changed."""
-    if condition not in {"B", "C"}:
-        raise ValueError("benchmark condition must be one of conditions B and C")
-    subprocess.run(["git", "-C", str(corpus), "worktree", "add", "--detach",
-                    "-f", str(ws), "HEAD"], check=True, capture_output=True)
-    try:
-        claude_path = ws / "CLAUDE.md"
-        authored = _benchmark_claude_bytes(ws)
-        claude_path.write_bytes(_append_benchmark_instructions(authored))
-        if condition == "C":
-            config = replace(default_config(), agents=("claude",), output=None)
-            with tempfile.TemporaryDirectory(
-                prefix="hologram-bench-condition-"
-            ) as temporary:
-                config_path = Path(temporary) / CONFIG_NAME
-                config_path.write_bytes(canonical_config_bytes(config))
-                subprocess.run(
-                    _hologram_command("build")
-                    + [
-                        "--root",
-                        str(ws),
-                        "--config",
-                        str(config_path),
-                        "--quiet",
-                    ],
-                    check=True,
-                )
-        subprocess.run(["git", "-C", str(ws), "add", "-A"],
-                       check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",
-                        "-c", "user.name=bench", "commit", "-qm", "bench setup"],
-                       check=True, capture_output=True)
-        return ws
-    except BaseException:
-        drop_workspace(corpus, ws)
-        raise
-
-
-def drop_workspace(corpus: Path, ws: Path) -> None:
-    subprocess.run(["git", "-C", str(corpus), "worktree", "remove", "--force",
-                    str(ws)], capture_output=True, check=False)
-    shutil.rmtree(ws, ignore_errors=True)
 
 
 def claude_version(run=subprocess.run) -> str:
@@ -305,9 +186,18 @@ def claude_runner(
     return ProcessResult(completed.stdout, completed.stderr, completed.returncode)
 
 
-def _digest_of(ws: Path) -> str:
+def _digest_of(ws: Path, workspace_assets: Sequence[str] = ()) -> str:
     out = ws / ".bench-digest.md"
-    config = replace(default_config(), agents=(), output=out.name)
+    base = default_config()
+    asset_exclusions = tuple(
+        f"**/{asset.strip('/')}/**" for asset in workspace_assets
+    )
+    config = replace(
+        base,
+        agents=(),
+        output=out.name,
+        exclude=(*base.exclude, *asset_exclusions),
+    )
     with tempfile.TemporaryDirectory(prefix="hologram-bench-config-") as temporary:
         config_path = Path(temporary) / CONFIG_NAME
         config_path.write_bytes(canonical_config_bytes(config))
@@ -332,12 +222,22 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
             results_dir: Path, model: str, max_turns: int,
             runner=claude_runner, *, claude_code_version: str = "",
             corpus_revision: str = "", seed: int = 0, pair_index: int = 0,
-            challenged_tree_sha256: str = "", workspace_asset_sha256: str = "") -> dict:
+            challenged_tree_sha256: str = "", workspace_asset_sha256: str = "",
+            workspace_assets: Sequence[str] = ()) -> dict:
     results_dir.mkdir(parents=True, exist_ok=True)
     ws = results_dir / f"ws-{task.id}-{condition}-{rep}"
-    make_workspace(corpus, ws, condition)
+    make_workspace(
+        corpus,
+        ws,
+        condition,
+        challenge=task.challenge,
+        workspace_assets=workspace_assets,
+    )
     try:
-        before = _digest_of(ws)
+        actual_tree_sha256, actual_asset_sha256 = workspace_provenance(ws)
+        row_tree_sha256 = challenged_tree_sha256 or actual_tree_sha256
+        row_asset_sha256 = workspace_asset_sha256 or actual_asset_sha256
+        before = _digest_of(ws, workspace_assets)
         config_dir = results_dir / f"{task.id}-{condition}-{rep}.claude-config"
         config_dir.mkdir(mode=0o700)
         process = runner(
@@ -359,7 +259,9 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
         summary = parse_transcript(process.stdout, requested_model=model)
         answer_path = results_dir / f"{task.id}-{condition}-{rep}.answer.txt"
         answer_path.write_text(summary.final_answer, encoding="utf-8")
-        after = _digest_of(ws)
+        after = _digest_of(ws, workspace_assets)
+        if workspace_asset_digest(ws, workspace_assets) != actual_asset_sha256:
+            raise ValueError("workspace asset changed during the benchmark run")
         verdict = judge_reuse(before, after, task.expect_reuse)
         # intent-to-add so brand-new files show up in `git diff`-based acceptance
         subprocess.run(["git", "-C", str(ws), "add", "-N", "."],
@@ -390,8 +292,8 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
                 "claude_code_version": claude_code_version,
                 "max_turns": max_turns, "corpus_revision": corpus_revision,
                 "seed": seed, "pair_index": pair_index,
-                "challenged_tree_sha256": challenged_tree_sha256,
-                "workspace_asset_sha256": workspace_asset_sha256,
+                "challenged_tree_sha256": row_tree_sha256,
+                "workspace_asset_sha256": row_asset_sha256,
                 "tier": task.tier, "capability": task.capability,
                 "visibility": task.visibility,
                 "score": 1.0 if verifier_passed else 0.0,
@@ -491,6 +393,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="task ids to run (default: all)")
     p_run.add_argument("--dry-run", action="store_true",
                        help="exercise the harness without calling claude")
+    p_prepare = sub.add_parser("prepare")
+    p_prepare.add_argument("taskfile", type=Path)
+    p_prepare.add_argument("--corpus", type=Path, required=True)
     p_rep = sub.add_parser("report")
     p_rep.add_argument("--results", type=Path,
                        default=Path(__file__).parent / "results")
@@ -505,6 +410,28 @@ def main(argv: list[str] | None = None) -> int:
         print(out.read_text())
         return 0
 
+    if args.cmd == "prepare":
+        destination = args.corpus
+        created = not destination.exists()
+        if created:
+            destination.mkdir(parents=True)
+        try:
+            cfg = load_tasks(
+                args.taskfile,
+                corpus_override=destination,
+                environ=os.environ,
+            )
+            prepared = prepare_public_corpus(cfg.corpus, destination)
+        except BaseException:
+            if created:
+                try:
+                    destination.rmdir()
+                except OSError:
+                    pass
+            raise
+        print(prepared)
+        return 0
+
     cfg = load_tasks(
         args.taskfile,
         corpus_override=args.corpus,
@@ -515,6 +442,7 @@ def main(argv: list[str] | None = None) -> int:
         corpus_override=args.corpus,
         environ=os.environ,
     )
+    verify_prepared_corpus(cfg.corpus, corpus)
     results_dir = _empty_results_directory(args.results)
     tasks = [t for t in cfg.tasks if args.only is None or t.id in args.only]
     if not tasks:
@@ -524,21 +452,23 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("benchmark runs require one B and one C condition")
     if args.reps != cfg.reps:
         raise ValueError(f"benchmark reps must equal manifest reps {cfg.reps}")
-    planned = tuple(
-        (task_index, task, condition, rep)
-        for task_index, task in enumerate(tasks)
-        for condition in conditions
-        for rep in range(args.reps)
+    planned = schedule_runs(
+        tasks,
+        conditions=conditions,
+        reps=args.reps,
+        seed=cfg.seed,
     )
-    identities = tuple((task.id, condition, rep) for _, task, condition, rep in planned)
-    pair_keys = {(task.id, rep) for _, task, _, rep in planned}
+    identities = tuple(
+        (item.task.id, item.condition, item.rep) for item in planned
+    )
+    pair_keys = {(item.task.id, item.rep) for item in planned}
     complete_pairs = {
         pair
         for pair in pair_keys
         if {
-            condition
-            for _, task, condition, rep in planned
-            if (task.id, rep) == pair
+            item.condition
+            for item in planned
+            if (item.task.id, item.rep) == pair
         }
         == {"B", "C"}
     }
@@ -559,15 +489,34 @@ def main(argv: list[str] | None = None) -> int:
             )
     runner = _dry_runner if args.dry_run else claude_runner
     runs_path = results_dir / "runs.jsonl"
+    pair_provenance: dict[tuple[str, int], tuple[str, str]] = {}
     total = len(planned)
-    for done, (task_index, task, condition, rep) in enumerate(planned, start=1):
-        print(f"[{done}/{total}] {task.id} {condition} rep{rep}", flush=True)
-        row = run_one(corpus, task, condition, rep, results_dir,
+    for done, item in enumerate(planned, start=1):
+        print(
+            f"[{done}/{total}] {item.task.id} {item.condition} rep{item.rep}",
+            flush=True,
+        )
+        row = run_one(corpus, item.task, item.condition, item.rep, results_dir,
                       cfg.model, cfg.max_turns, runner=runner,
                       claude_code_version=cfg.claude_code_version,
                       corpus_revision=cfg.corpus.revision,
                       seed=cfg.seed,
-                      pair_index=task_index * args.reps + rep)
+                      pair_index=item.pair_index,
+                      workspace_assets=cfg.corpus.workspace_assets)
+        tree_hash = row.get("challenged_tree_sha256")
+        asset_hash = row.get("workspace_asset_sha256")
+        if (
+            type(tree_hash) is not str
+            or _HEX64.fullmatch(tree_hash) is None
+            or type(asset_hash) is not str
+            or _HEX64.fullmatch(asset_hash) is None
+        ):
+            raise ValueError("benchmark pair provenance is missing or malformed")
+        pair_key = (item.task.id, item.rep)
+        provenance = (tree_hash, asset_hash)
+        expected_provenance = pair_provenance.setdefault(pair_key, provenance)
+        if provenance != expected_provenance:
+            raise ValueError("benchmark B/C pair provenance does not match")
         with runs_path.open("a") as fh:
             fh.write(json.dumps(row) + "\n")
     return 0

@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 import inspect
 import json
 import os
@@ -13,6 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "benchmark"))
 
 import bench  # type: ignore[import-not-found]
 
+from benchmark import corpus as benchmark_corpus
+from benchmark.corpus import RunSpec, prepare_public_corpus, schedule_runs
+from benchmark.schema import BenchmarkCorpus, Challenge
 from benchmark.transcript import (
     ProcessResult,
     TranscriptSummary,
@@ -386,10 +390,262 @@ def _mini_corpus(tmp: Path) -> Path:
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "-c", "user.email=b@b", "-c", "user.name=b",
                     "commit", "-qm", "seed"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.com/example.git"],
+        cwd=repo,
+        check=True,
+    )
     return repo
 
 
+def _head(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _challenge(repo: Path, root: Path) -> Challenge:
+    source = repo / "svc.py"
+    original = source.read_text()
+    source.write_text(
+        original + "\ndef challenged(value: int) -> int:\n    return value + 1\n"
+    )
+    patch_bytes = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--binary"],
+        check=True,
+        capture_output=True,
+    ).stdout
+    source.write_text(original)
+    patch = root / "challenge.patch"
+    patch.write_bytes(patch_bytes)
+    return Challenge(patch, hashlib.sha256(patch_bytes).hexdigest())
+
+
 class WorkspaceTest(unittest.TestCase):
+    def test_prepare_public_corpus_pins_revision_and_rejects_dirty_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin = _mini_corpus(root)
+            destination = root / "prepared"
+            destination.mkdir()
+            spec = BenchmarkCorpus(
+                "example", "public", origin.as_uri(), _head(origin),
+                "HOLOGRAM_BENCH_EXAMPLE",
+            )
+            prepared = prepare_public_corpus(spec, destination)
+            self.assertEqual(prepared, destination.resolve())
+            self.assertEqual(_head(prepared), spec.revision)
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(prepared), "status", "--porcelain=v1",
+                     "--untracked-files=all"],
+                    check=True, capture_output=True,
+                ).stdout,
+                b"",
+            )
+            (prepared / "dirty.txt").write_text("dirty")
+            with self.assertRaises(ValueError):
+                bench.verify_prepared_corpus(spec, prepared)
+
+    def test_prepare_runs_bootstrap_and_requires_declared_assets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin = _mini_corpus(root)
+            (origin / ".gitignore").write_text("deps/\n")
+            subprocess.run(["git", "add", ".gitignore"], cwd=origin, check=True)
+            subprocess.run(
+                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
+                 "commit", "-qm", "ignore dependencies"],
+                cwd=origin, check=True,
+            )
+            spec = BenchmarkCorpus(
+                "example",
+                "public",
+                origin.as_uri(),
+                _head(origin),
+                "HOLOGRAM_BENCH_EXAMPLE",
+                "mkdir -p deps && printf 'ready\\n' > deps/tool",
+                ("deps",),
+            )
+
+            prepared = prepare_public_corpus(spec, root / "prepared")
+
+            self.assertEqual((prepared / "deps/tool").read_text(), "ready\n")
+            self.assertEqual(
+                bench.verify_prepared_corpus(spec, prepared),
+                prepared,
+            )
+
+    def test_challenge_sha_mismatch_fails_before_workspace_survives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            challenge = dataclasses.replace(_challenge(repo, root), sha256="0" * 64)
+            destination = root / "workspace"
+
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                bench.make_workspace(
+                    repo,
+                    destination,
+                    "C",
+                    challenge=challenge,
+                )
+
+            self.assertFalse(destination.exists())
+
+    def test_challenge_and_assets_are_identical_but_physically_independent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            (repo / ".gitignore").write_text("deps/\n")
+            subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
+                 "commit", "-qm", "ignore dependencies"],
+                cwd=repo, check=True,
+            )
+            deps = repo / "deps"
+            deps.mkdir()
+            (deps / "tool.lua").write_text("return 1\n")
+            challenge = _challenge(repo, root)
+            workspaces: dict[str, Path] = {}
+            try:
+                for condition in ("B", "C"):
+                    workspaces[condition] = bench.make_workspace(
+                        repo,
+                        root / f"workspace-{condition}",
+                        condition,
+                        challenge=challenge,
+                        workspace_assets=("deps",),
+                    )
+                before = workspaces["B"]
+                after = workspaces["C"]
+                self.assertEqual(
+                    (before / "svc.py").read_bytes(),
+                    (after / "svc.py").read_bytes(),
+                )
+                self.assertIn(b"def challenged", (after / "svc.py").read_bytes())
+                self.assertIn(b"challenged", (after / "CLAUDE.md").read_bytes())
+                self.assertEqual(
+                    (before / "deps/tool.lua").read_bytes(),
+                    (after / "deps/tool.lua").read_bytes(),
+                )
+                self.assertNotEqual(
+                    (deps / "tool.lua").stat().st_ino,
+                    (before / "deps/tool.lua").stat().st_ino,
+                )
+                self.assertNotEqual(
+                    (before / "deps/tool.lua").stat().st_ino,
+                    (after / "deps/tool.lua").stat().st_ino,
+                )
+                for workspace in (before, after):
+                    self.assertFalse(
+                        (workspace / ".git/objects/info/alternates").exists()
+                    )
+                self.assertEqual(
+                    bench.workspace_provenance(before),
+                    bench.workspace_provenance(after),
+                )
+                (before / "deps/tool.lua").write_text("mutated\n")
+                self.assertEqual((deps / "tool.lua").read_text(), "return 1\n")
+                self.assertEqual(
+                    (after / "deps/tool.lua").read_text(), "return 1\n"
+                )
+            finally:
+                for workspace in workspaces.values():
+                    bench.drop_workspace(repo, workspace)
+
+    def test_nested_asset_symlink_is_materialized_as_independent_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            (repo / ".gitignore").write_text("deps/\n")
+            subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
+                 "commit", "-qm", "ignore dependencies"],
+                cwd=repo, check=True,
+            )
+            deps = repo / "deps"
+            deps.mkdir()
+            (deps / "payload").write_bytes(b"stable\x00bytes\n")
+            (deps / "alias").symlink_to("payload")
+
+            workspace = bench.make_workspace(
+                repo,
+                root / "workspace",
+                "B",
+                workspace_assets=("deps",),
+            )
+            try:
+                alias = workspace / "deps/alias"
+                self.assertFalse(alias.is_symlink())
+                self.assertEqual(alias.read_bytes(), b"stable\x00bytes\n")
+                self.assertNotEqual(
+                    alias.stat().st_ino,
+                    (deps / "payload").stat().st_ino,
+                )
+            finally:
+                bench.drop_workspace(repo, workspace)
+
+    def test_asset_symlink_must_remain_inside_its_declared_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            (repo / ".gitignore").write_text("deps/\n")
+            subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
+                 "commit", "-qm", "ignore dependencies"],
+                cwd=repo, check=True,
+            )
+            deps = repo / "deps"
+            deps.mkdir()
+            outside = repo / "outside.txt"
+            outside.write_text("outside\n")
+            (deps / "escape").symlink_to(outside)
+            with self.assertRaises(ValueError):
+                bench.make_workspace(
+                    repo,
+                    root / "unsafe-asset",
+                    "B",
+                    workspace_assets=("deps",),
+                )
+            self.assertEqual(outside.read_text(), "outside\n")
+
+    def test_agent_asset_mutation_rejects_the_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            (repo / ".gitignore").write_text("deps/\n")
+            subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
+                 "commit", "-qm", "ignore dependencies"],
+                cwd=repo, check=True,
+            )
+            (repo / "deps").mkdir()
+            (repo / "deps/data").write_text("stable\n")
+            task = bench.Task(
+                id="asset-mutation", tier="simple",
+                capability="implementation", kind="reuse",
+                visibility="public", prompt="Do not mutate assets.",
+                accept_cmd="test -d {ws}", expect_reuse=("normalize",),
+            )
+
+            def runner(prompt, workspace, model, max_turns, *, config_dir):
+                (workspace / "deps/data").write_text("changed\n")
+                return ProcessResult(TRANSCRIPT, "", 0)
+
+            with self.assertRaisesRegex(ValueError, "workspace asset"):
+                bench.run_one(
+                    repo, task, "B", 0, root / "results", MODEL, 40,
+                    runner=runner, workspace_assets=("deps",),
+                )
+
     def test_active_conditions_have_exact_controlled_configuration(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -664,7 +920,7 @@ class WorkspaceTest(unittest.TestCase):
             try:
                 with (
                     mock.patch.object(
-                        bench,
+                        benchmark_corpus,
                         "canonical_config_bytes",
                         side_effect=RuntimeError("setup failed"),
                     ),
@@ -728,6 +984,76 @@ class WorkspaceTest(unittest.TestCase):
                 self.assertEqual(diff, "")   # setup committed -> clean slate
             finally:
                 bench.drop_workspace(repo, ws)
+
+
+class ScheduleTest(unittest.TestCase):
+    def _tasks(self) -> tuple[bench.Task, ...]:
+        return tuple(
+            bench.Task(
+                id=f"task-{name}",
+                tier="simple" if index < 2 else "complex",
+                capability="orientation",
+                kind="navigate",
+                visibility="public",
+                prompt=f"Inspect {name}.",
+                accept_cmd="verify {ws} {answer}",
+            )
+            for index, name in enumerate(("alpha", "beta", "gamma", "delta"))
+        )
+
+    def test_run_spec_is_frozen_with_exact_fields(self):
+        self.assertEqual(
+            tuple(field.name for field in dataclasses.fields(RunSpec)),
+            ("task", "condition", "rep", "pair_index"),
+        )
+        schedule = schedule_runs(
+            self._tasks(), conditions=("B", "C"), reps=1, seed=20260809
+        )
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            schedule[0].rep = 2  # type: ignore[misc]
+
+    def test_schedule_is_permutation_stable_paired_and_alternating(self):
+        tasks = self._tasks()
+        first = schedule_runs(
+            tasks, conditions=("B", "C"), reps=1, seed=20260809
+        )
+        second = schedule_runs(
+            tuple(reversed(tasks)),
+            conditions=("C", "B"),
+            reps=1,
+            seed=20260809,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), len(tasks) * 2)
+        pairs: dict[int, list[RunSpec]] = {}
+        for item in first:
+            pairs.setdefault(item.pair_index, []).append(item)
+        self.assertEqual(set(pairs), set(range(len(tasks))))
+        for pair_index, pair in pairs.items():
+            self.assertEqual(len(pair), 2)
+            self.assertEqual(pair[0].task, pair[1].task)
+            self.assertEqual(pair[0].rep, pair[1].rep)
+            expected = ("B", "C") if pair_index % 2 == 0 else ("C", "B")
+            self.assertEqual(tuple(item.condition for item in pair), expected)
+        self.assertNotEqual(
+            first,
+            schedule_runs(tasks, conditions=("B", "C"), reps=1, seed=17),
+        )
+
+    def test_schedule_rejects_asymmetry_duplicates_and_invalid_reps(self):
+        tasks = self._tasks()
+        for conditions, reps in ((('B',), 1), (("B", "B"), 1), (("B", "C"), 0)):
+            with self.subTest(conditions=conditions, reps=reps), self.assertRaises(
+                ValueError
+            ):
+                schedule_runs(tasks, conditions=conditions, reps=reps, seed=1)
+        with self.assertRaises(ValueError):
+            schedule_runs(
+                (tasks[0], tasks[0]),
+                conditions=("B", "C"),
+                reps=1,
+                seed=1,
+            )
 
 
 class RunOneTest(unittest.TestCase):
@@ -1006,7 +1332,7 @@ class RunnerIsolationTest(unittest.TestCase):
             root = Path(tmp)
             repo = _mini_corpus(root)
             taskfile = root / "tasks.json"
-            _write_tiered_taskfile(taskfile)
+            _write_tiered_taskfile(taskfile, repo)
             results = root / "results"
             results.mkdir()
             (results / "prior.jsonl").write_text("old\n")
@@ -1041,7 +1367,7 @@ class RunnerIsolationTest(unittest.TestCase):
             root = Path(tmp)
             repo = _mini_corpus(root)
             taskfile = root / "tasks.json"
-            _write_tiered_taskfile(taskfile)
+            _write_tiered_taskfile(taskfile, repo)
             with (
                 mock.patch.object(bench, "claude_version", return_value="2.1.223"),
                 mock.patch.object(bench, "run_one") as run,
@@ -1081,7 +1407,7 @@ class ReportTest(unittest.TestCase):
         self.assertIn("no runs", bench.report([]))
 
 
-def _write_tiered_taskfile(path: Path) -> None:
+def _write_tiered_taskfile(path: Path, repo: Path) -> None:
     path.write_text(
         json.dumps(
             {
@@ -1090,7 +1416,7 @@ def _write_tiered_taskfile(path: Path) -> None:
                     "name": "example",
                     "visibility": "public",
                     "url": "https://example.com/example.git",
-                    "revision": "a" * 40,
+                    "revision": _head(repo),
                     "path_env": "HOLOGRAM_BENCH_EXAMPLE",
                 },
                 "tasks": [
@@ -1128,17 +1454,79 @@ def _write_tiered_taskfile(path: Path) -> None:
 
 
 class CliTest(unittest.TestCase):
+    def test_prepare_accepts_an_absent_destination_before_cloning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            taskfile = root / "tasks.json"
+            _write_tiered_taskfile(taskfile, repo)
+            destination = root / "prepared"
+            self.assertFalse(destination.exists())
+
+            with mock.patch.object(
+                bench,
+                "prepare_public_corpus",
+                return_value=destination.resolve(),
+            ) as prepare:
+                self.assertEqual(
+                    bench.main(
+                        ["prepare", str(taskfile), "--corpus", str(destination)]
+                    ),
+                    0,
+                )
+
+            prepare.assert_called_once()
+            self.assertEqual(prepare.call_args.args[1], destination)
+
+    def test_run_rejects_mismatched_pair_asset_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _mini_corpus(root)
+            taskfile = root / "tasks.json"
+            _write_tiered_taskfile(taskfile, repo)
+            results = root / "results"
+            common = {
+                "task": "noop-simple",
+                "rep": 0,
+                "pair_index": 0,
+                "challenged_tree_sha256": "a" * 64,
+            }
+            rows = (
+                {**common, "condition": "B", "workspace_asset_sha256": "b" * 64},
+                {**common, "condition": "C", "workspace_asset_sha256": "c" * 64},
+            )
+
+            with (
+                mock.patch.object(bench, "run_one", side_effect=rows),
+                self.assertRaisesRegex(ValueError, "pair provenance"),
+            ):
+                bench.main(
+                    [
+                        "run",
+                        str(taskfile),
+                        "--corpus",
+                        str(repo),
+                        "--results",
+                        str(results),
+                        "--only",
+                        "noop-simple",
+                        "--dry-run",
+                    ]
+                )
+
     def test_active_condition_defaults_are_b_and_c_and_a_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             taskfile = Path(tmp) / "tasks.json"
-            _write_tiered_taskfile(taskfile)
+            _write_tiered_taskfile(taskfile, repo)
             results = Path(tmp) / "results"
             row = {
                 "task": "noop",
                 "kind": "navigate",
                 "condition": "unused",
                 "rep": 0,
+                "challenged_tree_sha256": "a" * 64,
+                "workspace_asset_sha256": "b" * 64,
                 "accepted": True,
                 "reused": [],
                 "duplicated": [],
@@ -1183,7 +1571,7 @@ class CliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             taskfile = Path(tmp) / "tasks.json"
-            _write_tiered_taskfile(taskfile)
+            _write_tiered_taskfile(taskfile, repo)
             results = Path(tmp) / "results"
             code = bench.main(["run", str(taskfile),
                                "--corpus", str(repo),
