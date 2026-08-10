@@ -266,6 +266,214 @@ class LuaParserTest(unittest.TestCase):
         )
         assert_body_fact_events(self, result)
 
+    def test_returned_table_callback_local_is_not_a_module(self) -> None:
+        raw = b"""\
+return {
+  setup = function()
+    local M = {}
+    function M.run()
+      return true
+    end
+    return M
+  end,
+}
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/callback.lua"))
+
+        self.assertIsNone(result.module)
+        self.assertFalse(
+            [item for item in result.symbols if item.kind is SymbolKind.MODULE]
+        )
+
+    def test_top_level_module_wins_over_function_local_shadow(self) -> None:
+        raw = b"""\
+local M = {}
+local function configure()
+  local M = {}
+  function M.run()
+    return "shadow"
+  end
+end
+function M.top()
+  return true
+end
+return M
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/shadow.lua"))
+
+        modules = [
+            item for item in result.symbols if item.kind is SymbolKind.MODULE
+        ]
+        self.assertEqual(result.module, "M")
+        self.assertEqual(len(modules), 1)
+        self.assertEqual(modules[0].span.start_line, 1)
+
+    def test_repeated_constants_keep_only_the_initial_declaration(self) -> None:
+        raw = b"""\
+TOP = 1
+TOP = "changed"
+local M = {}
+M.LIMIT = 3
+M.LIMIT = {}
+return M
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/constants.lua"))
+
+        top = [
+            item
+            for item in result.symbols
+            if item.name == "TOP" and item.kind is SymbolKind.CONSTANT
+        ]
+        limit = [
+            item
+            for item in result.symbols
+            if item.name == "LIMIT" and item.kind is SymbolKind.CONSTANT
+        ]
+        self.assertEqual(len(top), 1)
+        self.assertEqual(top[0].span.start_line, 1)
+        self.assertEqual(top[0].returns, "number")
+        self.assertEqual(len(limit), 1)
+        self.assertEqual(limit[0].span.start_line, 4)
+        self.assertEqual(limit[0].returns, "number")
+
+    def test_nested_explicit_members_include_their_lexical_owner(self) -> None:
+        raw = b"""\
+local M = {}
+local function install_one()
+  M.run = function()
+    return "one"
+  end
+end
+local function install_two()
+  M.run = function()
+    return "two"
+  end
+end
+return M
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/installers.lua"))
+
+        runs = [
+            item
+            for item in result.symbols
+            if item.name == "run" and item.kind is SymbolKind.METHOD
+        ]
+        self.assertEqual(
+            [item.id.container_path for item in runs],
+            [("install_one()", "M"), ("install_two()", "M")],
+        )
+        self.assertEqual(len({item.id for item in runs}), 2)
+
+    def test_returned_table_field_paths_disambiguate_nested_members(self) -> None:
+        raw = b"""\
+return {
+  methods = {
+    slash_commands = {
+      fetch = {
+        setup = function(self)
+          self.handlers.set_body = function()
+            return "slash"
+          end
+        end,
+      },
+    },
+    tools = {
+      fetch_webpage = {
+        setup = function(self)
+          self.handlers.set_body = function()
+            return "tool"
+          end
+        end,
+      },
+    },
+  },
+}
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/adapter.lua"))
+
+        setups = [item for item in result.symbols if item.name == "setup"]
+        self.assertEqual(
+            [item.id.container_path for item in setups],
+            [
+                ("methods", "slash_commands", "fetch"),
+                ("methods", "tools", "fetch_webpage"),
+            ],
+        )
+        set_bodies = [item for item in result.symbols if item.name == "set_body"]
+        self.assertEqual(
+            [item.id.container_path for item in set_bodies],
+            [
+                (
+                    "methods",
+                    "slash_commands",
+                    "fetch",
+                    "setup(?)",
+                    "self",
+                    "handlers",
+                ),
+                (
+                    "methods",
+                    "tools",
+                    "fetch_webpage",
+                    "setup(?)",
+                    "self",
+                    "handlers",
+                ),
+            ],
+        )
+        self.assertEqual(len({item.id for item in set_bodies}), 2)
+
+    def test_repeated_exact_callable_uses_the_last_runtime_definition(self) -> None:
+        raw = b"""\
+local T = {}
+T['x'] = function()
+  return "old"
+end
+T['x'] = function()
+  return "new"
+end
+return T
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/redefined.lua"))
+
+        callables = [item for item in result.symbols if item.name == "x"]
+        self.assertEqual(len(callables), 1)
+        self.assertEqual(callables[0].span.start_line, 5)
+        owned_bodies = [
+            item for item in result.bodies if item.owner == callables[0].id
+        ]
+        self.assertEqual(len(owned_bodies), 1)
+        self.assertEqual(owned_bodies[0].span.start_line, 6)
+
+    def test_replaced_callable_prunes_nested_symbols_from_its_old_body(self) -> None:
+        raw = b"""\
+local T = {}
+T.x = function()
+  local function stale()
+    return "old"
+  end
+  return stale()
+end
+T.x = function()
+  local function current()
+    return "new"
+  end
+  return current()
+end
+return T
+"""
+        result = extract_file(snapshot(raw, Language.LUA, "src/replaced_body.lua"))
+
+        self.assertNotIn("stale", {item.name for item in result.symbols})
+        current = symbol(result, "current", SymbolKind.FUNCTION)
+        self.assertEqual(current.id.container_path, ("T", "x()"))
+        self.assertEqual(current.span.start_line, 9)
+        self.assertEqual(
+            [item.name for item in result.calls if item.caller.name == "x"],
+            ["current"],
+        )
+        self.assertNotIn("stale", {item.owner.name for item in result.bodies})
+
     def test_v1_nested_method_container_preserves_the_full_qualifier(self) -> None:
         raw = """\
 local A = {}

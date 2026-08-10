@@ -1174,7 +1174,20 @@ class _Declarations:
         if node.type in _FUNCTION_DECLARATIONS:
             name = ast_text(ast_field(node, "name"))
             if not name:
-                self.scope(node, container_path, scope_kind, class_bindings=class_bindings)
+                self.scope(
+                    node,
+                    container_path,
+                    "anonymous",
+                    class_bindings=class_bindings,
+                )
+                return
+            if scope_kind == "anonymous":
+                self.scope(
+                    node,
+                    container_path,
+                    scope_kind,
+                    class_bindings=class_bindings,
+                )
                 return
             exported = exported or name in self.current_exports
             self.callable(
@@ -1206,7 +1219,7 @@ class _Declarations:
             return
         if node.type in _CALLABLE_VALUES:
             name = ast_text(ast_field(node, "name"))
-            if name:
+            if name and scope_kind != "anonymous":
                 self.callable(
                     name,
                     SymbolKind.FUNCTION,
@@ -1221,7 +1234,12 @@ class _Declarations:
                 )
                 self.scope(node, (*container_path, name), "callable")
             else:
-                self.scope(node, container_path, scope_kind, class_bindings=class_bindings)
+                self.scope(
+                    node,
+                    container_path,
+                    "anonymous",
+                    class_bindings=class_bindings,
+                )
             return
         self.scope(node, container_path, scope_kind, class_bindings=class_bindings)
 
@@ -1496,6 +1514,9 @@ class _Declarations:
                 name in self.current_exports for name in names
             )
             if len(names) == 1 and value is not None and value.type in _CALLABLE_VALUES:
+                if scope_kind == "anonymous":
+                    self.scope(declarator, container_path, scope_kind)
+                    continue
                 name = names[0]
                 self.callable(
                     name,

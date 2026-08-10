@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from hologram.model import (
@@ -22,9 +23,10 @@ from hologram.model import (
     SymbolKind,
     Visibility,
 )
+from hologram.parsers import api as api_runtime
 from hologram.parsers import treesitter as treesitter_parser
 from hologram.parsers import typescript as typescript_parser
-from hologram.parsers.api import DEFAULT_REGISTRY, extract_file
+from hologram.parsers.api import DEFAULT_REGISTRY, ParserRegistry, extract_file
 from hologram.parsers.common import validate_body_events
 from hologram.scan import detect_language
 from tests.parser_assertions import assert_body_fact_events
@@ -233,6 +235,71 @@ def import_shape(item: ImportRef) -> tuple[str, str | None, str | None, bool, bo
     "tree-sitter-typescript not installed",
 )
 class TypeScriptParserTest(unittest.TestCase):
+    def test_javascript_parser_uses_clean_cached_tsx_fallback_only_on_error(
+        self,
+    ) -> None:
+        class StubParser:
+            def __init__(self, *, has_error: bool) -> None:
+                self.tree = SimpleNamespace(
+                    root_node=SimpleNamespace(has_error=has_error)
+                )
+                self.calls: list[bytes] = []
+
+            def parse(self, raw: bytes) -> object:
+                self.calls.append(raw)
+                return self.tree
+
+        cases = (
+            (False, False, "primary", 0),
+            (True, False, "fallback", 1),
+            (True, True, "primary", 1),
+        )
+        for primary_error, fallback_error, expected, fallback_calls in cases:
+            with self.subTest(
+                primary_error=primary_error,
+                fallback_error=fallback_error,
+            ):
+                primary = StubParser(has_error=primary_error)
+                fallback = StubParser(has_error=fallback_error)
+                loads: list[Language] = []
+
+                def load_parser(
+                    language: Language,
+                    _module_loader: object,
+                    *,
+                    primary: StubParser = primary,
+                    fallback: StubParser = fallback,
+                    loads: list[Language] = loads,
+                ) -> object:
+                    loads.append(language)
+                    return fallback if language is Language.TSX else primary
+
+                registry = ParserRegistry(module_loader=lambda _name: None)
+                with patch.object(api_runtime, "load_parser", side_effect=load_parser):
+                    parser = registry.parser_for(Language.JAVASCRIPT)
+                    self.assertIsNotNone(parser)
+                    first = parser.parse(b"first")  # type: ignore[union-attr]
+                    second = parser.parse(b"second")  # type: ignore[union-attr]
+
+                expected_tree = fallback.tree if expected == "fallback" else primary.tree
+                self.assertIs(first, expected_tree)
+                self.assertIs(second, expected_tree)
+                self.assertEqual(len(fallback.calls), fallback_calls * 2)
+                self.assertEqual(loads.count(Language.JAVASCRIPT), 1)
+                self.assertEqual(loads.count(Language.TSX), fallback_calls)
+
+    def test_javascript_jsx_fallback_preserves_javascript_identity(self) -> None:
+        source = snapshot(
+            b"export const View = () => <Panel title={name} />;\n",
+            language=Language.JAVASCRIPT,
+            file="src/view.js",
+        )
+        result = extract_file(source)
+
+        self.assertFalse(result.diagnostics)
+        self.assertEqual(symbol(result, "View", SymbolKind.FUNCTION).id.language, Language.JAVASCRIPT)
+        self.assertTrue(all(item.id.language is Language.JAVASCRIPT for item in result.symbols))
+
     def test_all_suffixes_dispatch_with_exact_language_ids(self) -> None:
         cases = {
             "plain.ts": Language.TYPESCRIPT,
@@ -457,6 +524,95 @@ class TypeScriptParserTest(unittest.TestCase):
         self.assertEqual(inner.id.container_path, ("outer",))
         assert_body_fact_events(self, result)
 
+    def test_anonymous_callbacks_keep_locals_as_module_body_facts_only(self) -> None:
+        raw = b'''\
+describe("one", () => {
+  const shared = make();
+  run(shared);
+});
+describe("two", function () {
+  const shared = makeOther();
+  runOther(shared);
+});
+'''
+        result = extract_file(snapshot(raw, file="src/callbacks.ts"))
+        module = symbol(result, "src/callbacks", SymbolKind.MODULE)
+        module_body = next(item for item in result.bodies if item.owner == module.id)
+
+        self.assertFalse(result.diagnostics)
+        self.assertNotIn("shared", {item.name for item in result.symbols})
+        self.assertEqual(
+            [
+                event.span.start_line
+                for event in module_body.events
+                if event.kind is BodyEventKind.LOCAL and event.text == "shared"
+            ],
+            [2, 6],
+        )
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == module.id],
+            ["describe", "make", "run", "describe", "makeOther", "runOther"],
+        )
+        assert_body_fact_events(self, result)
+
+    def test_anonymous_callbacks_do_not_coalesce_named_callable_locals(self) -> None:
+        raw = b'''\
+describe("one", () => {
+  const helper = () => first();
+  function declared() { second(); }
+  helper(); declared();
+});
+describe("two", function () {
+  const helper = function named() { third(); };
+  function declared() { fourth(); }
+  helper(); declared();
+});
+'''
+        result = extract_file(snapshot(raw, file="src/callback-callables.ts"))
+        module = symbol(result, "src/callback-callables", SymbolKind.MODULE)
+        module_body = next(item for item in result.bodies if item.owner == module.id)
+
+        self.assertFalse(result.diagnostics)
+        self.assertEqual([item.name for item in result.symbols], [module.name])
+        self.assertEqual([item.owner for item in result.bodies], [module.id])
+        self.assertEqual(
+            [
+                event.span.start_line
+                for event in module_body.events
+                if event.kind is BodyEventKind.LOCAL and event.text == "helper"
+            ],
+            [2, 7],
+        )
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == module.id],
+            [
+                "describe",
+                "first",
+                "second",
+                "helper",
+                "declared",
+                "describe",
+                "third",
+                "fourth",
+                "helper",
+                "declared",
+            ],
+        )
+        assert_body_fact_events(self, result)
+
+    def test_repeated_classes_in_anonymous_callbacks_fail_closed(self) -> None:
+        raw = b'''\
+describe("one", () => { class Local { run() { first(); } } });
+describe("two", () => { class Local { run() { second(); } } });
+'''
+        result = extract_file(snapshot(raw, file="src/callback-classes.ts"))
+
+        self.assertEqual(result.symbols, ())
+        self.assertEqual(result.bodies, ())
+        self.assertEqual(len(result.diagnostics), 1)
+        self.assertEqual(result.diagnostics[0].code, "extractor-crash")
+        self.assertIn("duplicate Symbol.id", result.diagnostics[0].message)
+
     def test_ambient_overloads_abstract_accessors_and_generic_constructs(self) -> None:
         result = extract_file(
             snapshot(HIDDEN_SHAPES_SOURCE, file="src/hidden-shapes.ts")
@@ -493,15 +649,16 @@ class TypeScriptParserTest(unittest.TestCase):
 
     def test_anonymous_default_exports_keep_calls_on_the_module_owner(self) -> None:
         raw = (
-            b"export default function () { functionBoot(); }\n"
+            b"export default function () { const local = make(); functionBoot(local); }\n"
             b"export default class { run() { classBoot(); } }\n"
         )
         result = extract_file(snapshot(raw, file="src/defaults.ts"))
         module = symbol(result, "src/defaults", SymbolKind.MODULE)
         self.assertEqual(
             {call.name for call in result.calls if call.caller == module.id},
-            {"functionBoot", "classBoot"},
+            {"make", "functionBoot", "classBoot"},
         )
+        self.assertNotIn("local", {item.name for item in result.symbols})
         self.assertFalse(
             any(
                 item.name in {"default", "anonymous"}

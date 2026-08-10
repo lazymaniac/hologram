@@ -13,6 +13,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 from hologram.model import (
+    BodyEvent,
     BodyEventKind,
     BodyIR,
     CallKind,
@@ -27,7 +28,10 @@ from hologram.model import (
     SourceFile,
     SourceRole,
     SourceSpan,
+    Symbol,
+    SymbolId,
     SymbolKind,
+    Visibility,
 )
 from hologram.parsers import api as api_runtime
 from hologram.parsers import common as common_runtime
@@ -388,6 +392,173 @@ class ParserRuntimeTest(unittest.TestCase):
         self.assertEqual(result.diagnostics[0].severity, DiagnosticSeverity.ERROR)
         self.assertIn("RuntimeError", result.diagnostics[0].message)
         self.assertIn("broken extraction", result.diagnostics[0].message)
+
+    def test_invalid_extractor_ir_fails_closed_and_marks_project_incomplete(
+        self,
+    ) -> None:
+        snapshot = source(
+            Language.PYTHON,
+            file="answer.py",
+            raw=b"def answer():\n    return 42\n",
+        )
+        owner = SymbolId(
+            snapshot.language,
+            snapshot.file,
+            (),
+            SymbolKind.FUNCTION,
+            "answer",
+            "",
+        )
+        symbol_span = SourceSpan(snapshot.file, 1, 0, 2, 13)
+        body_span = SourceSpan(snapshot.file, 2, 4, 2, 13)
+        symbol = Symbol(
+            owner,
+            symbol_span,
+            Visibility.PUBLIC,
+            "answer()",
+        )
+        body = BodyIR(owner, body_span, ())
+        missing_owner = dataclasses.replace(owner, name="missing")
+        foreign_file_owner = dataclasses.replace(owner, file="foreign.py")
+        foreign_language_owner = dataclasses.replace(
+            owner,
+            language=Language.JAVA,
+        )
+        foreign_span = SourceSpan("foreign.py", 1, 0, 1, 1)
+        foreign_event = BodyEvent(BodyEventKind.NAME, "answer", foreign_span)
+        foreign_source = source(
+            Language.PYTHON,
+            file="foreign.py",
+            raw=b"foreign = True\n",
+        )
+        invalid_results = (
+            ("duplicate-symbol-id", FileIR(snapshot, symbols=(symbol, symbol))),
+            (
+                "duplicate-body-owner",
+                FileIR(snapshot, symbols=(symbol,), bodies=(body, body)),
+            ),
+            (
+                "missing-body-owner",
+                FileIR(
+                    snapshot,
+                    symbols=(symbol,),
+                    bodies=(dataclasses.replace(body, owner=missing_owner),),
+                ),
+            ),
+            (
+                "ambiguous-body-owner",
+                FileIR(snapshot, symbols=(symbol, symbol), bodies=(body,)),
+            ),
+            (
+                "foreign-file-owner",
+                FileIR(
+                    snapshot,
+                    symbols=(
+                        dataclasses.replace(symbol, id=foreign_file_owner),
+                    ),
+                ),
+            ),
+            (
+                "foreign-language-owner",
+                FileIR(
+                    snapshot,
+                    symbols=(
+                        dataclasses.replace(symbol, id=foreign_language_owner),
+                    ),
+                ),
+            ),
+            (
+                "foreign-symbol-span",
+                FileIR(
+                    snapshot,
+                    symbols=(dataclasses.replace(symbol, span=foreign_span),),
+                ),
+            ),
+            (
+                "foreign-body-span",
+                FileIR(
+                    snapshot,
+                    symbols=(symbol,),
+                    bodies=(dataclasses.replace(body, span=foreign_span),),
+                ),
+            ),
+            (
+                "foreign-body-event-span",
+                FileIR(
+                    snapshot,
+                    symbols=(symbol,),
+                    bodies=(dataclasses.replace(body, events=(foreign_event,)),),
+                ),
+            ),
+            ("foreign-file-ir-source", FileIR(foreign_source)),
+        )
+
+        for label, invalid_result in invalid_results:
+            with self.subTest(label=label):
+
+                def invalid_extract(
+                    extracted_source: SourceFile,
+                    parser: object | None,
+                    result: FileIR = invalid_result,
+                ) -> FileIR:
+                    return result
+
+                registry = ParserRegistry(
+                    module_loader=lambda name: (
+                        SimpleNamespace(extract=invalid_extract)
+                        if name == "hologram.parsers.python"
+                        else None
+                    )
+                )
+
+                project = extract_project(
+                    Path("/repo"),
+                    (snapshot,),
+                    registry=registry,
+                )
+
+                self.assertFalse(project.complete)
+                self.assertEqual(len(project.files), 1)
+                result = project.files[0]
+                self.assertIs(result.source, snapshot)
+                self.assertEqual(result.symbols, ())
+                self.assertEqual(result.bodies, ())
+                self.assertEqual(len(result.diagnostics), 1)
+                self.assertEqual(result.diagnostics[0].code, "extractor-crash")
+                self.assertEqual(
+                    result.diagnostics[0].severity,
+                    DiagnosticSeverity.ERROR,
+                )
+
+    def test_body_fact_assertion_rejects_duplicate_identity_before_indexing(
+        self,
+    ) -> None:
+        snapshot = source(
+            Language.PYTHON,
+            file="answer.py",
+            raw=b"def answer():\n    return 42\n",
+        )
+        owner = SymbolId(
+            snapshot.language,
+            snapshot.file,
+            (),
+            SymbolKind.FUNCTION,
+            "answer",
+            "",
+        )
+        span = SourceSpan(snapshot.file, 1, 0, 2, 13)
+        symbol = Symbol(owner, span, Visibility.PUBLIC, "answer()")
+        body = BodyIR(owner, span, ())
+
+        for label, file_ir in (
+            ("symbols", FileIR(snapshot, symbols=(symbol, symbol))),
+            ("bodies", FileIR(snapshot, bodies=(body, body))),
+        ):
+            with (
+                self.subTest(label=label),
+                self.assertRaisesRegex(AssertionError, "duplicate"),
+            ):
+                assert_body_fact_events(self, file_ir)
 
     def test_parser_loader_exception_is_cached_parser_crash_diagnostic(self) -> None:
         snapshot = source()

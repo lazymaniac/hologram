@@ -26,6 +26,18 @@ def _inside(inner: SourceSpan, outer: SourceSpan) -> bool:
 
 
 def assert_body_fact_events(test: unittest.TestCase, file_ir: FileIR) -> None:
+    symbol_ids = [symbol.id for symbol in file_ir.symbols]
+    test.assertEqual(
+        len(symbol_ids),
+        len(set(symbol_ids)),
+        "duplicate Symbol.id values would be lost while indexing parser output",
+    )
+    body_owners = [body.owner for body in file_ir.bodies]
+    test.assertEqual(
+        len(body_owners),
+        len(set(body_owners)),
+        "duplicate BodyIR.owner values would be lost while indexing parser output",
+    )
     bodies = {body.owner: body for body in file_ir.bodies}
     events = {
         owner: {(event.kind, event.span) for event in body.events}

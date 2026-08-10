@@ -61,6 +61,15 @@ def _key(node: object) -> tuple[int, int, str]:
     return (int(node.start_byte), int(node.end_byte), str(node.type))  # type: ignore[attr-defined]
 
 
+def _has_function_ancestor(node: object) -> bool:
+    current = getattr(node, "parent", None)
+    while current is not None:
+        if current.type in _FUNCTION_KINDS:
+            return True
+        current = getattr(current, "parent", None)
+    return False
+
+
 def _string_value(node: object | None) -> str | None:
     raw = ast_text(node).strip()
     if not raw:
@@ -135,19 +144,20 @@ def _assignment_pairs(root: object) -> dict[tuple[int, int, str], Any]:
 def _returned_names(root: object) -> frozenset[str]:
     values: set[str] = set()
     for node in walk_all(root):
-        if node.type != "return_statement":
+        if node.type != "return_statement" or _has_function_ancestor(node):
             continue
-        parent = getattr(node, "parent", None)
-        inside_function = False
-        while parent is not None:
-            if parent.type in _FUNCTION_KINDS:
-                inside_function = True
-                break
-            parent = getattr(parent, "parent", None)
-        if inside_function:
-            continue
+        expressions = next(
+            (
+                child
+                for child in named_children(node)
+                if child.type == "expression_list"
+            ),
+            None,
+        )
         values.update(
-            ast_text(child) for child in walk_all(node) if child.type == "identifier"
+            ast_text(child)
+            for child in named_children(expressions)
+            if child.type == "identifier"
         )
     return frozenset(values)
 
@@ -161,19 +171,24 @@ def _module_candidates(
         parts[0]
         for node in walk_all(root)
         if node.type == "function_declaration"
+        if not _has_function_ancestor(node)
         if len(parts := _index_parts(ast_field(node, "name"))) > 1
     }
     values: list[tuple[str, Any]] = []
+    seen: set[str] = set()
     for value_key, name_node in pairs.items():
         if value_key[2] != "table_constructor":
+            continue
+        if _has_function_ancestor(name_node):
             continue
         parts = _index_parts(name_node)
         if len(parts) != 1:
             continue
         name = parts[0]
-        if name in returned or name in qualified_roots:
+        if name not in seen and (name in returned or name in qualified_roots):
             values.append((name, name_node))
-    return ordered_unique(values)
+            seen.add(name)
+    return tuple(values)
 
 
 def _require_call(node: Any) -> bool:
@@ -243,6 +258,56 @@ class _Callable:
     local: bool
 
 
+def _field_name(node: object) -> str | None:
+    name_node = ast_field(node, "name")
+    if name_node is None:
+        return None
+    if name_node.type == "string":
+        return _string_value(name_node)
+    parts = _index_parts(name_node)
+    return parts[0] if len(parts) == 1 else None
+
+
+def _returned_table_field_parts(node: object) -> tuple[str, ...]:
+    field = getattr(node, "parent", None)
+    if (
+        field is None
+        or field.type != "field"
+        or ast_field(field, "value") != node
+    ):
+        return ()
+    name = _field_name(field)
+    if not name:
+        return ()
+    parts = [name]
+    table = getattr(field, "parent", None)
+    while table is not None and table.type == "table_constructor":
+        outer_field = getattr(table, "parent", None)
+        if (
+            outer_field is None
+            or outer_field.type != "field"
+            or ast_field(outer_field, "value") != table
+        ):
+            break
+        outer_name = _field_name(outer_field)
+        if not outer_name:
+            return ()
+        parts.append(outer_name)
+        table = getattr(outer_field, "parent", None)
+    expressions = getattr(table, "parent", None)
+    returned = getattr(expressions, "parent", None)
+    if (
+        table is None
+        or table.type != "table_constructor"
+        or expressions is None
+        or expressions.type != "expression_list"
+        or returned is None
+        or returned.type != "return_statement"
+    ):
+        return ()
+    return tuple(reversed(parts))
+
+
 def _callables(
     root: object,
     assignments: dict[tuple[int, int, str], Any],
@@ -262,17 +327,18 @@ def _callables(
     for node in walk_all(root):
         if node.type not in _FUNCTION_KINDS:
             continue
-        name_node = (
-            ast_field(node, "name")
-            if node.type == "function_declaration"
-            else assignments.get(_key(node))
-        )
-        parts = _index_parts(name_node)
+        if node.type == "function_declaration":
+            name_node = ast_field(node, "name")
+            parts = _index_parts(name_node)
+        else:
+            name_node = assignments.get(_key(node))
+            parts = _index_parts(name_node) or _returned_table_field_parts(node)
         if not parts:
             continue
         name = parts[-1]
         explicit_container = parts[:-1]
-        container = explicit_container or lexical_owner(node)
+        lexical_container = lexical_owner(node)
+        container = (*lexical_container, *explicit_container)
         params, parameter_names = _parameters(node)
         signature_key = f"({','.join(params)})"
         owned = (*container, f"{name}{signature_key}")
@@ -290,7 +356,33 @@ def _callables(
         )
         values.append(value)
         owned_paths[_key(node)] = owned
-    return tuple(values)
+    effective: dict[
+        tuple[tuple[str, ...], bool, str, tuple[str, ...]], _Callable
+    ] = {}
+    for value in values:
+        identity = (value.container_path, value.member, value.name, value.params)
+        effective[identity] = value
+    effective_nodes = {_key(value.node) for value in effective.values()}
+
+    def has_discarded_owner(value: _Callable) -> bool:
+        current = getattr(value.node, "parent", None)
+        while current is not None:
+            current_key = _key(current)
+            if current_key in owned_paths and current_key not in effective_nodes:
+                return True
+            current = getattr(current, "parent", None)
+        return False
+
+    return tuple(
+        sorted(
+            (
+                value
+                for value in effective.values()
+                if not has_discarded_owner(value)
+            ),
+            key=lambda value: _key(value.node),
+        )
+    )
 
 
 def _call_parts(node: object | None) -> tuple[str | None, str] | None:
@@ -452,7 +544,7 @@ def _constant_declarations(
     root: object,
     module_names: frozenset[str],
 ) -> tuple[Symbol, ...]:
-    values: list[Symbol] = []
+    values: dict[SymbolId, Symbol] = {}
     for assignment in walk_all(root):
         if assignment.type != "assignment_statement":
             continue
@@ -510,16 +602,15 @@ def _constant_declarations(
                 )
             target = target or name_node
             value = expressions_[index] if aligned else None
-            values.append(
-                Symbol(
-                    symbol_id(source, container, SymbolKind.CONSTANT, name),
-                    node_span(source, target),
-                    Visibility.PRIVATE if not container else Visibility.PUBLIC,
-                    name,
-                    returns=_inferred_type(value),
-                )
+            symbol = Symbol(
+                symbol_id(source, container, SymbolKind.CONSTANT, name),
+                node_span(source, target),
+                Visibility.PRIVATE if not container else Visibility.PUBLIC,
+                name,
+                returns=_inferred_type(value),
             )
-    return ordered_unique(values)
+            values.setdefault(symbol.id, symbol)
+    return tuple(values.values())
 
 
 def extract(source: SourceFile, parser: object | None):

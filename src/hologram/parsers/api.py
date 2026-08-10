@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import sys
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from itertools import pairwise
 from pathlib import Path
@@ -94,6 +95,24 @@ class _ExtractorState:
     error: Exception | None
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _JavaScriptParser:
+    primary: object
+    fallback: Callable[[], object | None]
+
+    def parse(self, raw: bytes) -> object:
+        primary_tree = self.primary.parse(raw)  # type: ignore[attr-defined]
+        if not bool(primary_tree.root_node.has_error):  # type: ignore[attr-defined]
+            return primary_tree
+        fallback = self.fallback()
+        if fallback is None:
+            return primary_tree
+        fallback_tree = fallback.parse(raw)  # type: ignore[attr-defined]
+        if bool(fallback_tree.root_node.has_error):  # type: ignore[attr-defined]
+            return primary_tree
+        return fallback_tree
+
+
 class ParserRegistry:
     def __init__(
         self,
@@ -131,6 +150,11 @@ class ParserRegistry:
                 return state
             try:
                 parser = load_parser(language, self._module_loader)
+                if parser is not None and language is Language.JAVASCRIPT:
+                    parser = _JavaScriptParser(
+                        parser,
+                        lambda: self._parser_state_for(Language.TSX).parser,
+                    )
                 state = (
                     _ParserState(True, parser, None, grammar_version(language))
                     if parser is not None
@@ -205,6 +229,86 @@ def _error_file(
         extractor_version=EXTRACTOR_VERSIONS[source.language],
         parser_version=_parser_version(registry, source.language),
     )
+
+
+def _validate_owner(source: SourceFile, owner: object, field: str) -> None:
+    file = getattr(owner, "file", None)
+    language = getattr(owner, "language", None)
+    if file != source.file:
+        raise ValueError(
+            f"{field}.file {file!r} does not match SourceFile.file "
+            f"{source.file!r}"
+        )
+    if language is not source.language:
+        raise ValueError(
+            f"{field}.language {language!r} does not match SourceFile.language "
+            f"{source.language!r}"
+        )
+
+
+def _validate_span(source: SourceFile, span: object, field: str) -> None:
+    file = getattr(span, "file", None)
+    if file != source.file:
+        raise ValueError(
+            f"{field}.file {file!r} does not match SourceFile.file "
+            f"{source.file!r}"
+        )
+
+
+def _validate_file_ir(source: SourceFile, result: FileIR) -> None:
+    if result.source is not source:
+        raise ValueError("FileIR.source is not the extracted SourceFile")
+
+    symbol_ids = tuple(symbol.id for symbol in result.symbols)
+    if len(symbol_ids) != len(set(symbol_ids)):
+        raise ValueError("FileIR.symbols contains duplicate Symbol.id values")
+    symbol_counts = Counter(symbol_ids)
+    for index, symbol in enumerate(result.symbols):
+        _validate_owner(source, symbol.id, f"FileIR.symbols[{index}].id")
+        _validate_span(source, symbol.span, f"FileIR.symbols[{index}].span")
+
+    body_owners = tuple(body.owner for body in result.bodies)
+    if len(body_owners) != len(set(body_owners)):
+        raise ValueError("FileIR.bodies contains duplicate BodyIR.owner values")
+    for index, body in enumerate(result.bodies):
+        field = f"FileIR.bodies[{index}]"
+        _validate_owner(source, body.owner, f"{field}.owner")
+        if symbol_counts.get(body.owner, 0) != 1:
+            raise ValueError(
+                f"{field}.owner must identify exactly one FileIR.symbols entry"
+            )
+        _validate_span(source, body.span, f"{field}.span")
+        for event_index, event in enumerate(body.events):
+            _validate_span(
+                source,
+                event.span,
+                f"{field}.events[{event_index}].span",
+            )
+
+    for index, call in enumerate(result.calls):
+        _validate_owner(source, call.caller, f"FileIR.calls[{index}].caller")
+        _validate_span(source, call.span, f"FileIR.calls[{index}].span")
+    for index, imported in enumerate(result.imports):
+        _validate_span(source, imported.span, f"FileIR.imports[{index}].span")
+    for index, reference in enumerate(result.references):
+        if reference.owner is not None:
+            _validate_owner(
+                source,
+                reference.owner,
+                f"FileIR.references[{index}].owner",
+            )
+        _validate_span(
+            source,
+            reference.span,
+            f"FileIR.references[{index}].span",
+        )
+    for index, diagnostic in enumerate(result.diagnostics):
+        if diagnostic.span is not None:
+            _validate_span(
+                source,
+                diagnostic.span,
+                f"FileIR.diagnostics[{index}].span",
+            )
 
 
 def extract_file(
@@ -283,6 +387,13 @@ def extract_file(
             raise TypeError(
                 f"extractor returned {type(result).__name__}, expected FileIR"
             )
+        _validate_file_ir(source, result)
+        result = dataclasses.replace(
+            result,
+            source=source,
+            extractor_version=EXTRACTOR_VERSIONS[language],
+            parser_version=_parser_version(registry, language),
+        )
     except Exception as error:  # noqa: BLE001 - extractor failures are diagnostics
         return _error_file(
             source,
@@ -291,12 +402,7 @@ def extract_file(
             f"{source.file}: {language.value} extractor crashed: "
             f"{type(error).__name__}: {error}",
         )
-    return dataclasses.replace(
-        result,
-        source=source,
-        extractor_version=EXTRACTOR_VERSIONS[language],
-        parser_version=_parser_version(registry, language),
-    )
+    return result
 
 
 def extract_project(
