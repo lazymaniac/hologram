@@ -618,6 +618,7 @@ def _legacy_cpp_declaration_provenance(
         _function_parts,
         _parameters,
         _qualified_parts,
+        _signature_parameter_type,
         _Scopes,
     )
 
@@ -647,7 +648,9 @@ def _legacy_cpp_declaration_provenance(
                 if owner and name == owner[-1]
                 else SymbolKind.METHOD
             )
-            signature_key = f"({','.join(p.type_name for p in _parameters(function))})"
+            signature_key = (
+                f"({','.join(_signature_parameter_type(p.type_name) for p in _parameters(function))})"
+            )
             key = (owner, kind, name, signature_key)
             values.append((key, node.start_point[0] + 1))
     return tuple(values)
@@ -682,7 +685,7 @@ def _legacy_task6_container(language: Language, symbol) -> str | None:
     if language is Language.LUA:
         if symbol.kind is SymbolKind.FUNCTION:
             return None
-        return symbol.id.container_path[0] if symbol.id.container_path else None
+        return ".".join(symbol.id.container_path) or None
     return _legacy_task5_container(language, symbol)
 
 

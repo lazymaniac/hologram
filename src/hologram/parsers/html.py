@@ -8,6 +8,11 @@ from ._treesitter_common import assemble_file_ir, syntax_diagnostics, walk_all
 from .common import symbol_id
 from .treesitter import ast_text, node_span
 
+_ASCII_LOWER = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "abcdefghijklmnopqrstuvwxyz",
+)
+
 
 def _id_value(attribute: object) -> Any | None:
     name = None
@@ -19,7 +24,7 @@ def _id_value(attribute: object) -> Any | None:
             name = node
         elif node.type == "attribute_value" and value is None:
             value = node
-    if ast_text(name) != "id":
+    if ast_text(name).translate(_ASCII_LOWER) != "id":
         return None
     return value
 

@@ -18,6 +18,7 @@ from hologram.model import (
     ReferenceKind,
     ReferenceRef,
     SourceFile,
+    SourceSpan,
     Symbol,
     SymbolId,
     SymbolKind,
@@ -45,8 +46,15 @@ from .treesitter import (
 )
 
 _FUNCTION_KINDS = frozenset({"function_declaration", "function_definition"})
-_INDEX_KINDS = frozenset({"dot_index_expression", "method_index_expression"})
+_INDEX_KINDS = frozenset(
+    {
+        "bracket_index_expression",
+        "dot_index_expression",
+        "method_index_expression",
+    }
+)
 _IDENTIFIER_RE = re.compile(r"[^\W\d]\w*", re.UNICODE)
+_LONG_STRING_RE = re.compile(r"^\[(=*)\[(.*)\]\1\]$", re.DOTALL)
 
 
 def _key(node: object) -> tuple[int, int, str]:
@@ -57,11 +65,16 @@ def _string_value(node: object | None) -> str | None:
     raw = ast_text(node).strip()
     if not raw:
         return None
+    if match := _LONG_STRING_RE.fullmatch(raw):
+        value = match.group(2)
+        if value.startswith("\r\n"):
+            value = value[2:]
+        elif value.startswith(("\r", "\n")):
+            value = value[1:]
+        return value
     try:
         value = ast.literal_eval(raw)
     except (SyntaxError, ValueError):
-        if raw.startswith("[[") and raw.endswith("]]"):
-            return raw[2:-2]
         return raw.strip("\"'") or None
     return value if isinstance(value, str) else None
 
@@ -75,7 +88,14 @@ def _index_parts(node: Any | None) -> tuple[str, ...]:
         table = ast_field(node, "table")
         field = ast_field(node, "field") or ast_field(node, "method")
         prefix = _index_parts(table)
-        name = ast_text(field)
+        if node.type == "bracket_index_expression":
+            if getattr(field, "type", None) != "string":
+                return ()
+            name = _string_value(field)
+            if not name:
+                return ()
+        else:
+            name = ast_text(field)
         return (*prefix, name) if name else prefix
     raw = ast_text(node)
     return tuple(part for part in re.split(r"[.:]", raw) if part)
@@ -164,11 +184,10 @@ def _require_call(node: Any) -> bool:
 
 def _require_module(node: object) -> str | None:
     arguments = ast_field(node, "arguments")
-    string = next(
-        (child for child in walk_all(arguments) if child.type == "string"),
-        None,
-    )
-    return _string_value(string)
+    values = named_children(arguments)
+    if len(values) != 1 or values[0].type != "string":
+        return None
+    return _string_value(values[0])
 
 
 def _imports(
@@ -281,6 +300,63 @@ def _call_parts(node: object | None) -> tuple[str | None, str] | None:
     return (".".join(parts[:-1]) or None, parts[-1])
 
 
+def _static_bracket_member(node: object) -> tuple[Any, str, Any] | None:
+    if getattr(node, "type", None) != "bracket_index_expression":
+        return None
+    table = ast_field(node, "table")
+    field = ast_field(node, "field")
+    if table is None or getattr(field, "type", None) != "string":
+        return None
+    name = _string_value(field)
+    if not name:
+        return None
+    target = next(
+        (child for child in named_children(field) if child.type == "string_content"),
+        field,
+    )
+    return table, name, target
+
+
+def _span_contains(outer: SourceSpan, inner: SourceSpan) -> bool:
+    return (
+        outer.file == inner.file
+        and (outer.start_line, outer.start_column)
+        <= (inner.start_line, inner.start_column)
+        and (inner.end_line, inner.end_column) <= (outer.end_line, outer.end_column)
+    )
+
+
+def _join_static_bracket_events(
+    source: SourceFile,
+    callable_node: object,
+    events: tuple[BodyEvent, ...],
+    ownership: object,
+) -> tuple[BodyEvent, ...]:
+    joined = list(events)
+    for node in owned_nodes(source, callable_node, ownership=ownership):  # type: ignore[arg-type]
+        member = _static_bracket_member(node)
+        if member is None:
+            continue
+        _, name, target = member
+        span = node_span(source, target)
+        if any(
+            event.kind is BodyEventKind.MEMBER and event.span == span
+            for event in joined
+        ):
+            continue
+        containing = [
+            index
+            for index, event in enumerate(joined)
+            if _span_contains(event.span, span)
+        ]
+        insertion = max(containing) + 1 if containing else len(joined)
+        joined[insertion:insertion] = [
+            BodyEvent(BodyEventKind.MEMBER, name, span),
+            BodyEvent(BodyEventKind.NAME, name, span),
+        ]
+    return tuple(joined)
+
+
 def _call(source: SourceFile, owner: SymbolId, node: Any) -> CallRef | None:
     parts = _call_parts(ast_field(node, "name"))
     if parts is None:
@@ -306,7 +382,7 @@ def _owned_calls(
         call
         for node in owned_nodes(source, callable_node, ownership=ownership)  # type: ignore[arg-type]
         if node.type == "function_call"
-        if not _require_call(node)
+        if not (_require_call(node) and _require_module(node) is not None)
         if (call := _call(source, owner, node)) is not None
     )
 
@@ -320,10 +396,16 @@ def _qualifiers(
     for node in owned_nodes(source, callable_node, ownership=ownership):  # type: ignore[arg-type]
         if node.type not in _INDEX_KINDS:
             continue
-        table = ast_field(node, "table")
-        field = ast_field(node, "field") or ast_field(node, "method")
+        static = _static_bracket_member(node)
+        if static is not None:
+            table, _, field = static
+            qualifier = ".".join(_index_parts(table))
+        else:
+            table = ast_field(node, "table")
+            field = ast_field(node, "field") or ast_field(node, "method")
+            qualifier = ast_text(table)
         if table is not None and field is not None:
-            values[node_span(source, field)] = ast_text(table)
+            values[node_span(source, field)] = qualifier
     return values
 
 
@@ -416,11 +498,17 @@ def _constant_declarations(
                 continue
             if container and container[0] not in module_names:
                 continue
-            target = (
-                ast_field(name_node, "field")
-                or ast_field(name_node, "method")
-                or name_node
-            )
+            target = ast_field(name_node, "field") or ast_field(name_node, "method")
+            if target is not None and target.type == "string":
+                target = next(
+                    (
+                        child
+                        for child in named_children(target)
+                        if child.type == "string_content"
+                    ),
+                    target,
+                )
+            target = target or name_node
             value = expressions_[index] if aligned else None
             values.append(
                 Symbol(
@@ -493,6 +581,12 @@ def extract(source: SourceFile, parser: object | None):
             source,
             callable_.node,
             ownership=ownership,
+        )
+        events = _join_static_bracket_events(
+            source,
+            callable_.node,
+            events,
+            ownership,
         )
         event_bindings = tuple(
             Binding(event.text, "?")

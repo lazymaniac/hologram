@@ -14,11 +14,13 @@ from hologram.model import (
     CallKind,
     CallRef,
     ImportRef,
+    Language,
     ReferenceConfidence,
     ReferenceContext,
     ReferenceKind,
     ReferenceRef,
     SourceFile,
+    SourceSpan,
     Symbol,
     SymbolId,
     SymbolKind,
@@ -142,6 +144,18 @@ def _strip_templates(text: str) -> str:
     return "".join(result)
 
 
+def _signature_parameter_type(type_name: str) -> str:
+    """Apply C/C++ parameter adjustments only to overload identity."""
+    value = _normalized(type_name)
+    array = re.match(r"^(.*?)(\[[^\]]*\])(.*)$", value)
+    if array is not None:
+        base, _, remainder = array.groups()
+        return _normalized(f"{base}(*){remainder}" if remainder else f"{base}*")
+    if "*" in value or "&" in value:
+        return _normalized(re.sub(r"(?:\s+(?:const|restrict|volatile))+$", "", value))
+    return _normalized(re.sub(r"\b(?:const|restrict|volatile)\b", "", value))
+
+
 def _short_type(type_name: str) -> str:
     value = _QUALIFIER_RE.sub("", type_name)
     value = value.replace("*", " ").replace("&", " ")
@@ -201,7 +215,7 @@ def _without_node(root: Any | None, omitted: Any | None) -> str:
 def _declarator_type(base: str, declarator: Any | None) -> str:
     if declarator is not None and declarator.type == "init_declarator":
         declarator = ast_field(declarator, "declarator")
-    binder = _binding_leaf(declarator)
+    binder = _deep_name(declarator)
     shape = _without_node(declarator, binder)
     if not shape:
         return _normalized(base)
@@ -424,11 +438,15 @@ def _imports(source: SourceFile, root: object) -> tuple[ImportRef, ...]:
 
 
 def _qualified_parts(raw: str) -> tuple[str, ...]:
-    return tuple(
-        part
-        for component in raw.lstrip(":").split("::")
-        if (part := _strip_templates(component).strip())
-    )
+    values: list[str] = []
+    for component in raw.lstrip(":").split("::"):
+        stripped = component.strip()
+        part = (
+            stripped if stripped.startswith("operator") else _strip_templates(stripped)
+        )
+        if part:
+            values.append(part)
+    return tuple(values)
 
 
 def _declared_type_name(node: object) -> str | None:
@@ -440,6 +458,17 @@ def _declared_type_name(node: object) -> str | None:
         alias = _binding_leaf(ast_field(parent, "declarator"))
         return ast_text(alias) or None
     return None
+
+
+def _inside_friend_declaration(node: object) -> bool:
+    current = getattr(node, "parent", None)
+    while current is not None:
+        if current.type == "friend_declaration":
+            return True
+        if current.type == "function_definition":
+            return False
+        current = getattr(current, "parent", None)
+    return False
 
 
 class _Scopes:
@@ -526,7 +555,7 @@ class _Scopes:
                 lexical = self.owner(node)
                 if len(name_parts) > 1:
                     lexical = (*self.namespace_owner(node), *name_parts[:-1])
-                signature = f"({','.join(p.type_name for p in parameters)})"
+                signature = f"({','.join(_signature_parameter_type(p.type_name) for p in parameters)})"
                 self.callables[_key(node)] = (
                     *lexical,
                     f"{name_parts[-1]}{signature}",
@@ -588,6 +617,12 @@ def _is_constant(node: object) -> bool:
     )
 
 
+def _initializer(declarator: object | None) -> Any | None:
+    if declarator is None or getattr(declarator, "type", "") != "init_declarator":
+        return None
+    return ast_field(declarator, "value")
+
+
 def _local_bindings(body: object | None) -> tuple[Binding, ...]:
     values: list[Binding] = []
     for node in walk_owned(body, _FACT_BOUNDARIES):
@@ -620,7 +655,12 @@ def _call_parts(function: Any | None) -> tuple[str | None, str] | None:
     return (None, parts[0]) if parts else None
 
 
-def _call(source: SourceFile, owner: SymbolId, node: Any) -> CallRef | None:
+def _call(
+    source: SourceFile,
+    owner: SymbolId,
+    node: Any,
+    type_names: frozenset[str],
+) -> CallRef | None:
     if node.type == "new_expression":
         type_node = ast_field(node, "type")
         name = _short_type(ast_text(type_node))
@@ -658,12 +698,13 @@ def _call(source: SourceFile, owner: SymbolId, node: Any) -> CallRef | None:
     if parts is None:
         return None
     receiver, name = parts
+    construct = source.language is Language.CPP and name in type_names
     return CallRef(
         owner,
         node_span(source, node),
         name,
-        receiver,
-        CallKind.CALL,
+        None if construct else receiver,
+        CallKind.CONSTRUCT if construct else CallKind.CALL,
         argument_count(node),
     )
 
@@ -672,12 +713,114 @@ def _calls(
     source: SourceFile,
     owner: SymbolId,
     root: object | None,
+    type_names: frozenset[str],
 ) -> tuple[CallRef, ...]:
     return ordered_unique(
         call
         for node in walk_owned(root, _FACT_BOUNDARIES)
         if node.type in _CALL_KINDS
-        if (call := _call(source, owner, node)) is not None
+        if (call := _call(source, owner, node, type_names)) is not None
+    )
+
+
+def _direct_constructions(
+    source: SourceFile,
+    owner: SymbolId,
+    root: object | None,
+) -> tuple[CallRef, ...]:
+    if source.language is not Language.CPP:
+        return ()
+    values: list[CallRef] = []
+    for node in walk_owned(root, _FACT_BOUNDARIES):
+        if node.type not in _DECLARATION_KINDS:
+            continue
+        type_node = ast_field(node, "type")
+        if type_node is None or type_node.type in {
+            "placeholder_type_specifier",
+            "primitive_type",
+            "sized_type_specifier",
+        }:
+            continue
+        name = _short_type(ast_text(type_node))
+        if not name or name == "?" or name in _PRIMITIVES:
+            continue
+        for declarator in _direct_declarators(node):
+            value = _initializer(declarator)
+            if value is None or value.type not in {"argument_list", "initializer_list"}:
+                continue
+            values.append(
+                CallRef(
+                    owner,
+                    node_span(source, declarator),
+                    name,
+                    None,
+                    CallKind.CONSTRUCT,
+                    len(named_children(value)),
+                )
+            )
+    return ordered_unique(values)
+
+
+def _inside_span(inner: SourceSpan, outer: SourceSpan) -> bool:
+    return (
+        inner.file == outer.file
+        and (outer.start_line, outer.start_column)
+        <= (inner.start_line, inner.start_column)
+        and (inner.end_line, inner.end_column) <= (outer.end_line, outer.end_column)
+    )
+
+
+def _join_construction_events(
+    events: tuple[BodyEvent, ...],
+    calls: Iterable[CallRef],
+) -> tuple[BodyEvent, ...]:
+    constructions = tuple(call for call in calls if call.kind is CallKind.CONSTRUCT)
+    construct_spans = {call.span for call in constructions}
+    joined = [
+        BodyEvent(BodyEventKind.CONSTRUCT, event.text, event.span)
+        if event.kind is BodyEventKind.CALL and event.span in construct_spans
+        else event
+        for event in events
+    ]
+    existing = {event.span for event in joined if event.kind is BodyEventKind.CONSTRUCT}
+    for call in constructions:
+        if call.span in existing:
+            continue
+        insertion = next(
+            (
+                index
+                for index, event in enumerate(joined)
+                if _inside_span(event.span, call.span)
+            ),
+            len(joined),
+        )
+        joined.insert(
+            insertion,
+            BodyEvent(BodyEventKind.CONSTRUCT, call.name, call.span),
+        )
+        existing.add(call.span)
+    return tuple(joined)
+
+
+def _callable_body_span(
+    source: SourceFile,
+    node: object,
+    body: object,
+) -> SourceSpan:
+    roots = [
+        child
+        for child in named_children(node)
+        if child.type == "field_initializer_list" or _key(child) == _key(body)
+    ]
+    spans = [node_span(source, root) for root in roots] or [node_span(source, body)]
+    first = min(spans)
+    last = max(spans, key=lambda span: (span.end_line, span.end_column))
+    return SourceSpan(
+        source.file,
+        first.start_line,
+        first.start_column,
+        last.end_line,
+        last.end_column,
     )
 
 
@@ -744,6 +887,7 @@ class _Extractor:
         self.source = source
         self.root = root
         self.scopes = _Scopes(root)
+        self.type_names = {path[-1] for path in self.scopes.types.values() if path}
         self.entries: dict[SymbolId, _Entry] = {}
         self.calls: list[CallRef] = []
         self.references: list[ReferenceRef] = []
@@ -840,7 +984,7 @@ class _Extractor:
             kind, label = _TYPE_KINDS[node.type]
             enumerators = _enum_members(node) if kind is SymbolKind.ENUM else ()
             fields = _field_declarations(node) if kind is SymbolKind.CLASS else ()
-            field_values: list[tuple[Any, Any, str]] = []
+            field_values: list[tuple[Any, Any, Any, str]] = []
             for field in fields:
                 for declarator in _direct_declarators(field):
                     if _function_parts(declarator) is not None:
@@ -851,6 +995,7 @@ class _Extractor:
                     field_values.append(
                         (
                             field,
+                            declarator,
                             binder,
                             _object_type(
                                 _declarator_type(
@@ -862,12 +1007,12 @@ class _Extractor:
             components = (
                 tuple(ast_text(ast_field(item, "name")) for item in enumerators)
                 if kind is SymbolKind.ENUM
-                else tuple(ast_text(binder) for _, binder, _ in field_values)
+                else tuple(ast_text(binder) for _, _, binder, _ in field_values)
             )
             params = (
                 components
                 if kind is SymbolKind.ENUM
-                else tuple(type_name for _, _, type_name in field_values)
+                else tuple(type_name for _, _, _, type_name in field_values)
             )
             visibility = self.scopes.access(
                 node,
@@ -886,7 +1031,12 @@ class _Extractor:
                 annotations=_annotations(node),
                 modifiers=(label,) if label == "union" else (),
             )
-            self.add(type_symbol)
+            type_body = ast_field(node, "body")
+            self.add(
+                type_symbol,
+                definition=type_body is not None,
+                declared_visibility=visibility if type_body is None else None,
+            )
             self.references.extend(
                 _type_references(
                     self.source,
@@ -926,7 +1076,7 @@ class _Extractor:
                         returns=name,
                     )
                 )
-            for field, binder, type_name in field_values:
+            for field, declarator, binder, type_name in field_values:
                 field_name = ast_text(binder)
                 field_symbol = Symbol(
                     symbol_id(
@@ -944,7 +1094,12 @@ class _Extractor:
                     annotations=_annotations(field),
                     modifiers=_modifiers(field),
                 )
-                self.add(field_symbol)
+                field_visibility = self.scopes.access(field, Visibility.PUBLIC)
+                self.add(
+                    field_symbol,
+                    definition=_initializer(declarator) is not None,
+                    declared_visibility=field_visibility,
+                )
                 self.references.extend(
                     _type_references(
                         self.source,
@@ -982,6 +1137,7 @@ class _Extractor:
                 else (),
             )
             self.add(symbol)
+            self.type_names.add(name)
             self.references.extend(
                 _type_references(self.source, symbol.id, (declared,))
             )
@@ -1000,13 +1156,23 @@ class _Extractor:
             for declarator in _direct_declarators(node):
                 if _function_parts(declarator) is not None:
                     continue
+                name_node = _deep_name(declarator)
                 binder = _binding_leaf(declarator)
-                if binder is None:
+                if binder is None or name_node is None:
                     continue
                 name = ast_text(binder)
                 owner = self.scopes.owner(node, callables=False)
+                qualified = _qualified_parts(ast_text(name_node))
+                if len(qualified) > 1:
+                    owner = (*self.scopes.namespace_owner(node), *qualified[:-1])
                 type_name = _object_type(
                     _declarator_type(_base_type(node, declarator), declarator)
+                )
+                visibility = (
+                    Visibility.PRIVATE
+                    if "static" in _modifiers(node)
+                    or self.scopes.anonymous_namespace(node)
+                    else Visibility.PUBLIC
                 )
                 symbol = Symbol(
                     symbol_id(
@@ -1016,16 +1182,22 @@ class _Extractor:
                         name,
                     ),
                     node_span(self.source, binder),
-                    Visibility.PRIVATE
-                    if "static" in _modifiers(node)
-                    or self.scopes.anonymous_namespace(node)
-                    else Visibility.PUBLIC,
+                    visibility,
                     name,
                     returns=type_name or None,
                     annotations=_annotations(node),
                     modifiers=_modifiers(node),
                 )
-                self.add(symbol)
+                self.add(
+                    symbol,
+                    definition=_initializer(declarator) is not None
+                    or len(qualified) > 1,
+                    declared_visibility=(
+                        visibility
+                        if _initializer(declarator) is None and len(qualified) == 1
+                        else None
+                    ),
+                )
                 self.references.extend(
                     _type_references(
                         self.source,
@@ -1051,19 +1223,31 @@ class _Extractor:
             function, name_node = parts
             parameters = _parameters(function)
             param_types = tuple(parameter.type_name for parameter in parameters)
+            signature_types = tuple(
+                _signature_parameter_type(parameter) for parameter in param_types
+            )
             qualified = _qualified_parts(ast_text(name_node))
             if not qualified:
                 continue
             name = qualified[-1]
-            lexical_owner = self.scopes.owner(node, callables=False)
+            friend = _inside_friend_declaration(node)
+            lexical_owner = (
+                self.scopes.namespace_owner(node)
+                if friend
+                else self.scopes.owner(node, callables=False)
+            )
             owner = lexical_owner
             if len(qualified) > 1:
                 owner = (*self.scopes.namespace_owner(node), *qualified[:-1])
             enclosing_type = owner[-1] if owner else None
-            constructor = enclosing_type is not None and name == enclosing_type
+            constructor = (
+                not friend and enclosing_type is not None and name == enclosing_type
+            )
             kind = (
                 SymbolKind.CONSTRUCTOR
                 if constructor
+                else SymbolKind.FUNCTION
+                if friend
                 else SymbolKind.METHOD
                 if enclosing_type is not None
                 and any(path == owner for path in self.scopes.types.values())
@@ -1080,13 +1264,24 @@ class _Extractor:
                 or None
             )
             body = body_node(node)
-            modifiers = _modifiers(node, function)
-            visibility = self.scopes.access(
-                node,
-                Visibility.PRIVATE
-                if ("static" in modifiers and kind is SymbolKind.FUNCTION)
-                or self.scopes.anonymous_namespace(node)
-                else Visibility.PUBLIC,
+            callable_span = (
+                _callable_body_span(self.source, node, body)
+                if body is not None
+                else None
+            )
+            modifiers = ordered_unique(
+                (*_modifiers(node, function), *(("friend",) if friend else ()))
+            )
+            visibility = (
+                Visibility.PUBLIC
+                if friend
+                else self.scopes.access(
+                    node,
+                    Visibility.PRIVATE
+                    if ("static" in modifiers and kind is SymbolKind.FUNCTION)
+                    or self.scopes.anonymous_namespace(node)
+                    else Visibility.PUBLIC,
+                )
             )
             suffix = (
                 f":{returns}"
@@ -1094,7 +1289,7 @@ class _Extractor:
                 else ""
             )
             symbol = Symbol(
-                symbol_id(self.source, owner, kind, name, param_types),
+                symbol_id(self.source, owner, kind, name, signature_types),
                 node_span(self.source, node),
                 visibility,
                 f"{name}({','.join(param_types)}){suffix}",
@@ -1105,7 +1300,11 @@ class _Extractor:
                 ),
                 annotations=_annotations(node),
                 modifiers=modifiers,
-                body_lines=body_lines(body),
+                body_lines=(
+                    callable_span.end_line - callable_span.start_line + 1
+                    if callable_span is not None
+                    else body_lines(body)
+                ),
             )
             declared_visibility = visibility if not definition else None
             self.add(
@@ -1127,6 +1326,13 @@ class _Extractor:
             if body is None:
                 continue
             events = body_events(self.source, node, include_anonymous=True)
+            owned_calls = ordered_unique(
+                (
+                    *_calls(self.source, symbol.id, node, frozenset(self.type_names)),
+                    *_direct_constructions(self.source, symbol.id, node),
+                )
+            )
+            events = _join_construction_events(events, owned_calls)
             existing_names = {binding.name for binding in symbol.bindings}
             anonymous_bindings = tuple(
                 Binding(event.text, "?")
@@ -1147,12 +1353,12 @@ class _Extractor:
                 )
             self.bodies[symbol.id] = BodyIR(
                 symbol.id,
-                node_span(self.source, body),
+                callable_span or node_span(self.source, body),
                 events,
             )
-            self.calls.extend(_calls(self.source, symbol.id, body))
+            self.calls.extend(owned_calls)
             self.references.extend(
-                _body_references(self.source, symbol.id, body, events)
+                _body_references(self.source, symbol.id, node, events)
             )
 
     def symbols(self) -> tuple[Symbol, ...]:

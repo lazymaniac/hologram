@@ -98,6 +98,51 @@ public:
 """
 
 
+CPP_DECLARATOR_SOURCE = b"""\
+struct Forward;
+struct Forward { int value; };
+
+struct Holder {
+    static int count;
+    friend int helper(Holder);
+};
+int Holder::count = 1;
+int helper(Holder value) { return friend_target(value); }
+
+int cv(const int value);
+int cv(int value) { return value; }
+int array_arg(int values[]);
+int array_arg(int *values) { return values[0]; }
+
+struct Ops {
+    bool operator<(int value) const;
+    bool operator<<(int value) const;
+};
+bool Ops::operator<(int value) const { return less(value); }
+bool Ops::operator<<(int value) const { return shift(value); }
+"""
+
+
+CPP_CONSTRUCTION_SOURCE = b"""\
+struct Token {
+    Token(int value);
+    int stored;
+};
+Token::Token(int value)
+    : stored(normalize(value)) {
+    finish();
+}
+int build() {
+    Token b(1);
+    Token c{2};
+    auto d = Token(3);
+    auto callback = []() { return inside(); };
+    callback();
+    return use(b, c, d);
+}
+"""
+
+
 def snapshot(raw: bytes, language: Language, file: str) -> SourceFile:
     return SourceFile(
         Path("/missing") / file,
@@ -302,6 +347,132 @@ class CppParserTest(unittest.TestCase):
             {item.id for item in result.symbols},
             {item.id for item in shifted.symbols},
         )
+
+    def test_declaration_adjustments_friend_static_and_forward_merges(self) -> None:
+        result = extract_file(
+            snapshot(CPP_DECLARATOR_SOURCE, Language.CPP, "src/declarators.cpp")
+        )
+
+        forward = symbols(result, "Forward", SymbolKind.CLASS)
+        self.assertEqual(len(forward), 1)
+        self.assertEqual(forward[0].span.start_line, 2)
+        self.assertEqual(forward[0].components, ("value",))
+
+        count = symbols(result, "count", SymbolKind.FIELD)
+        self.assertEqual(len(count), 1)
+        self.assertEqual(count[0].id.container_path, ("Holder",))
+        self.assertEqual(count[0].span.start_line, 8)
+        self.assertEqual(count[0].returns, "int")
+        self.assertFalse(
+            any(
+                item.name == "count" and item.id.container_path == ()
+                for item in result.symbols
+            )
+        )
+
+        helper = symbols(result, "helper", SymbolKind.FUNCTION)
+        self.assertEqual(len(helper), 1)
+        self.assertEqual(helper[0].id.container_path, ())
+        self.assertEqual(helper[0].span.start_line, 9)
+        self.assertFalse(symbols(result, "helper", SymbolKind.METHOD))
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == helper[0].id],
+            ["friend_target"],
+        )
+
+        cv = symbols(result, "cv", SymbolKind.FUNCTION)
+        array_arg = symbols(result, "array_arg", SymbolKind.FUNCTION)
+        self.assertEqual(len(cv), 1)
+        self.assertEqual(cv[0].id.signature_key, "(int)")
+        self.assertEqual(cv[0].params, ("int",))
+        self.assertEqual(cv[0].span.start_line, 12)
+        self.assertEqual(len(array_arg), 1)
+        self.assertEqual(array_arg[0].id.signature_key, "(int*)")
+        self.assertEqual(array_arg[0].params, ("int*",))
+        self.assertEqual(array_arg[0].span.start_line, 14)
+
+        operators = {
+            item.name: item
+            for item in result.symbols
+            if item.kind is SymbolKind.METHOD
+            and item.id.container_path == ("Ops",)
+            and item.name.startswith("operator")
+        }
+        self.assertEqual(set(operators), {"operator<", "operator<<"})
+        self.assertNotEqual(operators["operator<"].id, operators["operator<<"].id)
+        self.assertEqual(
+            [
+                call.name
+                for call in result.calls
+                if call.caller == operators["operator<"].id
+            ],
+            ["less"],
+        )
+        self.assertEqual(
+            [
+                call.name
+                for call in result.calls
+                if call.caller == operators["operator<<"].id
+            ],
+            ["shift"],
+        )
+        self.assertEqual(
+            len(result.bodies), len({body.owner for body in result.bodies})
+        )
+
+    def test_constructions_lambdas_and_constructor_initializers_join_exactly(
+        self,
+    ) -> None:
+        result = extract_file(
+            snapshot(CPP_CONSTRUCTION_SOURCE, Language.CPP, "src/construction.cpp")
+        )
+        constructor = symbols(result, "Token", SymbolKind.CONSTRUCTOR)[0]
+        constructor_bodies = [
+            body for body in result.bodies if body.owner == constructor.id
+        ]
+        self.assertEqual(len(constructor_bodies), 1)
+        constructor_body = constructor_bodies[0]
+        self.assertEqual(
+            (
+                constructor_body.span.start_line,
+                constructor_body.span.start_column,
+                constructor_body.span.end_line,
+                constructor_body.span.end_column,
+            ),
+            (6, 4, 8, 1),
+        )
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == constructor.id],
+            ["normalize", "finish"],
+        )
+
+        build = symbols(result, "build", SymbolKind.FUNCTION)[0]
+        build_calls = [call for call in result.calls if call.caller == build.id]
+        self.assertEqual(
+            [(call.name, call.kind, call.arity) for call in build_calls],
+            [
+                ("Token", CallKind.CONSTRUCT, 1),
+                ("Token", CallKind.CONSTRUCT, 1),
+                ("Token", CallKind.CONSTRUCT, 1),
+                ("inside", CallKind.CALL, 0),
+                ("callback", CallKind.CALL, 0),
+                ("use", CallKind.CALL, 3),
+            ],
+        )
+        build_body = next(body for body in result.bodies if body.owner == build.id)
+        event_facts = {(event.kind, event.span) for event in build_body.events}
+        for call in build_calls:
+            expected = (
+                BodyEventKind.CONSTRUCT
+                if call.kind is CallKind.CONSTRUCT
+                else BodyEventKind.CALL
+            )
+            self.assertIn((expected, call.span), event_facts)
+        self.assertEqual(len(result.symbols), len({item.id for item in result.symbols}))
+        self.assertEqual(
+            len(result.bodies), len({body.owner for body in result.bodies})
+        )
+        assert_body_fact_events(self, result)
 
 
 if __name__ == "__main__":

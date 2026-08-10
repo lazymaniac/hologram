@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import hologram
+from hologram.legacy import extract_file as extract_legacy_file
 from hologram.model import (
     Binding,
     BodyEventKind,
@@ -48,6 +49,19 @@ function M:reset(reason)
     return helper(reason)
 end
 
+return M
+"""
+
+
+LUA_STATIC_BRACKET_SOURCE = b"""\
+local dep = require [==[pkg.deep]==]
+local M = {}
+M['LIMIT'] = 7
+M["run"] = function(name)
+    local runtime = require(name)
+    dep['call'](name)
+    return runtime(name)
+end
 return M
 """
 
@@ -183,6 +197,90 @@ class LuaParserTest(unittest.TestCase):
             {item.id for item in shifted.symbols},
         )
 
+    def test_static_brackets_long_requires_and_dynamic_requires_are_exact(self) -> None:
+        source = snapshot(
+            LUA_STATIC_BRACKET_SOURCE,
+            Language.LUA,
+            "src/static_brackets.lua",
+        )
+        result = extract_file(source)
+
+        self.assertEqual(
+            [(item.module, item.name, item.alias) for item in result.imports],
+            [("pkg.deep", None, "dep")],
+        )
+        limit = symbol(result, "LIMIT", SymbolKind.CONSTANT)
+        self.assertEqual(limit.id.container_path, ("M",))
+        self.assertEqual(
+            source.raw.splitlines()[limit.span.start_line - 1][
+                limit.span.start_column : limit.span.end_column
+            ],
+            b"LIMIT",
+        )
+
+        run = symbol(result, "run", SymbolKind.METHOD)
+        self.assertEqual(run.id.container_path, ("M",))
+        self.assertEqual(run.params, ("?",))
+        self.assertEqual(
+            [
+                (call.receiver, call.name, call.arity)
+                for call in result.calls
+                if call.caller == run.id
+            ],
+            [
+                (None, "require", 1),
+                ("dep", "call", 1),
+                (None, "runtime", 1),
+            ],
+        )
+        dynamic_require = next(
+            call
+            for call in result.calls
+            if call.caller == run.id and call.name == "require"
+        )
+        run_body = next(item for item in result.bodies if item.owner == run.id)
+        self.assertIn(
+            (BodyEventKind.CALL, dynamic_require.span, "require"),
+            {(event.kind, event.span, event.text) for event in run_body.events},
+        )
+        bracket_reference = next(
+            reference
+            for reference in result.references
+            if reference.owner == run.id
+            and reference.qualifier == "dep"
+            and reference.name == "call"
+        )
+        self.assertEqual(
+            source.raw.splitlines()[bracket_reference.span.start_line - 1][
+                bracket_reference.span.start_column : bracket_reference.span.end_column
+            ],
+            b"call",
+        )
+        self.assertIn(
+            (BodyEventKind.MEMBER, bracket_reference.span, "call"),
+            {(event.kind, event.span, event.text) for event in run_body.events},
+        )
+        self.assertIn(
+            (BodyEventKind.NAME, bracket_reference.span, "call"),
+            {(event.kind, event.span, event.text) for event in run_body.events},
+        )
+        assert_body_fact_events(self, result)
+
+    def test_v1_nested_method_container_preserves_the_full_qualifier(self) -> None:
+        raw = """\
+local A = {}
+A.B = {}
+function A.B.run(value)
+    return value
+end
+return A
+"""
+        root = Path("/project")
+        projected = extract_legacy_file(root / "nested.lua", root, text=raw)
+        run = next(item for item in projected if item.name == "run")
+
+        self.assertEqual(run.container, "A.B")
+
 
 @unittest.skipUnless(hologram.has_parser("html"), "tree-sitter-html not installed")
 class HtmlParserTest(unittest.TestCase):
@@ -214,6 +312,27 @@ class HtmlParserTest(unittest.TestCase):
         )
         self.assertEqual(app.id.container_path, ())
         self.assertEqual(price.id.container_path, ())
+
+    def test_id_attribute_name_is_ascii_case_insensitive(self) -> None:
+        source = snapshot(
+            b'<case-panel ID="Root" Id=\'Second\' iD=bare id="lower"></case-panel>\n',
+            Language.HTML,
+            "web/case.html",
+        )
+        result = extract_file(source)
+
+        self.assertEqual(
+            [item.name for item in result.symbols],
+            ["case-panel", "#Root", "#Second", "#bare", "#lower"],
+        )
+        for name in ("Root", "Second", "bare", "lower"):
+            item = symbol(result, f"#{name}", SymbolKind.FUNCTION)
+            self.assertEqual(
+                source.raw.splitlines()[item.span.start_line - 1][
+                    item.span.start_column : item.span.end_column
+                ].decode(),
+                name,
+            )
 
 
 class ExtensionDispatchTest(unittest.TestCase):
