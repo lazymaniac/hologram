@@ -66,10 +66,24 @@ _LEGACY_COMPAT_NAMES = frozenset(
     }
 )
 
+_RESOLVE_NAMES = frozenset(
+    {
+        "UNKNOWN_TYPE_KEY",
+        "ResolutionResult",
+        "ResolutionStatus",
+        "ResolvedCall",
+        "ResolvedImport",
+        "ResolvedReference",
+        "canonical_type_key",
+        "resolve_project",
+    }
+)
+
 __all__ = [
     "CONFIG_NAME",
     "CONFIG_SCHEMA_VERSION",
     "STATE_FORMAT_VERSION",
+    "UNKNOWN_TYPE_KEY",
     "Binding",
     "BodyEvent",
     "BodyEventKind",
@@ -89,6 +103,11 @@ __all__ = [
     "ReferenceContext",
     "ReferenceKind",
     "ReferenceRef",
+    "ResolutionResult",
+    "ResolutionStatus",
+    "ResolvedCall",
+    "ResolvedImport",
+    "ResolvedReference",
     "ScanEntry",
     "ScanResult",
     "ScanStatus",
@@ -102,6 +121,7 @@ __all__ = [
     "Visibility",
     "build_digest",
     "canonical_config_bytes",
+    "canonical_type_key",
     "compute_state",
     "default_config",
     "detect_language",
@@ -112,6 +132,7 @@ __all__ = [
     "read_digest_state",
     "render_config",
     "render_simple",
+    "resolve_project",
     "run_cli",
     "scan_files",
     "scan_project",
@@ -119,7 +140,11 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    """Temporarily expose legacy module attributes for v1 compatibility."""
+    """Load modular APIs lazily and retain the temporary v1 compatibility surface."""
+    if name in _RESOLVE_NAMES:
+        value = getattr(import_module(".resolve", __name__), name)
+        globals()[name] = value
+        return value
     if name not in _LEGACY_COMPAT_NAMES:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     legacy = import_module(".legacy", __name__)
