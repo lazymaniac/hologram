@@ -1442,14 +1442,14 @@ class ParserHelperTest(unittest.TestCase):
             event_pairs,
         )
 
-    def test_stdlib_callable_scope_excludes_external_and_comprehension_binders(
+    def test_stdlib_callable_scope_classifies_external_and_comprehension_binders(
         self,
     ) -> None:
         raw = (
             b"def enclosing():\n"
             b"    outer = 0\n"
             b"    def run(items, subject):\n"
-            b"        global shared\n"
+            b"        global shared, item\n"
             b"        nonlocal outer\n"
             b"        shared = 1\n"
             b"        outer = 2\n"
@@ -1473,10 +1473,12 @@ class ParserHelperTest(unittest.TestCase):
         for line, name in ((8, "local"), (9, "values")):
             span = token_span(snapshot, line, name)
             self.assertIn((BodyEventKind.LOCAL, span), event_pairs)
-        for occurrence in (1, 2):
-            span = token_span(snapshot, 9, "item", occurrence=occurrence)
-            self.assertIn((BodyEventKind.NAME, span), event_pairs)
-            self.assertNotIn((BodyEventKind.LOCAL, span), event_pairs)
+        item_use = token_span(snapshot, 9, "item", occurrence=1)
+        item_binder = token_span(snapshot, 9, "item", occurrence=2)
+        self.assertIn((BodyEventKind.NAME, item_use), event_pairs)
+        self.assertNotIn((BodyEventKind.LOCAL, item_use), event_pairs)
+        self.assertIn((BodyEventKind.LOCAL, item_binder), event_pairs)
+        self.assertNotIn((BodyEventKind.NAME, item_binder), event_pairs)
         for occurrence in (1, 2):
             span = token_span(snapshot, 11, "choice", occurrence=occurrence)
             self.assertIn((BodyEventKind.LOCAL, span), event_pairs)

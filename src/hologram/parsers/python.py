@@ -51,6 +51,14 @@ _REGISTRATION_CALLS = frozenset(
 _CONFIGURATION_CALLS = frozenset({"config", "configure", "set_callback"})
 _CALLBACK_KEYWORDS = frozenset({"callback", "handler", "listener", "target"})
 _REFLECTION_CALLS = frozenset({"getattr", "setattr"})
+_WEAK_REFERENCE_CONTEXTS = frozenset(
+    {
+        ReferenceContext.ANNOTATION,
+        ReferenceContext.CONFIG,
+        ReferenceContext.REFLECTION,
+        ReferenceContext.STRING,
+    }
+)
 
 
 def _module_name(file: str) -> str | None:
@@ -431,15 +439,6 @@ def _arity(node: ast.Call) -> int | None:
     return len(node.args) + len(node.keywords)
 
 
-def _inside(inner: SourceSpan, outer: SourceSpan) -> bool:
-    return (
-        inner.file == outer.file
-        and (outer.start_line, outer.start_column)
-        <= (inner.start_line, inner.start_column)
-        and (inner.end_line, inner.end_column) <= (outer.end_line, outer.end_column)
-    )
-
-
 def _suffix_span(source: SourceFile, node: ast.Attribute) -> SourceSpan:
     span = ast_span(source, node)
     width = len(node.attr.encode("utf-8"))
@@ -450,6 +449,14 @@ def _suffix_span(source: SourceFile, node: ast.Attribute) -> SourceSpan:
         span.end_line,
         span.end_column,
     )
+
+
+def _type_constructor_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
 
 
 class _OwnedFactVisitor(ast.NodeVisitor):
@@ -466,7 +473,15 @@ class _OwnedFactVisitor(ast.NodeVisitor):
         self.calls: list[CallRef] = []
         self.references: list[ReferenceRef] = []
         self.context = context
-        self._events = events
+        self._event_spans_by_end = {
+            (
+                event.kind,
+                event.text,
+                event.span.end_line,
+                event.span.end_column,
+            ): event.span
+            for event in events
+        }
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         return
@@ -489,6 +504,13 @@ class _OwnedFactVisitor(ast.NodeVisitor):
         self.context = context
         self.visit(node)
         self.context = previous
+
+    def _confidence(self) -> ReferenceConfidence:
+        return (
+            ReferenceConfidence.POSSIBLE
+            if self.context in _WEAK_REFERENCE_CONTEXTS
+            else ReferenceConfidence.DEFINITE
+        )
 
     def visit_Call(self, node: ast.Call) -> None:
         parts = _call_parts(node.func)
@@ -569,7 +591,7 @@ class _OwnedFactVisitor(ast.NodeVisitor):
                 None,
                 kind,
                 context=self.context,
-                confidence=ReferenceConfidence.DEFINITE,
+                confidence=self._confidence(),
             )
         )
 
@@ -594,9 +616,30 @@ class _OwnedFactVisitor(ast.NodeVisitor):
                 qualifier,
                 kind,
                 context=self.context,
-                confidence=ReferenceConfidence.DEFINITE,
+                confidence=self._confidence(),
             )
         )
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        if self.context is not ReferenceContext.TYPE:
+            self.generic_visit(node)
+            return
+        self.visit(node.value)
+        arguments = (
+            node.slice.elts if isinstance(node.slice, ast.Tuple) else (node.slice,)
+        )
+        constructor = _type_constructor_name(node.value)
+        if constructor == "Literal":
+            for argument in arguments:
+                self._visit_in_context(argument, ReferenceContext.ANNOTATION)
+            return
+        if constructor == "Annotated" and arguments:
+            self.visit(arguments[0])
+            for metadata in arguments[1:]:
+                self._visit_in_context(metadata, ReferenceContext.ANNOTATION)
+            return
+        for argument in arguments:
+            self.visit(argument)
 
     def visit_Constant(self, node: ast.Constant) -> None:
         if self.context is not ReferenceContext.TYPE or not isinstance(node.value, str):
@@ -634,14 +677,14 @@ class _OwnedFactVisitor(ast.NodeVisitor):
             BodyEventKind.TYPE if kind is ReferenceKind.TYPE else BodyEventKind.NAME
         )
         container = ast_span(self.source, node)
-        matches = [
-            event.span
-            for event in self._events
-            if event.kind is event_kind
-            and event.text == text
-            and _inside(event.span, container)
-        ]
-        return matches[-1] if matches else None
+        return self._event_spans_by_end.get(
+            (
+                event_kind,
+                text,
+                container.end_line,
+                container.end_column,
+            )
+        )
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         self.visit(node.target)

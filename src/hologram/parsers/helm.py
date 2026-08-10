@@ -33,11 +33,13 @@ _TOKEN_RE = re.compile(
     rb"|\."
     rb"|-?\d+(?:\.\d+)?"
     rb"|:=|==|!=|<=|>=|\|\||&&"
+    rb"|[(),]"
     rb"|[-+*/%=<>|]"
 )
 _CONTROL_ACTIONS = {b"if": "if", b"range": "loop", b"with": "if"}
 _NON_EVENT_BLOCKS = frozenset({b"block"})
 _KEYWORDS = frozenset({b"else", b"if"})
+_PUNCTUATION = frozenset({b"(", b")", b","})
 _OPERATORS = frozenset(
     {
         b"!=",
@@ -258,9 +260,8 @@ def _scan_actions(
     return tuple(actions), tuple(diagnostics)
 
 
-def _action_tokens(action: _Action, raw: bytes) -> tuple[_Token, ...]:
+def _action_content_bounds(action: _Action, raw: bytes) -> tuple[int, int]:
     body = raw[action.body_start : action.body_end]
-    body_start = action.body_start
     left = 0
     right = len(body)
     while left < right and body[left : left + 1].isspace():
@@ -275,15 +276,113 @@ def _action_tokens(action: _Action, raw: bytes) -> tuple[_Token, ...]:
         right -= 1
         while right > left and body[right - 1 : right].isspace():
             right -= 1
-    content = body[left:right]
+    return action.body_start + left, action.body_start + right
+
+
+def _action_tokens(action: _Action, raw: bytes) -> tuple[_Token, ...]:
+    content_start, content_end = _action_content_bounds(action, raw)
+    content = raw[content_start:content_end]
     return tuple(
         _Token(
             token.group(),
-            body_start + left + token.start(),
-            body_start + left + token.end(),
+            content_start + token.start(),
+            content_start + token.end(),
         )
         for token in _TOKEN_RE.finditer(content)
     )
+
+
+def _unparsed_action_span(
+    action: _Action,
+    raw: bytes,
+    tokens: tuple[_Token, ...],
+) -> tuple[int, int] | None:
+    content_start, content_end = _action_content_bounds(action, raw)
+    cursor = content_start
+    for token in tokens:
+        gap = raw[cursor : token.start]
+        for offset, byte in enumerate(gap):
+            if not bytes((byte,)).isspace():
+                return cursor + offset, cursor + offset + 1
+        cursor = token.end
+    gap = raw[cursor:content_end]
+    for offset, byte in enumerate(gap):
+        if not bytes((byte,)).isspace():
+            return cursor + offset, cursor + offset + 1
+    return None
+
+
+def _decode_go_interpreted(raw: bytes) -> str:
+    quote = raw[:1]
+    if len(raw) < 2 or quote not in {b'"', b"'"} or raw[-1:] != quote:
+        raise ValueError("malformed quoted literal")
+    content = raw[1:-1].decode("utf-8")
+    escapes = {
+        "a": "\a",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "v": "\v",
+        "\\": "\\",
+        "'": "'",
+        '"': '"',
+    }
+    decoded: list[str] = []
+    index = 0
+    while index < len(content):
+        character = content[index]
+        if character in {"\n", "\r"}:
+            raise ValueError("newline in interpreted string")
+        if character != "\\":
+            decoded.append(character)
+            index += 1
+            continue
+        if index + 1 >= len(content):
+            raise ValueError("truncated escape")
+        escape = content[index + 1]
+        if escape in escapes:
+            decoded.append(escapes[escape])
+            index += 2
+            continue
+        if escape in "01234567":
+            digits = content[index + 1 : index + 4]
+            if len(digits) != 3 or any(digit not in "01234567" for digit in digits):
+                raise ValueError("octal escape must contain three digits")
+            value = int(digits, 8)
+            if value > 0xFF:
+                raise ValueError("octal escape is outside one byte")
+            decoded.append(chr(value))
+            index += 4
+            continue
+        widths = {"x": 2, "u": 4, "U": 8}
+        width = widths.get(escape)
+        if width is None:
+            raise ValueError(f"unknown escape \\{escape}")
+        digits = content[index + 2 : index + 2 + width]
+        if len(digits) != width or any(
+            digit not in "0123456789abcdefABCDEF" for digit in digits
+        ):
+            raise ValueError(f"\\{escape} escape must contain {width} hex digits")
+        codepoint = int(digits, 16)
+        if escape in {"u", "U"} and (
+            codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF
+        ):
+            raise ValueError("Unicode escape is not a scalar value")
+        decoded.append(chr(codepoint))
+        index += width + 2
+    decoded_value = "".join(decoded)
+    if quote == b"'" and len(decoded_value) != 1:
+        raise ValueError("character literal must decode to one character")
+    return decoded_value
+
+
+def _validate_quoted_token(raw: bytes) -> None:
+    if raw[:1] in {b'"', b"'"}:
+        _decode_go_interpreted(raw)
+    elif raw[:1] == b"`":
+        raw[1:-1].decode("utf-8")
 
 
 def _string_value(raw: bytes) -> str | None:
@@ -291,26 +390,7 @@ def _string_value(raw: bytes) -> str | None:
         return None
     if raw[:1] == b"`":
         return raw[1:-1].decode("utf-8")
-    content = raw[1:-1]
-    decoded = bytearray()
-    escapes = {
-        ord('"'): ord('"'),
-        ord("\\"): ord("\\"),
-        ord("n"): ord("\n"),
-        ord("r"): ord("\r"),
-        ord("t"): ord("\t"),
-    }
-    index = 0
-    while index < len(content):
-        byte = content[index]
-        if byte != ord("\\") or index + 1 == len(content):
-            decoded.append(byte)
-            index += 1
-            continue
-        following = content[index + 1]
-        decoded.append(escapes.get(following, following))
-        index += 2
-    return decoded.decode("utf-8")
+    return _decode_go_interpreted(raw)
 
 
 def _literal_text(raw: bytes) -> str | None:
@@ -394,45 +474,242 @@ def _chart_symbols(
     return symbols
 
 
+def _pipeline_segments(
+    tokens: tuple[_Token, ...],
+    start: int = 0,
+) -> tuple[tuple[int, int], ...]:
+    segments: list[tuple[int, int]] = []
+    segment_start = start
+    for index in range(start, len(tokens)):
+        if tokens[index].raw != b"|":
+            continue
+        segments.append((segment_start, index))
+        segment_start = index + 1
+    segments.append((segment_start, len(tokens)))
+    return tuple(segments)
+
+
+def _operand_indices(
+    tokens: tuple[_Token, ...],
+    start: int,
+    end: int,
+) -> tuple[int, ...]:
+    return tuple(
+        index
+        for index in range(start, end)
+        if tokens[index].raw not in _OPERATORS and tokens[index].raw not in _PUNCTUATION
+    )
+
+
+def _pipeline_error(tokens: tuple[_Token, ...]) -> str | None:
+    if not tokens:
+        return "template pipeline is required"
+    depth = 0
+    for token in tokens:
+        if token.raw == b"(":
+            depth += 1
+        elif token.raw == b")":
+            depth -= 1
+            if depth < 0:
+                return "unexpected closing parenthesis"
+    if depth:
+        return "unclosed pipeline parenthesis"
+    for start, end in _pipeline_segments(tokens):
+        operands = _operand_indices(tokens, start, end)
+        if not operands:
+            return "template pipeline command is empty"
+        assignment = next(
+            (
+                index
+                for index in range(start, end)
+                if tokens[index].raw in {b":=", b"="}
+            ),
+            None,
+        )
+        if assignment is None:
+            continue
+        left = _operand_indices(tokens, start, assignment)
+        right = _operand_indices(tokens, assignment + 1, end)
+        if not left or not right:
+            return "template assignment requires a variable and value"
+        if tokens[assignment].raw == b":=" and any(
+            not tokens[index].raw.startswith(b"$") for index in left
+        ):
+            return "template declaration target must be a variable"
+    return None
+
+
+def _invocation_shape_error(tokens: tuple[_Token, ...]) -> str | None:
+    for index, token in enumerate(tokens):
+        if token.raw not in {b"include", b"template"}:
+            continue
+        if index + 1 >= len(tokens):
+            return f"{token.raw.decode('ascii')} target must be a string"
+        target = _string_value(tokens[index + 1].raw)
+        if not target:
+            return f"{token.raw.decode('ascii')} target must be a nonempty string"
+        if token.raw == b"include":
+            segment_end = next(
+                (
+                    candidate
+                    for candidate in range(index + 2, len(tokens))
+                    if tokens[candidate].raw == b"|"
+                ),
+                len(tokens),
+            )
+            has_pipeline_input = index > 0 and tokens[index - 1].raw == b"|"
+            if not has_pipeline_input and not _operand_indices(
+                tokens, index + 2, segment_end
+            ):
+                return "include requires a template value"
+    return None
+
+
+def _action_shape_error(tokens: tuple[_Token, ...]) -> str | None:
+    if not tokens:
+        return "template action is empty"
+    keyword = tokens[0].raw
+    if keyword == b"define":
+        if len(tokens) != 2:
+            return "template define requires exactly one string name"
+        name = _string_value(tokens[1].raw)
+        if not name:
+            return "template definition name must be a nonempty string"
+        return None
+    if keyword == b"end":
+        return None if len(tokens) == 1 else "template end takes no arguments"
+    if keyword in _CONTROL_ACTIONS:
+        return _pipeline_error(tokens[1:]) or _invocation_shape_error(tokens[1:])
+    if keyword in _NON_EVENT_BLOCKS:
+        if len(tokens) < 3 or not _string_value(tokens[1].raw):
+            return "template block requires a nonempty string name and pipeline"
+        return _pipeline_error(tokens[2:]) or _invocation_shape_error(tokens[2:])
+    if keyword == b"else":
+        if len(tokens) == 1:
+            return None
+        if tokens[1].raw not in _CONTROL_ACTIONS or len(tokens) < 3:
+            return "template else branch must be empty or contain a control pipeline"
+        return _pipeline_error(tokens[2:]) or _invocation_shape_error(tokens[2:])
+    return _pipeline_error(tokens) or _invocation_shape_error(tokens)
+
+
+def _command_span_end(
+    tokens: tuple[_Token, ...],
+    start: int,
+    end: int,
+) -> int:
+    operands = _operand_indices(tokens, start, end)
+    return tokens[operands[-1]].end
+
+
+def _action_fact_roles(
+    tokens: tuple[_Token, ...],
+    pipeline_start: int,
+) -> tuple[set[int], dict[int, tuple[str, int, bool]]]:
+    locals_: set[int] = set()
+    commands: dict[int, tuple[str, int, bool]] = {}
+    for segment_start, segment_end in _pipeline_segments(tokens, pipeline_start):
+        assignment = next(
+            (
+                index
+                for index in range(segment_start, segment_end)
+                if tokens[index].raw == b":="
+            ),
+            None,
+        )
+        command_start = segment_start
+        if assignment is not None:
+            locals_.update(
+                index
+                for index in range(segment_start, assignment)
+                if tokens[index].raw.startswith(b"$")
+            )
+            command_start = assignment + 1
+        operands = _operand_indices(tokens, command_start, segment_end)
+        if not operands:
+            continue
+        head = operands[0]
+        raw = tokens[head].raw
+        if (
+            _literal_text(raw) is None
+            and re.fullmatch(rb"[A-Za-z_][A-Za-z0-9_.-]*", raw)
+            and raw
+            not in {
+                b"block",
+                b"define",
+                b"else",
+                b"end",
+                b"if",
+                b"range",
+                b"with",
+            }
+        ):
+            commands[head] = (
+                raw.decode("utf-8"),
+                _command_span_end(tokens, head, segment_end),
+                False,
+            )
+    for index, token in enumerate(tokens[pipeline_start:], start=pipeline_start):
+        if token.raw not in {b"include", b"template"}:
+            continue
+        target = _string_value(tokens[index + 1].raw)
+        if target is None:
+            continue
+        segment_end = next(
+            (
+                candidate
+                for candidate in range(index + 1, len(tokens))
+                if tokens[candidate].raw == b"|"
+            ),
+            len(tokens),
+        )
+        commands[index] = (
+            target,
+            _command_span_end(tokens, index, segment_end),
+            True,
+        )
+    return locals_, commands
+
+
 def _action_events(
     source: SourceFile,
     starts: tuple[int, ...],
     definition: _Definition,
     tokens: tuple[_Token, ...],
+    *,
+    pipeline_start: int = 0,
 ) -> None:
     if not tokens:
         return
+    local_indices, commands = _action_fact_roles(tokens, pipeline_start)
     for index, token in enumerate(tokens):
-        if token.raw in {b"include", b"template"} and index + 1 < len(tokens):
-            target = _string_value(tokens[index + 1].raw)
-            command_end = next(
-                (
-                    tokens[candidate_index - 1].end
-                    for candidate_index in range(index + 1, len(tokens))
-                    if tokens[candidate_index].raw == b"|"
-                ),
-                tokens[-1].end,
+        command = commands.get(index)
+        if command is not None:
+            call_name, command_end, _ = command
+            call_span = _span(source, starts, token.start, command_end)
+            definition.calls.append(
+                CallRef(
+                    symbol_id(
+                        source,
+                        (),
+                        SymbolKind.FUNCTION,
+                        definition.name,
+                    ),
+                    call_span,
+                    call_name,
+                    None,
+                    CallKind.CALL,
+                    None,
+                )
             )
-            if target is not None:
-                call_span = _span(source, starts, token.start, command_end)
-                definition.calls.append(
-                    CallRef(
-                        symbol_id(
-                            source,
-                            (),
-                            SymbolKind.FUNCTION,
-                            definition.name,
-                        ),
-                        call_span,
-                        target,
-                        None,
-                        CallKind.CALL,
-                        None,
-                    )
-                )
-                definition.events.append(
-                    BodyEvent(BodyEventKind.CALL, target, call_span)
-                )
+            definition.events.append(
+                BodyEvent(BodyEventKind.CALL, call_name, call_span)
+            )
+        if index in local_indices:
+            definition.events.append(
+                _event(source, starts, BodyEventKind.LOCAL, token.raw.decode(), token)
+            )
+            continue
         literal = _literal_text(token.raw)
         if literal is not None:
             definition.events.append(
@@ -464,7 +741,9 @@ def _action_events(
                     token,
                 )
             )
-        elif token.raw not in {b"include", b"template"}:
+        elif token.raw in _PUNCTUATION:
+            continue
+        elif command is None or not command[2]:
             definition.events.append(
                 _event(
                     source,
@@ -533,7 +812,48 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
         if action.comment:
             continue
         tokens = _action_tokens(action, source.raw)
-        if not tokens:
+        unparsed = _unparsed_action_span(action, source.raw, tokens)
+        if unparsed is not None:
+            diagnostics.append(
+                _syntax_diagnostic(
+                    source,
+                    starts,
+                    "invalid template action token",
+                    unparsed[0],
+                    unparsed[1],
+                )
+            )
+            continue
+        invalid_string: tuple[_Token, ValueError] | None = None
+        for token in tokens:
+            try:
+                _validate_quoted_token(token.raw)
+            except ValueError as exc:
+                invalid_string = token, exc
+                break
+        if invalid_string is not None:
+            invalid_token, invalid_error = invalid_string
+            diagnostics.append(
+                _syntax_diagnostic(
+                    source,
+                    starts,
+                    f"invalid quoted literal: {invalid_error}",
+                    invalid_token.start,
+                    invalid_token.end,
+                )
+            )
+            continue
+        shape_error = _action_shape_error(tokens)
+        if shape_error is not None:
+            diagnostics.append(
+                _syntax_diagnostic(
+                    source,
+                    starts,
+                    shape_error,
+                    action.start,
+                    action.end,
+                )
+            )
             continue
         keyword = tokens[0].raw
         action_span = _span(source, starts, action.start, action.end)
@@ -550,18 +870,9 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
                     )
                 )
                 continue
-            name = _string_value(tokens[1].raw) if len(tokens) >= 2 else None
+            name = _string_value(tokens[1].raw)
             if name is None:
-                diagnostics.append(
-                    _syntax_diagnostic(
-                        source,
-                        starts,
-                        "template definition name must be a string",
-                        action.start,
-                        action.end,
-                    )
-                )
-                continue
+                raise AssertionError("validated template definition has no name")
             definition = _Definition(name, action.start, action.end)
             stack.append(_Frame(b"define", definition, action_span))
             continue
@@ -595,7 +906,7 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
                 )
                 continue
             frame = stack[-1]
-            else_if = len(tokens) > 1 and tokens[1].raw == b"if"
+            else_control = len(tokens) > 1 and tokens[1].raw in _CONTROL_ACTIONS
             if frame.final_else:
                 diagnostics.append(
                     _syntax_diagnostic(
@@ -607,9 +918,15 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
                     )
                 )
                 continue
-            frame.final_else = not else_if
+            frame.final_else = not else_control
             if definition is not None:
-                _action_events(source, starts, definition, tokens)
+                _action_events(
+                    source,
+                    starts,
+                    definition,
+                    tokens,
+                    pipeline_start=2 if else_control else len(tokens),
+                )
             continue
 
         if keyword == b"end":

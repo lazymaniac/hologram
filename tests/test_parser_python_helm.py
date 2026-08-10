@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
+import hologram.parsers.python as python_parser
 from hologram import legacy
 from hologram.model import (
+    BodyEvent,
     BodyEventKind,
     CallKind,
     DiagnosticSeverity,
@@ -18,6 +23,7 @@ from hologram.model import (
     ReferenceKind,
     SourceFile,
     SourceRole,
+    SourceSpan,
     SymbolKind,
     Visibility,
 )
@@ -588,6 +594,150 @@ def outer():
             ["direct_call", "nested_call", "lambda_call", "class_call"],
         )
 
+    def test_annotation_context_references_are_explicitly_possible(self) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+@entrypoint
+@framework.decorator
+def decorated(value: "Forward") -> "Result":
+    return value
+""",
+                file="annotations.py",
+                language=Language.PYTHON,
+            )
+        )
+
+        annotations = [
+            reference
+            for reference in result.references
+            if reference.context is ReferenceContext.ANNOTATION
+        ]
+        self.assertEqual(
+            [reference.name for reference in annotations],
+            ["entrypoint", "framework", "decorator", "Forward", "Result"],
+        )
+        self.assertTrue(
+            all(
+                reference.confidence is ReferenceConfidence.POSSIBLE
+                for reference in annotations
+            )
+        )
+        assert_body_fact_events(self, result)
+
+    def test_literal_values_and_annotated_metadata_are_not_type_references(
+        self,
+    ) -> None:
+        result = extract_file(
+            snapshot(
+                b"""\
+from typing import Annotated, Literal
+
+def parse(
+    status: Literal["ready", "Phantom"],
+    user: Annotated["User", "Metadata", marker, pkg.Meta],
+    nested: dict[str, list["Real"]],
+) -> Annotated[list["Result"], "ReturnMetadata"]:
+    local: Annotated[list["Kept"], "LocalMetadata", local_marker] = user
+    choice: Literal["Ignored"] = status
+    return local
+""",
+                file="type-strings.py",
+                language=Language.PYTHON,
+            )
+        )
+
+        possible_annotations = [
+            (reference.name, reference.kind)
+            for reference in result.references
+            if reference.context is ReferenceContext.ANNOTATION
+            and reference.confidence is ReferenceConfidence.POSSIBLE
+        ]
+        self.assertEqual(
+            possible_annotations,
+            [
+                ("User", ReferenceKind.TYPE),
+                ("marker", ReferenceKind.NAME),
+                ("pkg", ReferenceKind.NAME),
+                ("Meta", ReferenceKind.NAME),
+                ("Real", ReferenceKind.TYPE),
+                ("Result", ReferenceKind.TYPE),
+                ("Kept", ReferenceKind.TYPE),
+                ("local_marker", ReferenceKind.NAME),
+            ],
+        )
+        self.assertTrue(
+            {
+                "Ignored",
+                "LocalMetadata",
+                "Metadata",
+                "Phantom",
+                "ReturnMetadata",
+                "ready",
+            }.isdisjoint(reference.name for reference in result.references)
+        )
+        parse_symbol = next(
+            symbol for symbol in result.symbols if symbol.name == "parse"
+        )
+        body = next(body for body in result.bodies if body.owner == parse_symbol.id)
+        event_facts = {(event.kind, event.text) for event in body.events}
+        self.assertIn((BodyEventKind.TYPE, "Kept"), event_facts)
+        self.assertIn((BodyEventKind.NAME, "local_marker"), event_facts)
+        self.assertNotIn((BodyEventKind.TYPE, "LocalMetadata"), event_facts)
+        assert_body_fact_events(self, result)
+
+    def test_attribute_reference_event_lookup_is_preindexed_once(self) -> None:
+        raw = (
+            b"def inspect(obj):\n"
+            b"    return (obj.first, obj.second, obj.third, obj.fourth)\n"
+        )
+        source = snapshot(raw, file="attributes.py", language=Language.PYTHON)
+        callable_node = ast.parse(source.text).body[0]
+        self.assertIsInstance(callable_node, ast.FunctionDef)
+        events = python_parser.ast_body_events(source, callable_node)
+
+        class CountingEvents:
+            def __init__(self, values: tuple[BodyEvent, ...]) -> None:
+                self.values = values
+                self.iterations = 0
+
+            def __iter__(self) -> Iterator[BodyEvent]:
+                self.iterations += 1
+                return iter(self.values)
+
+        counting = CountingEvents(events)
+        owner = python_parser.symbol_id(
+            source,
+            (),
+            SymbolKind.FUNCTION,
+            "inspect",
+        )
+        visitor = python_parser._OwnedFactVisitor(
+            source,
+            owner,
+            cast(tuple[BodyEvent, ...], counting),
+        )
+        for statement in callable_node.body:
+            visitor.visit(statement)
+
+        self.assertEqual(counting.iterations, 1)
+        self.assertEqual(
+            [reference.name for reference in visitor.references],
+            [
+                "obj",
+                "first",
+                "obj",
+                "second",
+                "obj",
+                "third",
+                "obj",
+                "fourth",
+            ],
+        )
+        event_pairs = {(event.kind, event.span) for event in events}
+        for reference in visitor.references:
+            self.assertIn((BodyEventKind.NAME, reference.span), event_pairs)
+
 
 class HelmParserTest(unittest.TestCase):
     def test_chart_values_and_named_templates_preserve_existing_facts(self) -> None:
@@ -834,7 +984,10 @@ class HelmParserTest(unittest.TestCase):
         )
 
         self.assertEqual(result.diagnostics, ())
-        self.assertEqual([call.name for call in result.calls], ["real.target"])
+        self.assertEqual(
+            [call.name for call in result.calls],
+            ["printf", "real.target"],
+        )
         body = result.bodies[0]
         self.assertEqual(
             [
@@ -928,6 +1081,147 @@ class HelmParserTest(unittest.TestCase):
             ["if", "loop", "if"],
         )
         assert_body_fact_events(self, result)
+
+    def test_helm_action_shapes_reject_missing_or_trailing_arguments(self) -> None:
+        malformed = (
+            b'{{define "x"}}{{if}}{{end}}{{end}}',
+            b'{{define "x" trailing}}{{end}}',
+            b'{{define "x"}}{{end trailing}}',
+            b'{{define ""}}{{end}}',
+        )
+        for index, raw in enumerate(malformed):
+            with self.subTest(index=index):
+                source = snapshot(
+                    raw,
+                    file=f"chart/templates/action-shape-{index}.tpl",
+                    language=Language.HELM,
+                )
+                result = extract_file(source)
+                project = extract_project(Path("/repo"), (source,))
+                codes = [diagnostic.code for diagnostic in result.diagnostics]
+                self.assertIn("helm-syntax-error", codes)
+                self.assertNotIn("extractor-crash", codes)
+                self.assertFalse(project.complete)
+
+        valid = extract_file(
+            snapshot(
+                b"""\
+{{define "valid"}}
+{{if required "message" .Values.enabled | default true}}{{end}}
+{{range .Values.items}}{{end}}
+{{with .Values.context}}{{end}}
+{{block "nested" .}}{{end}}
+{{end}}
+""",
+                file="chart/templates/valid-shapes.tpl",
+                language=Language.HELM,
+            )
+        )
+        self.assertEqual(valid.diagnostics, ())
+
+    def test_helm_assignment_and_generic_commands_emit_joined_body_facts(
+        self,
+    ) -> None:
+        raw = b"""\
+{{define "commands"}}
+{{ $name := printf "%s" .Values.name }}{{ required "msg" $name }}
+{{end}}
+"""
+        result = extract_file(
+            snapshot(
+                raw,
+                file="chart/templates/commands.tpl",
+                language=Language.HELM,
+            )
+        )
+
+        definition = result.symbols[0]
+        line = raw.splitlines()[1]
+        printf_start = line.index(b"printf")
+        printf_end = line.index(b".Values.name") + len(b".Values.name")
+        required_start = line.index(b"required")
+        required_end = line.rindex(b"$name") + len(b"$name")
+        expected_calls = [
+            (
+                "printf",
+                SourceSpan(
+                    result.source.file,
+                    2,
+                    printf_start,
+                    2,
+                    printf_end,
+                ),
+            ),
+            (
+                "required",
+                SourceSpan(
+                    result.source.file,
+                    2,
+                    required_start,
+                    2,
+                    required_end,
+                ),
+            ),
+        ]
+        self.assertEqual(
+            [(call.name, call.span) for call in result.calls],
+            expected_calls,
+        )
+        self.assertTrue(all(call.caller == definition.id for call in result.calls))
+        body = result.bodies[0]
+        local_span = SourceSpan(
+            result.source.file,
+            2,
+            line.index(b"$name"),
+            2,
+            line.index(b"$name") + len(b"$name"),
+        )
+        self.assertIn(
+            (BodyEventKind.LOCAL, "$name", local_span),
+            {(event.kind, event.text, event.span) for event in body.events},
+        )
+        event_pairs = {(event.kind, event.span) for event in body.events}
+        for _, call_span in expected_calls:
+            self.assertIn((BodyEventKind.CALL, call_span), event_pairs)
+        assert_body_fact_events(self, result)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / result.source.file
+            path.parent.mkdir(parents=True)
+            path.write_bytes(raw)
+            projected = legacy.extract_file(path, root)
+        self.assertEqual(projected[0].calls, [])
+
+    def test_helm_quoted_names_decode_go_escapes_and_reject_invalid_ones(
+        self,
+    ) -> None:
+        valid = extract_file(
+            snapshot(
+                b'{{define "\\u0066oo"}}{{end}}',
+                file="chart/templates/escaped.tpl",
+                language=Language.HELM,
+            )
+        )
+        self.assertEqual(valid.diagnostics, ())
+        self.assertEqual([symbol.name for symbol in valid.symbols], ["foo"])
+
+        invalid = (
+            b'{{define "\\q"}}{{end}}',
+            b'{{define "\\u12"}}{{end}}',
+        )
+        for index, raw in enumerate(invalid):
+            with self.subTest(index=index):
+                source = snapshot(
+                    raw,
+                    file=f"chart/templates/invalid-escape-{index}.tpl",
+                    language=Language.HELM,
+                )
+                result = extract_file(source)
+                project = extract_project(Path("/repo"), (source,))
+                codes = [diagnostic.code for diagnostic in result.diagnostics]
+                self.assertIn("helm-syntax-error", codes)
+                self.assertNotIn("extractor-crash", codes)
+                self.assertFalse(project.complete)
 
     def test_values_yaml_preserves_unicode_word_keys_and_byte_spans(self) -> None:
         raw = "foó: 1\nplain: 2\n".encode()

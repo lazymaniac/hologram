@@ -752,6 +752,30 @@ class _AstBodyEventWalker:
         if isinstance(node, ast.Constant):
             self.event(BodyEventKind.TYPE, str(node.value), node)
             return
+        if isinstance(node, ast.Subscript):
+            self.visit_annotation(node.value)
+            arguments = (
+                node.slice.elts if isinstance(node.slice, ast.Tuple) else (node.slice,)
+            )
+            constructor = (
+                node.value.id
+                if isinstance(node.value, ast.Name)
+                else node.value.attr
+                if isinstance(node.value, ast.Attribute)
+                else None
+            )
+            if constructor == "Literal":
+                for argument in arguments:
+                    self.visit(argument)
+                return
+            if constructor == "Annotated" and arguments:
+                self.visit_annotation(arguments[0])
+                for metadata in arguments[1:]:
+                    self.visit(metadata)
+                return
+            for argument in arguments:
+                self.visit_annotation(argument)
+            return
         for child in ast.iter_child_nodes(node):
             self.visit_annotation(child)
 
@@ -848,8 +872,10 @@ class _AstBodyEventWalker:
             kind = (
                 BodyEventKind.LOCAL
                 if isinstance(node.ctx, ast.Store)
-                and node.id not in self._external_bindings
-                and id(node) not in self._comprehension_targets
+                and (
+                    id(node) in self._comprehension_targets
+                    or node.id not in self._external_bindings
+                )
                 else BodyEventKind.NAME
             )
             self.event(kind, node.id, node)

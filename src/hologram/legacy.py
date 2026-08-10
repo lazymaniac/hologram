@@ -1687,6 +1687,8 @@ def _legacy_python_call_spans(
 def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
     if symbol.kind not in _LEGACY_CALLABLE_KINDS:
         return []
+    if file_ir.source.language is Language.HELM:
+        return []
     if file_ir.source.language is Language.PYTHON:
         ranks = {
             span: rank
