@@ -32,7 +32,9 @@ from .config import (
     default_config,
     load_config,
 )
-from .model import Language
+from .model import FileIR as CanonicalFileIR
+from .model import Language, SourceFile, SymbolKind, Visibility
+from .parsers.api import extract_file as extract_canonical_file
 from .state import compute_state, read_digest_state
 
 TYPE_KINDS = ("class", "interface", "record", "enum", "type")
@@ -1600,160 +1602,8 @@ def _extract_html(text: str, rel: str) -> list[Symbol]:
     return symbols
 
 
-# ---------------------------------------------------------------------------
-# Helm extraction (no grammar: define names, values keys, chart name)
-# ---------------------------------------------------------------------------
-
-_HELM_DEFINE_RE = re.compile(r'\{\{-?\s*define\s+"([^"]+)"')
-
-
-def _extract_helm(text: str, rel: str) -> list[Symbol]:
-    """Only fires inside a chart layout (templates/, Chart.yaml, values.yaml) so
-    ordinary YAML (CI configs, k8s manifests) stays out of the digest."""
-    parts = Path(rel).parts
-    base = Path(rel).name
-    in_chart = "templates" in parts or base in ("Chart.yaml", "values.yaml")
-    if not in_chart:
-        return []
-    symbols: list[Symbol] = []
-    if base == "Chart.yaml":
-        m = re.search(r"(?m)^name:\s*(\S+)", text)
-        if m:
-            symbols.append(Symbol(
-                name=m.group(1), kind="class", file=rel,
-                line=text.count("\n", 0, m.start()) + 1,
-                signature=f"chart {m.group(1)}", visibility="pub", lang="helm"))
-    elif base == "values.yaml":
-        for m in re.finditer(r"(?m)^([A-Za-z_][\w-]*):", text):
-            symbols.append(Symbol(
-                name=m.group(1), kind="fn", file=rel,
-                line=text.count("\n", 0, m.start()) + 1,
-                signature=m.group(1), visibility="priv", lang="helm"))
-    for m in _HELM_DEFINE_RE.finditer(text):
-        symbols.append(Symbol(
-            name=m.group(1), kind="fn", file=rel,
-            line=text.count("\n", 0, m.start()) + 1,
-            signature=f'define "{m.group(1)}"', visibility="pub", lang="helm"))
-    return symbols
-
-
-# ---------------------------------------------------------------------------
-# Python extraction (stdlib ast — precise and dependency-free)
-# ---------------------------------------------------------------------------
-
-def _py_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
-    types = []
-    for arg in node.args.posonlyargs + node.args.args:
-        if arg.arg in ("self", "cls"):
-            continue
-        types.append(tight_type(ast.unparse(arg.annotation)) if arg.annotation else "?")
-    return types
-
-
-def _py_calls(node) -> list[str]:
-    seen: list[str] = []
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Call):
-            fn = sub.func
-            if isinstance(fn, ast.Name):
-                entry = fn.id
-            elif isinstance(fn, ast.Attribute):
-                base = fn.value
-                entry = (f"{base.id}.{fn.attr}"
-                         if isinstance(base, ast.Name) and base.id not in ("self", "cls")
-                         else fn.attr)
-            else:
-                continue
-            if entry not in seen:
-                seen.append(entry)
-    return seen[:12]
-
-
-def _py_raises(node) -> list[str]:
-    seen: list[str] = []
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Raise) and sub.exc is not None:
-            target = sub.exc.func if isinstance(sub.exc, ast.Call) else sub.exc
-            name = target.id if isinstance(target, ast.Name) else getattr(target, "attr", None)
-            if name and name not in seen:
-                seen.append(name)
-    return seen
-
-
-def _py_bindings(node) -> dict[str, str]:
-    """Annotated params plus `x = Ctor(...)` locals (Ctor = capitalized name)."""
-    binds: dict[str, str] = {}
-    for arg in node.args.posonlyargs + node.args.args:
-        if arg.annotation is not None and arg.arg not in ("self", "cls"):
-            binds[arg.arg] = _base_type(ast.unparse(arg.annotation))
-    for sub in ast.walk(node):
-        if (isinstance(sub, ast.Assign) and len(sub.targets) == 1
-                and isinstance(sub.targets[0], ast.Name)
-                and isinstance(sub.value, ast.Call)
-                and isinstance(sub.value.func, ast.Name)
-                and sub.value.func.id[:1].isupper()):
-            binds[sub.targets[0].id] = sub.value.func.id
-        elif (isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name)):
-            binds[sub.target.id] = _base_type(ast.unparse(sub.annotation))
-    return binds
-
-
-def _py_fn_symbol(node, rel: str, container: str | None) -> Symbol:
-    returns = tight_type(ast.unparse(node.returns)) if node.returns else None
-    params = _py_params(node)
-    ret_suffix = f":{returns}" if returns and returns != "None" else ""
-    return Symbol(
-        name=node.name, kind="method" if container else "fn", file=rel,
-        line=node.lineno,
-        signature=f"{node.name}({','.join(params)}){ret_suffix}",
-        params=params, returns=returns,
-        visibility="priv" if node.name.startswith("_") else "pub",
-        container=container, lang="python",
-        calls=[c for c in _py_calls(node) if c != node.name],
-        raises=_py_raises(node),
-        bindings=_py_bindings(node),
-        size=(getattr(node, "end_lineno", node.lineno) - node.lineno + 1),
-    )
-
-
-def _extract_python(text: str, rel: str) -> list[Symbol]:
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return []
-    symbols: list[Symbol] = []
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            base_names = {b.id if isinstance(b, ast.Name) else getattr(b, "attr", "")
-                          for b in node.bases}
-            is_enum = base_names & {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
-            members = [t.targets[0].id for t in node.body
-                       if isinstance(t, ast.Assign) and len(t.targets) == 1
-                       and isinstance(t.targets[0], ast.Name)] if is_enum else []
-            fields = [ast.unparse(t.annotation) for t in node.body
-                      if isinstance(t, ast.AnnAssign)]
-            supers = [] if is_enum else [
-                re.sub(r"\[.*", "", ast.unparse(b)).split(".")[-1] for b in node.bases]
-            symbols.append(Symbol(
-                name=node.name, kind="enum" if is_enum else "class", file=rel,
-                line=node.lineno,
-                signature=f"class {node.name}",
-                params=members if is_enum else fields,
-                supers=supers,
-                visibility="priv" if node.name.startswith("_") else "pub",
-                lang="python",
-            ))
-            for sub in node.body:
-                if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    symbols.append(_py_fn_symbol(sub, rel, node.name))
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            symbols.append(_py_fn_symbol(node, rel, None))
-    return symbols
-
-
 EXTRACTORS = {
     "java": _extract_java,
-    "python": _extract_python,
     "typescript": _extract_ts,
     "javascript": _extract_ts,
     "tsx": _extract_tsx,
@@ -1767,14 +1617,154 @@ EXTRACTORS = {
     "cpp": _extract_cpp,
     "lua": _extract_lua,
     "html": _extract_html,
-    "helm": _extract_helm,
 }
+
+
+_LEGACY_CANONICAL_KINDS = frozenset(
+    {
+        SymbolKind.CLASS,
+        SymbolKind.CONSTRUCTOR,
+        SymbolKind.ENUM,
+        SymbolKind.FUNCTION,
+        SymbolKind.INTERFACE,
+        SymbolKind.METHOD,
+        SymbolKind.PROPERTY,
+        SymbolKind.RECORD,
+        SymbolKind.REEXPORT,
+        SymbolKind.TYPE,
+    }
+)
+_LEGACY_CALLABLE_KINDS = frozenset(
+    {
+        SymbolKind.CONSTRUCTOR,
+        SymbolKind.FUNCTION,
+        SymbolKind.METHOD,
+        SymbolKind.PROPERTY,
+    }
+)
+
+
+def _legacy_call_name(call) -> str:
+    if call.receiver in {None, "cls", "self"}:
+        return call.name
+    return f"{call.receiver}.{call.name}"
+
+
+def _legacy_python_call_spans(
+    file_ir: CanonicalFileIR,
+    symbol,
+) -> tuple[tuple[int, int, int, int], ...]:
+    """Recover v1's AST walk order only at the compatibility boundary."""
+    try:
+        tree = ast.parse(file_ir.source.text)
+    except SyntaxError:
+        return ()
+    owner = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == symbol.name
+            and node.lineno == symbol.span.start_line
+            and node.col_offset == symbol.span.start_column
+        ),
+        None,
+    )
+    if owner is None:
+        return ()
+    return tuple(
+        (
+            node.lineno,
+            node.col_offset,
+            node.end_lineno or node.lineno,
+            node.end_col_offset or node.col_offset,
+        )
+        for node in ast.walk(owner)
+        if isinstance(node, ast.Call)
+    )
+
+
+def _legacy_calls(file_ir: CanonicalFileIR, symbol) -> list[str]:
+    if symbol.kind not in _LEGACY_CALLABLE_KINDS:
+        return []
+    owned = [call for call in file_ir.calls if call.caller == symbol.id]
+    if file_ir.source.language is Language.PYTHON:
+        ranks = {
+            span: rank
+            for rank, span in enumerate(_legacy_python_call_spans(file_ir, symbol))
+        }
+        owned.sort(
+            key=lambda call: ranks.get(
+                (
+                    call.span.start_line,
+                    call.span.start_column,
+                    call.span.end_line,
+                    call.span.end_column,
+                ),
+                len(ranks),
+            )
+        )
+    result: list[str] = []
+    for call in owned:
+        name = _legacy_call_name(call)
+        if name == symbol.name or name in result:
+            continue
+        result.append(name)
+    return result[:12]
+
+
+def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
+    projected: list[Symbol] = []
+    for symbol in file_ir.symbols:
+        if symbol.kind not in _LEGACY_CANONICAL_KINDS:
+            continue
+        if file_ir.source.language is Language.PYTHON:
+            if symbol.kind in {
+                SymbolKind.CLASS,
+                SymbolKind.ENUM,
+                SymbolKind.FUNCTION,
+            }:
+                supported = not symbol.id.container_path
+            elif symbol.kind in {SymbolKind.METHOD, SymbolKind.PROPERTY}:
+                supported = len(symbol.id.container_path) == 1
+            else:
+                supported = False
+            if not supported:
+                continue
+        projected.append(
+            Symbol(
+                name=symbol.name,
+                kind=(
+                    SymbolKind.METHOD.value
+                    if symbol.kind is SymbolKind.PROPERTY
+                    else symbol.kind.value
+                ),
+                file=symbol.file,
+                line=symbol.span.start_line,
+                signature=symbol.signature,
+                params=list(symbol.params),
+                returns=symbol.returns,
+                visibility=(
+                    "pub" if symbol.visibility is Visibility.PUBLIC else "priv"
+                ),
+                container=symbol.container,
+                lang=symbol.lang.value,
+                calls=_legacy_calls(file_ir, symbol),
+                supers=list(symbol.supers),
+                permits=list(symbol.permits),
+                raises=list(symbol.raises),
+                bindings={
+                    binding.name: binding.type_name for binding in symbol.bindings
+                },
+                size=symbol.body_lines,
+            )
+        )
+    return projected
 
 
 def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol]:
     lang = detect_language(path)
-    extractor = EXTRACTORS.get(lang)
-    if extractor is None:
+    if lang is None:
         return []
     if lang in _GRAMMAR_MODULES and not has_parser(lang):
         raise SystemExit(f"{lang} extraction requires tree-sitter: "
@@ -1784,7 +1774,20 @@ def extract_file(path: Path, root: Path, text: str | None = None) -> list[Symbol
             text = path.read_text(errors="replace")
         except OSError:
             return []
-    return extractor(text, str(path.relative_to(root)))
+    rel = path.relative_to(root).as_posix()
+    if lang in {Language.HELM.value, Language.PYTHON.value}:
+        raw = text.encode("utf-8")
+        source = SourceFile(
+            path,
+            rel,
+            Language(lang),
+            scan._source_role(rel),
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+        )
+        return _canonical_to_legacy(extract_canonical_file(source))
+    extractor = EXTRACTORS.get(lang)
+    return extractor(text, rel) if extractor is not None else []
 
 
 # ---------------------------------------------------------------------------
