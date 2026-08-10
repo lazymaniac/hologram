@@ -14,7 +14,6 @@ import json
 import os
 import re
 import shlex
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -35,7 +34,7 @@ if __package__:
         workspace_provenance,
     )
     from .corpus import workspace_asset_sha256 as workspace_asset_digest
-    from .reporting import private_report, require_outside_worktree
+    from .reporting import report, require_outside_worktree
     from .schema import (
         Config,
         Task,
@@ -75,7 +74,7 @@ else:
         workspace_asset_sha256 as workspace_asset_digest,
     )
     from reporting import (  # type: ignore[import-not-found,no-redef]
-        private_report,
+        report,
         require_outside_worktree,
     )
     from schema import (  # type: ignore[import-not-found,no-redef]
@@ -434,39 +433,6 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
                 "tokens_out": summary.tokens_out}
     finally:
         drop_workspace(corpus, ws)
-
-
-def report(rows: list[dict]) -> str:
-    if not rows:
-        return "no runs recorded\n"
-    if any(row.get("visibility") == "private" for row in rows):
-        return private_report(rows)
-    lines = [("| condition | runs | accepted | duplication (reuse tasks) | "
-              "reads | searches | turns | tokens in | tokens out |"),
-             "|---|---|---|---|---|---|---|---|---|"]
-    for cond in sorted({r["condition"] for r in rows}):
-        rs = [r for r in rows if r["condition"] == cond]
-        reuse = [r for r in rs if r["kind"] == "reuse"]
-        dup_rate = (100 * sum(1 for r in reuse if r["duplicated"]) / len(reuse)
-                    if reuse else 0)
-        acc = 100 * sum(1 for r in rs if r["accepted"]) / len(rs)
-
-        def mean(key, samples=rs):
-            return statistics.fmean(r[key] for r in samples)
-
-        lines.append(
-            f"| {cond} | {len(rs)} | {acc:.0f}% | {dup_rate:.0f}% | "
-            f"{mean('reads'):.1f} | {mean('searches'):.1f} | "
-            f"{mean('turns'):.1f} | {mean('tokens_in'):,.0f} | "
-            f"{mean('tokens_out'):,.0f} |")
-    lines.append("")
-    lines.append("Per-task duplication (reuse tasks):")
-    for r in sorted(rows, key=lambda r: (r["task"], r["condition"], r["rep"])):
-        if r["kind"] == "reuse":
-            mark = "DUP:" + ",".join(r["duplicated"]) if r["duplicated"] \
-                else ("reused:" + ",".join(r["reused"]) if r["reused"] else "—")
-            lines.append(f"- {r['task']} [{r['condition']}#{r['rep']}] {mark}")
-    return "\n".join(lines) + "\n"
 
 
 def _dry_runner(

@@ -1410,10 +1410,9 @@ class ReportTest(unittest.TestCase):
         md = bench.report(rows)
         self.assertIn("| A |", md)
         self.assertIn("| B |", md)
-        # duplication rate: A 0%, B 100% of reuse-kind runs
-        self.assertIn("0%", md)
-        self.assertIn("100%", md)
-        self.assertIn("reads", md)
+        self.assertIn("legacy / unclassified", md)
+        self.assertIn("unique tasks", md)
+        self.assertNotIn("normalize", md)
         self.assertNotIn("digest hits", md)
 
     def test_empty_rows(self):
