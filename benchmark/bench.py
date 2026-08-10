@@ -435,32 +435,6 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
         drop_workspace(corpus, ws)
 
 
-def _dry_runner(
-    prompt: str,
-    ws: Path,
-    model: str,
-    max_turns: int,
-    *,
-    config_dir: Path,
-) -> ProcessResult:
-    """Zero-cost runner for harness testing: touches nothing, returns a
-    minimal valid transcript."""
-    transcript = "\n".join(
-        (
-            json.dumps({"type": "system", "subtype": "init", "model": model}),
-            json.dumps({"type": "assistant", "message": {
-                "model": model, "stop_reason": "end_turn",
-                "content": [{"type": "text", "text": "Dry run complete."}],
-            }}),
-            json.dumps({"type": "result", "subtype": "success",
-                        "is_error": False, "result": "Dry run complete.",
-                        "num_turns": 0,
-                        "usage": {"input_tokens": 0, "output_tokens": 0}}),
-        )
-    )
-    return ProcessResult(transcript, "", 0)
-
-
 def _dry_run_row(
     item,
     *,

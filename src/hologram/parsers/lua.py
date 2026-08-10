@@ -141,27 +141,6 @@ def _assignment_pairs(root: object) -> dict[tuple[int, int, str], Any]:
     return pairs
 
 
-def _returned_names(root: object) -> frozenset[str]:
-    values: set[str] = set()
-    for node in walk_all(root):
-        if node.type != "return_statement" or _has_function_ancestor(node):
-            continue
-        expressions = next(
-            (
-                child
-                for child in named_children(node)
-                if child.type == "expression_list"
-            ),
-            None,
-        )
-        values.update(
-            ast_text(child)
-            for child in named_children(expressions)
-            if child.type == "identifier"
-        )
-    return frozenset(values)
-
-
 def _module_candidates(
     root: object,
     pairs: dict[tuple[int, int, str], Any],

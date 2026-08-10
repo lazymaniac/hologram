@@ -23,7 +23,6 @@ from .metrics import Metric, StaticReport, evaluate_static
 from .schema import CensusRecord, Exclusion, GoldFact, GoldSample, load_jsonl
 
 _VALIDATION_ROOT = Path(__file__).resolve().parent
-_SYNTHETIC_ROOT = _VALIDATION_ROOT / "fixtures" / "advertised"
 _REPRODUCIBLE_ENVIRONMENT = {
     "LC_ALL": "C",
     "TZ": "UTC",

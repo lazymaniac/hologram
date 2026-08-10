@@ -72,14 +72,6 @@ GRAMMAR_METADATA: Mapping[Language, GrammarMetadata] = MappingProxyType(
 )
 
 
-_GRAMMAR_MODULES: Mapping[str, tuple[str, str]] = MappingProxyType(
-    {
-        language.value: (metadata.module, metadata.distribution)
-        for language, metadata in GRAMMAR_METADATA.items()
-    }
-)
-
-
 def _optional_module(
     loader: Callable[[str], object | None],
     name: str,
