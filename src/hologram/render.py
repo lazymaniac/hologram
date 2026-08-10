@@ -49,6 +49,8 @@ class RenderSymbol:
     behaviors: tuple[str, ...]
     body_lines: int
     markers: tuple[str, ...]
+    duplicate_peers: tuple[SymbolId, ...] = ()
+    call_targets: tuple[SymbolId, ...] = ()
 
     def __post_init__(self) -> None:
         for field in (
@@ -64,6 +66,16 @@ class RenderSymbol:
             "markers",
         ):
             object.__setattr__(self, field, _owned_tuple(getattr(self, field), field))
+        object.__setattr__(
+            self,
+            "duplicate_peers",
+            _owned_tuple(self.duplicate_peers, "duplicate_peers"),
+        )
+        object.__setattr__(
+            self,
+            "call_targets",
+            _owned_tuple(self.call_targets, "call_targets"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +201,30 @@ def _render_symbol_key(
         symbol.source_line,
         symbol.source_column,
     )
+
+
+def _symbol_id_key(
+    symbol_id: SymbolId,
+) -> tuple[str, str, tuple[str, ...], str, str, str]:
+    return (
+        symbol_id.language.value,
+        symbol_id.file,
+        symbol_id.container_path,
+        symbol_id.kind.value,
+        symbol_id.name,
+        symbol_id.signature_key,
+    )
+
+
+def _symbol_id_value(symbol_id: SymbolId) -> list[object]:
+    return [
+        symbol_id.language.value,
+        symbol_id.file,
+        list(symbol_id.container_path),
+        symbol_id.kind.value,
+        symbol_id.name,
+        symbol_id.signature_key,
+    ]
 
 
 def _eligible_values(ir: RenderIR) -> Counter[str]:
@@ -326,6 +362,7 @@ def _validate_render_ir(ir: RenderIR) -> None:
         raise ValueError("files must be sorted by path")
     seen_files: set[str] = set()
     seen_symbols: set[SymbolId] = set()
+    rendered_symbols: list[RenderSymbol] = []
     for file_ir in ir.files:
         if file_ir.path in seen_files:
             raise ValueError("duplicate render file path")
@@ -378,6 +415,7 @@ def _validate_render_ir(ir: RenderIR) -> None:
             if symbol_id in seen_symbols:
                 raise ValueError("duplicate render SymbolId")
             seen_symbols.add(symbol_id)
+            rendered_symbols.append(symbol)
             if (
                 isinstance(symbol.source_line, bool)
                 or not isinstance(symbol.source_line, int)
@@ -410,6 +448,31 @@ def _validate_render_ir(ir: RenderIR) -> None:
                 raise ValueError("invalid marker order")
         if tuple(sorted(file_ir.symbols, key=_render_symbol_key)) != file_ir.symbols:
             raise ValueError("symbols must be sorted")
+
+    for symbol in rendered_symbols:
+        peers = symbol.duplicate_peers
+        if any(not isinstance(peer, SymbolId) for peer in peers):
+            raise TypeError("duplicate_peers must contain SymbolId values")
+        if len(set(peers)) != len(peers) or symbol.symbol_id in peers:
+            raise ValueError("duplicate peers must be unique and exclude the owner")
+        if tuple(sorted(peers, key=_symbol_id_key)) != peers:
+            raise ValueError("duplicate peers must be sorted")
+        if any(peer not in seen_symbols for peer in peers):
+            raise ValueError("duplicate peer ownership is missing")
+        approximate = next(
+            (marker for marker in symbol.markers if marker.startswith("≈")),
+            None,
+        )
+        expected = None if not peers else f"≈{len(peers)}"
+        if approximate != expected:
+            raise ValueError("duplicate peers and approximate marker disagree")
+        targets = symbol.call_targets
+        if any(not isinstance(target, SymbolId) for target in targets):
+            raise TypeError("call_targets must contain SymbolId values")
+        if len(targets) != len(symbol.ordered_calls):
+            raise ValueError("ordered calls and call targets disagree")
+        if any(target not in seen_symbols for target in targets):
+            raise ValueError("call target ownership is missing")
 
     expected_interns = _plan_interns(replace(ir, interns=()))
     if ir.interns != expected_interns:
@@ -510,6 +573,18 @@ def render_project(ir: RenderIR) -> str:
             ):
                 if values:
                     lines.append(f"    {key} {_json(_encoded_values(values, aliases))}")
+                if key == "call" and symbol.call_targets:
+                    lines.append(
+                        "    call-target "
+                        + _json(
+                            [_symbol_id_value(target) for target in symbol.call_targets]
+                        )
+                    )
+            if symbol.duplicate_peers:
+                lines.append(
+                    "    duplicate "
+                    + _json([_symbol_id_value(peer) for peer in symbol.duplicate_peers])
+                )
             if symbol.body_lines:
                 lines.append(f"    body {symbol.body_lines}")
             if symbol.markers:
@@ -538,8 +613,10 @@ _CHILD_ORDER = {
             "super",
             "permit",
             "call",
+            "call-target",
             "throw",
             "behavior",
+            "duplicate",
             "body",
             "mark",
         )
@@ -577,6 +654,33 @@ def _parse_json_line(text: str) -> object:
     if position != len(text):
         raise RenderDecodeError("unexpected hologram JSON suffix")
     return value
+
+
+def _decoded_symbol_id(value: object) -> SymbolId:
+    if (
+        not isinstance(value, list)
+        or len(value) != 6
+        or not isinstance(value[0], str)
+        or not isinstance(value[1], str)
+        or not isinstance(value[2], list)
+        or any(not isinstance(part, str) for part in value[2])
+        or not isinstance(value[3], str)
+        or not isinstance(value[4], str)
+        or not isinstance(value[5], str)
+    ):
+        raise RenderDecodeError("invalid duplicate peer SymbolId")
+    language_value, file, container, kind_value, name, signature_key = value
+    try:
+        return SymbolId(
+            Language(language_value),
+            file,
+            tuple(container),
+            SymbolKind(kind_value),
+            name,
+            signature_key,
+        )
+    except (TypeError, ValueError) as error:
+        raise RenderDecodeError("invalid duplicate peer SymbolId") from error
 
 
 def _expanded_value(value: object, aliases: dict[str, str]) -> str:
@@ -777,6 +881,18 @@ def _decode_structure(text: str) -> RenderIR:
                     if key not in children
                     else _expanded_values(children[key], aliases)
                 )
+            duplicate_value = children.get("duplicate", [])
+            if not isinstance(duplicate_value, list):
+                raise RenderDecodeError("duplicate peers must be a JSON array")
+            duplicate_peers = tuple(
+                _decoded_symbol_id(value) for value in duplicate_value
+            )
+            call_target_value = children.get("call-target", [])
+            if not isinstance(call_target_value, list):
+                raise RenderDecodeError("call targets must be a JSON array")
+            call_targets = tuple(
+                _decoded_symbol_id(value) for value in call_target_value
+            )
             body_value = children.get("body", 0)
             if isinstance(body_value, bool) or not isinstance(body_value, int):
                 raise RenderDecodeError("body must be an integer")
@@ -805,6 +921,8 @@ def _decode_structure(text: str) -> RenderIR:
                     decoded_arrays["behavior"],
                     body_value,
                     tuple(markers_value),
+                    duplicate_peers,
+                    call_targets,
                 )
             )
 
@@ -1018,6 +1136,7 @@ def _resolution_projection(
     displays: dict[SymbolId, str],
 ) -> tuple[
     dict[SymbolId, tuple[str, ...]],
+    dict[SymbolId, tuple[SymbolId, ...]],
     dict[SymbolId, tuple[str, ...]],
     tuple[str, ...],
 ]:
@@ -1127,9 +1246,9 @@ def _resolution_projection(
         ):
             behavior_owners[target.id].add(owner.id)
 
-    rendered_calls = {
+    ordered_call_targets = {
         owner: tuple(
-            displays[target]
+            target
             for _, target in sorted(
                 entries,
                 key=lambda entry: (
@@ -1140,11 +1259,20 @@ def _resolution_projection(
         )
         for owner, entries in calls.items()
     }
+    rendered_calls = {
+        owner: tuple(displays[target] for target in targets)
+        for owner, targets in ordered_call_targets.items()
+    }
     rendered_behaviors = {
         target: tuple(sorted(displays[owner] for owner in owners))
         for target, owners in behavior_owners.items()
     }
-    return rendered_calls, rendered_behaviors, tuple(sorted(dependencies))
+    return (
+        rendered_calls,
+        ordered_call_targets,
+        rendered_behaviors,
+        tuple(sorted(dependencies)),
+    )
 
 
 def project_render_ir(
@@ -1162,7 +1290,7 @@ def project_render_ir(
 
     indexes = _project_indexes(analyzed)
     displays = _display_names(indexes.symbols)
-    calls, behaviors, dependencies = _resolution_projection(
+    calls, call_targets, behaviors, dependencies = _resolution_projection(
         analyzed,
         indexes,
         displays,
@@ -1190,6 +1318,8 @@ def project_render_ir(
                 behaviors.get(symbol.id, ()),
                 symbol.body_lines,
                 _markers(indexes.analyzed_by_id[symbol.id], hot_threshold),
+                indexes.analyzed_by_id[symbol.id].duplicate_peers,
+                call_targets.get(symbol.id, ()),
             )
             for symbol in symbols
         )

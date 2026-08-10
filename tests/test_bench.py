@@ -122,8 +122,16 @@ class TranscriptMetricsTest(unittest.TestCase):
 
 
 def _render_symbol(name: str, calls: tuple[str, ...] = ()) -> RenderSymbol:
+    symbol_id = SymbolId(
+        Language.PYTHON,
+        "svc.py",
+        (),
+        SymbolKind.FUNCTION,
+        name,
+        "()",
+    )
     return RenderSymbol(
-        SymbolId(Language.PYTHON, "svc.py", (), SymbolKind.FUNCTION, name, "()"),
+        symbol_id,
         1,
         0,
         "pub",
@@ -140,6 +148,17 @@ def _render_symbol(name: str, calls: tuple[str, ...] = ()) -> RenderSymbol:
         (),
         2,
         (),
+        call_targets=tuple(
+            SymbolId(
+                Language.PYTHON,
+                "svc.py",
+                (),
+                SymbolKind.FUNCTION,
+                target,
+                "()",
+            )
+            for target in calls
+        ),
     )
 
 

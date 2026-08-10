@@ -276,6 +276,8 @@ class RenderProjectionTest(unittest.TestCase):
                 "behaviors",
                 "body_lines",
                 "markers",
+                "duplicate_peers",
+                "call_targets",
             ),
             RenderIntern: ("alias", "value"),
             RenderReexport: ("module", "name", "alias", "wildcard"),
@@ -305,6 +307,8 @@ class RenderProjectionTest(unittest.TestCase):
         parameters = ["input"]
         calls = ["target"]
         markers = ["✓"]
+        peers = [symbol.id]
+        targets = [symbol.id]
         rendered = RenderSymbol(
             symbol.id,
             1,
@@ -323,13 +327,19 @@ class RenderProjectionTest(unittest.TestCase):
             [],  # type: ignore[arg-type]
             1,
             markers,  # type: ignore[arg-type]
+            peers,  # type: ignore[arg-type]
+            targets,  # type: ignore[arg-type]
         )
         parameters.append("mutated")
         calls.append("mutated")
         markers.append("mutated")
+        peers.clear()
+        targets.clear()
         self.assertEqual(rendered.parameters, ("input",))
         self.assertEqual(rendered.ordered_calls, ("target",))
         self.assertEqual(rendered.markers, ("✓",))
+        self.assertEqual(rendered.duplicate_peers, (symbol.id,))
+        self.assertEqual(rendered.call_targets, (symbol.id,))
 
         reexports = [RenderReexport("./api", None, None, True)]
         symbols = [rendered]
@@ -465,15 +475,20 @@ class RenderProjectionTest(unittest.TestCase):
         )
         ir = project_render_ir(analyzed, state=STATE, hot_threshold=2)
         by_name = {
-            symbol.symbol_id.name: symbol.markers
+            symbol.symbol_id.name: symbol
             for file in ir.files
             for symbol in file.symbols
         }
-        self.assertEqual(by_name["hot"], ("×2", "✓", "≈1"))
-        self.assertEqual(by_name["dead"], ("×0",))
-        self.assertEqual(by_name["surface"], ("×0?", "✓"))
-        self.assertEqual(by_name["clone"], ("≈2",))
-        self.assertEqual(by_name["quiet"], ())
+        self.assertEqual(by_name["hot"].markers, ("×2", "✓", "≈1"))
+        self.assertEqual(by_name["hot"].duplicate_peers, (peer_a.id,))
+        self.assertEqual(by_name["dead"].markers, ("×0",))
+        self.assertEqual(by_name["surface"].markers, ("×0?", "✓"))
+        self.assertEqual(by_name["clone"].markers, ("≈2",))
+        self.assertEqual(
+            by_name["clone"].duplicate_peers,
+            (peer_a.id, peer_b.id),
+        )
+        self.assertEqual(by_name["quiet"].markers, ())
 
     def test_display_ladder_and_ordered_resolved_calls_are_exact(self) -> None:
         caller = _symbol("src/caller.py", "caller")
@@ -588,6 +603,18 @@ class RenderProjectionTest(unittest.TestCase):
             ),
         )
         self.assertNotIn("stale-display-name", rendered[caller.id].ordered_calls)
+        self.assertEqual(
+            rendered[caller.id].call_targets,
+            (
+                unique.id,
+                left_run.id,
+                pkg_work.id,
+                int_overload.id,
+                int_overload.id,
+                free_int.id,
+                field.id,
+            ),
+        )
         api = next(file for file in ir.files if file.path == "src/api.py")
         self.assertEqual(
             tuple(symbol.symbol_id.signature_key for symbol in api.symbols),
@@ -1233,6 +1260,8 @@ def _direct_symbol(
     behaviors: tuple[str, ...] = (),
     body_lines: int = 0,
     markers: tuple[str, ...] = (),
+    duplicate_peers: tuple[SymbolId, ...] = (),
+    call_targets: tuple[SymbolId, ...] = (),
 ) -> RenderSymbol:
     return RenderSymbol(
         symbol_id,
@@ -1252,6 +1281,8 @@ def _direct_symbol(
         behaviors,
         body_lines,
         markers,
+        duplicate_peers,
+        call_targets,
     )
 
 
@@ -1324,10 +1355,12 @@ def _all_fields_render_ir() -> RenderIR:
                         supers=("Base<T,U>",),
                         permits=("Child One",),
                         ordered_calls=("Target.run", "Target.run"),
+                        call_targets=(overload_id, overload_id),
                         throws=("ProblemException",),
                         behaviors=("ItemTest.creates item",),
                         body_lines=21,
                         markers=("×3", "✓", "≈2"),
+                        duplicate_peers=(overload_id, test_id),
                     ),
                     _direct_symbol(
                         overload_id,
@@ -1472,8 +1505,15 @@ class RenderRoundTripTest(unittest.TestCase):
             '    super ["Base<T,U>"]\n'
             '    permit ["Child One"]\n'
             '    call ["Target.run","Target.run"]\n'
+            '    call-target [["java","src/α ids/Item.java",'
+            '["Outer","Inner"],"method","build","(String)"],'
+            '["java","src/α ids/Item.java",["Outer","Inner"],'
+            '"method","build","(String)"]]\n'
             '    throw ["ProblemException"]\n'
             '    behavior ["ItemTest.creates item"]\n'
+            '    duplicate [["java","src/α ids/Item.java",'
+            '["Outer","Inner"],"method","build","(String)"],'
+            '["python","tests/item test.py",[],"fn","check","()"]]\n'
             "    body 21\n"
             '    mark ["×3","✓","≈2"]\n'
             '  :30:2 [["Outer","Inner"],"method","build",'
@@ -1664,6 +1704,7 @@ class RenderRoundTripTest(unittest.TestCase):
             supers=(value,),
             permits=(value,),
             ordered_calls=(value,),
+            call_targets=(symbol_id,),
             throws=(value,),
             behaviors=(value,),
         )
@@ -1776,6 +1817,63 @@ class RenderRoundTripTest(unittest.TestCase):
                     ),
                 )
             )
+
+    def test_renderer_and_decoder_require_lossless_target_provenance(self) -> None:
+        ir = _all_fields_render_ir()
+        production = next(file for file in ir.files if file.path.startswith("src/α"))
+        owner = production.symbols[0]
+
+        def with_owner(symbol: RenderSymbol) -> RenderIR:
+            return replace(
+                ir,
+                files=tuple(
+                    replace(file, symbols=(symbol, *file.symbols[1:]))
+                    if file is production
+                    else file
+                    for file in ir.files
+                ),
+            )
+
+        missing = SymbolId(
+            Language.JAVA,
+            "missing.java",
+            (),
+            SymbolKind.FUNCTION,
+            "missing",
+            "()",
+        )
+        malformed = (
+            replace(owner, duplicate_peers=()),
+            replace(owner, duplicate_peers=tuple(reversed(owner.duplicate_peers))),
+            replace(owner, duplicate_peers=(owner.symbol_id,)),
+            replace(owner, duplicate_peers=(missing,)),
+            replace(owner, call_targets=()),
+            replace(owner, call_targets=(missing, missing)),
+        )
+        for symbol in malformed:
+            with self.subTest(symbol=symbol), self.assertRaises(ValueError):
+                render_project(with_owner(symbol))
+
+        text = render_project(ir)
+        without_call_targets = (
+            "\n".join(
+                line
+                for line in text.splitlines()
+                if not line.startswith("    call-target ")
+            )
+            + "\n"
+        )
+        without_duplicate_peers = (
+            "\n".join(
+                line
+                for line in text.splitlines()
+                if not line.startswith("    duplicate ")
+            )
+            + "\n"
+        )
+        for malformed_text in (without_call_targets, without_duplicate_peers):
+            with self.assertRaises(RenderDecodeError):
+                decode_render(malformed_text)
 
     def test_decoder_rejects_header_whitespace_and_json_variants(self) -> None:
         text = render_project(_all_fields_render_ir())
