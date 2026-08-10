@@ -32,6 +32,7 @@ from hologram.model import (
 
 from .common import base_type, ordered_unique, reference, symbol_id, tight_type
 from .treesitter import (
+    OwnershipContext,
     ast_collect,
     ast_field,
     ast_text,
@@ -39,6 +40,7 @@ from .treesitter import (
     body_lines,
     node_span,
     owned_nodes,
+    ownership_context,
 )
 
 _TYPESCRIPT_LANGUAGES = frozenset(
@@ -59,6 +61,13 @@ _TYPE_KINDS = {
 }
 _CALLABLE_VALUES = frozenset(
     {"arrow_function", "function_expression", "generator_function"}
+)
+_FUNCTION_DECLARATIONS = frozenset(
+    {
+        "function_declaration",
+        "function_signature",
+        "generator_function_declaration",
+    }
 )
 _CALLABLE_DECLARATIONS = frozenset(
     {
@@ -162,6 +171,7 @@ class _CallableDraft:
 class _Callable:
     symbol: Symbol
     node: Any
+    owned: tuple[Any, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +209,14 @@ def _same_node(left: object | None, right: object | None) -> bool:
     )
 
 
+def _unique_nodes(nodes: Iterable[Any]) -> tuple[Any, ...]:
+    result: list[Any] = []
+    for node in nodes:
+        if all(not _same_node(node, existing) for existing in result):
+            result.append(node)
+    return tuple(result)
+
+
 def _field_name(parent: Any | None, node: Any) -> str | None:
     if parent is None:
         return None
@@ -233,11 +251,12 @@ def _source_span(source: SourceFile) -> SourceSpan:
     return SourceSpan(source.file, 1, 0, len(lines), len(lines[-1]))
 
 
-def _masked_sfc(raw: bytes) -> tuple[bytes, bool]:
-    masked = bytearray(
+def _sfc_program_buffers(raw: bytes) -> tuple[tuple[bytes, ...], bool]:
+    blank = bytes(
         byte if byte in {0x0A, 0x0D} else 0x20
         for byte in raw
     )
+    programs: list[bytes] = []
     position = 0
     unclosed = False
     while (opening := _SCRIPT_OPEN_RE.search(raw, position)) is not None:
@@ -248,14 +267,17 @@ def _masked_sfc(raw: bytes) -> tuple[bytes, bool]:
                 break
             position = comment_end + 3
             continue
+        program = bytearray(blank)
         closing = _SCRIPT_CLOSE_RE.search(raw, opening.end())
         if closing is None:
-            masked[opening.end() :] = raw[opening.end() :]
+            program[opening.end() :] = raw[opening.end() :]
+            programs.append(bytes(program))
             unclosed = True
             break
-        masked[opening.end() : closing.start()] = raw[opening.end() : closing.start()]
+        program[opening.end() : closing.start()] = raw[opening.end() : closing.start()]
+        programs.append(bytes(program))
         position = closing.end()
-    return bytes(masked), unclosed
+    return tuple(programs) or (blank,), unclosed
 
 
 def _string_value(node: Any | None) -> str:
@@ -290,6 +312,7 @@ def _pattern_names(node: Any | None) -> tuple[str, ...]:
         "identifier",
         "private_property_identifier",
         "shorthand_property_identifier_pattern",
+        "this",
     }:
         return (ast_text(node),)
     if node.type in {"assignment_pattern", "object_assignment_pattern"}:
@@ -453,18 +476,9 @@ def _class_bindings(body: Any | None) -> tuple[Binding, ...]:
     return _binding_tuple(bindings)
 
 
-def _local_bindings(
-    source: SourceFile,
-    node: Any,
-    boundaries: Iterable[Any],
-) -> tuple[Binding, ...]:
+def _local_bindings(nodes: Iterable[Any]) -> tuple[Binding, ...]:
     bindings: list[Binding] = []
-    for candidate in owned_nodes(
-        source,
-        node,
-        owned_boundaries=boundaries,
-        include_anonymous=True,
-    ):
+    for candidate in nodes:
         if candidate.type == "variable_declarator":
             type_name = _type_text(ast_field(candidate, "type")) or _inferred_type(
                 ast_field(candidate, "value")
@@ -526,6 +540,33 @@ def _method_name(node: Any, type_name: str | None = None) -> tuple[str, SymbolKi
     return raw, SymbolKind.METHOD
 
 
+def _node_identity(node: Any) -> tuple[int, int, str]:
+    return node.start_byte, node.end_byte, node.type
+
+
+def _wrapped_callables(
+    node: Any,
+    allowed: frozenset[str],
+) -> tuple[Any, ...]:
+    if node.type in allowed:
+        return (node,)
+    if node.type == "export_statement":
+        declaration = ast_field(node, "declaration")
+        return _wrapped_callables(declaration, allowed) if declaration is not None else ()
+    if node.type == "ambient_declaration":
+        return tuple(
+            callable_node
+            for child in _named_children(node)
+            for callable_node in _wrapped_callables(child, allowed)
+        )
+    return ()
+
+
+def _callable_path_segment(name: str, node: Any) -> str:
+    params = tuple(parameter.type_name for parameter in _parameters(node))
+    return f"{name}({','.join(params)})"
+
+
 def _property_modifiers(node: Any) -> tuple[str, ...]:
     return _modifiers(node)
 
@@ -537,6 +578,12 @@ def _type_reference_nodes(roots: Iterable[Any | None]) -> tuple[Any, ...]:
             continue
         for node in ast_collect(root, _TYPE_LEAVES):
             parent = node.parent
+            if (
+                parent is not None
+                and parent.type == "type_parameter"
+                and _field_name(parent, node) == "name"
+            ):
+                continue
             if (
                 parent is not None
                 and parent.type == "nested_type_identifier"
@@ -663,16 +710,10 @@ def _callee(node: Any) -> tuple[str | None, str] | None:
 def _calls(
     source: SourceFile,
     owner: SymbolId,
-    node: Any,
-    boundaries: Iterable[Any],
+    nodes: Iterable[Any],
 ) -> tuple[CallRef, ...]:
     calls: list[CallRef] = []
-    for candidate in owned_nodes(
-        source,
-        node,
-        owned_boundaries=boundaries,
-        include_anonymous=True,
-    ):
+    for candidate in nodes:
         if candidate.type not in {"call_expression", "new_expression"}:
             continue
         parts = _callee(candidate)
@@ -705,16 +746,9 @@ def _node_by_span(source: SourceFile, nodes: Iterable[Any]) -> dict[SourceSpan, 
 def _body_references(
     source: SourceFile,
     owner: SymbolId,
-    node: Any,
     events: Iterable[BodyEvent],
-    boundaries: Iterable[Any],
+    nodes: Iterable[Any],
 ) -> tuple[ReferenceRef, ...]:
-    nodes = owned_nodes(
-        source,
-        node,
-        owned_boundaries=boundaries,
-        include_anonymous=True,
-    )
     by_span = _node_by_span(source, nodes)
     references: list[ReferenceRef] = []
     for event in events:
@@ -728,6 +762,34 @@ def _body_references(
             continue
         parent = syntax.parent
         field = _field_name(parent, syntax)
+        parent_type = parent.type if parent is not None else ""
+        if (
+            parent_type in _FIELD_KINDS | {"enum_assignment"}
+            and field == "name"
+        ):
+            continue
+        if parent_type == "enum_body" and syntax.type in {
+            "number",
+            "property_identifier",
+            "string",
+        }:
+            continue
+        if (
+            parent_type == "jsx_attribute"
+            and syntax.type == "property_identifier"
+        ):
+            continue
+        if (
+            parent_type
+            in {
+                "jsx_closing_element",
+                "jsx_opening_element",
+                "jsx_self_closing_element",
+            }
+            and field == "name"
+            and ast_text(syntax)[:1].islower()
+        ):
+            continue
         if parent is not None and parent.type in {"pair", "pair_pattern"} and field == "key":
             continue
         if parent is not None and parent.type == "nested_type_identifier" and field == "module":
@@ -769,16 +831,10 @@ def _registration_name(call: Any) -> str | None:
 def _config_references(
     source: SourceFile,
     owner: SymbolId,
-    node: Any,
-    boundaries: Iterable[Any],
+    nodes: Iterable[Any],
 ) -> tuple[ReferenceRef, ...]:
     references: list[ReferenceRef] = []
-    for call in owned_nodes(
-        source,
-        node,
-        owned_boundaries=boundaries,
-        include_anonymous=True,
-    ):
+    for call in nodes:
         if call.type != "call_expression" or _registration_name(call) not in _REGISTRATION_CALLS:
             continue
         arguments = ast_field(call, "arguments")
@@ -984,10 +1040,39 @@ class _Declarations:
         self.references: list[ReferenceRef] = []
         self.regions: list[_Region] = []
         self._export_scopes: list[frozenset[str]] = []
+        self._callable_segments: dict[tuple[int, int, str], str] = {}
 
     @property
     def current_exports(self) -> frozenset[str]:
         return self._export_scopes[-1] if self._export_scopes else frozenset()
+
+    def register_overload_segments(
+        self,
+        nodes: Iterable[Any],
+        *,
+        allowed: frozenset[str],
+        type_name: str | None = None,
+    ) -> None:
+        groups: dict[str, list[Any]] = {}
+        for node in nodes:
+            for callable_node in _wrapped_callables(node, allowed):
+                name = (
+                    _method_name(callable_node, type_name)[0]
+                    if type_name is not None
+                    else ast_text(ast_field(callable_node, "name"))
+                )
+                if name:
+                    groups.setdefault(name, []).append(callable_node)
+        for name, overloads in groups.items():
+            if len(overloads) < 2:
+                continue
+            for callable_node in overloads:
+                self._callable_segments[_node_identity(callable_node)] = (
+                    _callable_path_segment(name, callable_node)
+                )
+
+    def callable_segment(self, node: Any, name: str) -> str:
+        return self._callable_segments.get(_node_identity(node), name)
 
     def scope(
         self,
@@ -997,12 +1082,18 @@ class _Declarations:
         *,
         class_bindings: tuple[Binding, ...] = (),
     ) -> None:
+        self.register_overload_segments(
+            _named_children(node),
+            allowed=_FUNCTION_DECLARATIONS,
+        )
         export_scope = node.type in _EXPORT_SCOPE_KINDS
         if export_scope:
             self._export_scopes.append(_local_export_names(node))
         try:
             decorators: list[Any] = []
             for child in _named_children(node):
+                if child.type == "comment":
+                    continue
                 if child.type == "decorator":
                     decorators.append(child)
                     continue
@@ -1080,11 +1171,7 @@ class _Declarations:
                 wrapper_modifiers=wrapper_modifiers,
             )
             return
-        if node.type in {
-            "function_declaration",
-            "function_signature",
-            "generator_function_declaration",
-        }:
+        if node.type in _FUNCTION_DECLARATIONS:
             name = ast_text(ast_field(node, "name"))
             if not name:
                 self.scope(node, container_path, scope_kind, class_bindings=class_bindings)
@@ -1102,7 +1189,11 @@ class _Declarations:
                 wrapper_modifiers=wrapper_modifiers,
                 class_bindings=(),
             )
-            self.scope(node, (*container_path, name), "callable")
+            self.scope(
+                node,
+                (*container_path, self.callable_segment(node, name)),
+                "callable",
+            )
             return
         if node.type in {"lexical_declaration", "variable_declaration"}:
             self.variables(
@@ -1183,6 +1274,7 @@ class _Declarations:
         wrapper_modifiers: tuple[str, ...],
     ) -> None:
         del scope_kind
+        decorators = _unique_nodes((*decorators, *_field_nodes(node, "decorator")))
         name = ast_text(ast_field(node, "name"))
         if not name:
             self.scope(node, container_path, "anonymous")
@@ -1258,14 +1350,24 @@ class _Declarations:
         type_kind: SymbolKind,
         class_bindings: tuple[Binding, ...],
     ) -> None:
+        self.register_overload_segments(
+            _named_children(body),
+            allowed=_CALLABLE_DECLARATIONS,
+            type_name=type_name,
+        )
         decorators: list[Any] = []
         for member in _named_children(body):
+            if member.type == "comment":
+                continue
             if member.type == "decorator":
                 decorators.append(member)
                 continue
             if member.type in _CALLABLE_DECLARATIONS:
                 name, kind = _method_name(member, type_name)
                 if name:
+                    member_decorators = _unique_nodes(
+                        (*decorators, *_field_nodes(member, "decorator"))
+                    )
                     self.callable(
                         name,
                         kind,
@@ -1274,20 +1376,26 @@ class _Declarations:
                         container_path,
                         exported=False,
                         member=True,
-                        decorators=tuple(decorators),
+                        decorators=member_decorators,
                         wrapper_modifiers=(),
                         class_bindings=class_bindings,
                     )
                     body_node = ast_field(member, "body")
                     if body_node is not None:
-                        self.scope(body_node, (*container_path, name), "callable")
+                        self.scope(
+                            body_node,
+                            (*container_path, self.callable_segment(member, name)),
+                            "callable",
+                        )
             elif member.type in _FIELD_KINDS:
                 self.field(
                     member,
                     container_path,
                     type_name,
                     type_kind,
-                    tuple(decorators),
+                    _unique_nodes(
+                        (*decorators, *_field_nodes(member, "decorator"))
+                    ),
                     class_bindings,
                 )
             elif member.type in _TYPE_KINDS:
@@ -1521,8 +1629,14 @@ class _Declarations:
         )
         self.boundaries.append(callable_node)
 
-    def freeze_callables(self) -> tuple[_Callable, ...]:
-        result: list[_Callable] = []
+    def freeze_callables(
+        self,
+        ownership: OwnershipContext,
+    ) -> tuple[_Callable, ...]:
+        selected: dict[
+            SymbolId,
+            tuple[_Callable, _CallableDraft, tuple[_Parameter, ...]],
+        ] = {}
         for draft in self.callable_drafts:
             parameters = _parameters(draft.callable_node)
             params = tuple(parameter.type_name for parameter in parameters)
@@ -1539,15 +1653,16 @@ class _Declarations:
                 else ""
             )
             body = ast_field(draft.callable_node, "body")
+            owned = owned_nodes(
+                self.source,
+                draft.callable_node,
+                ownership=ownership,
+            )
             bindings = _binding_tuple(
                 (
                     *draft.class_bindings,
                     *_parameter_bindings(parameters),
-                    *_local_bindings(
-                        self.source,
-                        draft.callable_node,
-                        self.boundaries,
-                    ),
+                    *_local_bindings(owned),
                 )
             )
             callable_symbol = Symbol(
@@ -1568,7 +1683,13 @@ class _Declarations:
                 modifiers=draft.modifiers,
                 body_lines=body_lines(body),
             )
-            result.append(_Callable(callable_symbol, draft.callable_node))
+            candidate = _Callable(callable_symbol, draft.callable_node, owned)
+            existing = selected.get(callable_symbol.id)
+            if existing is None or (
+                ast_field(candidate.node, "body") is not None
+                and ast_field(existing[0].node, "body") is None
+            ):
+                selected[callable_symbol.id] = (candidate, draft, parameters)
             self.references.extend(
                 _type_references(
                     self.source,
@@ -1587,34 +1708,65 @@ class _Declarations:
                     draft.annotation_nodes,
                 )
             )
-            if draft.kind is SymbolKind.CONSTRUCTOR:
-                for parameter in parameters:
-                    if _accessibility(parameter.node) is None and not any(
-                        ast_text(child) == "readonly" for child in _children(parameter.node)
-                    ):
-                        continue
-                    for property_name in parameter.names:
-                        self.symbols.append(
-                            Symbol(
-                                symbol_id(
-                                    self.source,
-                                    draft.container_path,
-                                    SymbolKind.PROPERTY,
-                                    property_name,
-                                ),
-                                node_span(self.source, parameter.node),
-                                _accessibility(parameter.node) or Visibility.PUBLIC,
+        for _, draft, parameters in selected.values():
+            if draft.kind is not SymbolKind.CONSTRUCTOR:
+                continue
+            for parameter in parameters:
+                if _accessibility(parameter.node) is None and not any(
+                    ast_text(child) == "readonly" for child in _children(parameter.node)
+                ):
+                    continue
+                for property_name in parameter.names:
+                    self.symbols.append(
+                        Symbol(
+                            symbol_id(
+                                self.source,
+                                draft.container_path,
+                                SymbolKind.PROPERTY,
                                 property_name,
-                                returns=parameter.type_name,
-                                modifiers=_modifiers(parameter.node),
-                            )
+                            ),
+                            node_span(self.source, parameter.node),
+                            _accessibility(parameter.node) or Visibility.PUBLIC,
+                            property_name,
+                            returns=parameter.type_name,
+                            modifiers=_modifiers(parameter.node),
                         )
-        return tuple(result)
+                    )
+        return tuple(item[0] for item in selected.values())
 
 
 def _body_span(source: SourceFile, node: Any) -> SourceSpan | None:
     body = ast_field(node, "body")
     return node_span(source, body) if body is not None else None
+
+
+def _covering_span(source: SourceFile, nodes: Iterable[Any]) -> SourceSpan:
+    spans = tuple(node_span(source, node) for node in nodes)
+    first, last = spans[0], spans[-1]
+    return SourceSpan(
+        source.file,
+        first.start_line,
+        first.start_column,
+        last.end_line,
+        last.end_column,
+    )
+
+
+def _owned_facts(
+    source: SourceFile,
+    owner: SymbolId,
+    node: Any,
+    nodes: tuple[Any, ...],
+    ownership: OwnershipContext,
+) -> tuple[tuple[BodyEvent, ...], tuple[CallRef, ...], tuple[ReferenceRef, ...]]:
+    events = body_events(source, node, ownership=ownership)
+    config = _config_references(source, owner, nodes)
+    events = _join_reference_events(events, config)
+    references = (
+        *_body_references(source, owner, events, nodes),
+        *config,
+    )
+    return events, _calls(source, owner, nodes), references
 
 
 def extract(source: SourceFile, parser: object | None) -> FileIR:
@@ -1623,26 +1775,41 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
     if parser is None or not callable(getattr(parser, "parse", None)):
         raise TypeError("TypeScript-family extraction requires a Tree-sitter parser")
 
-    parse_bytes = source.raw
     unclosed_script = False
     if source.language in {Language.VUE, Language.SVELTE}:
-        parse_bytes, unclosed_script = _masked_sfc(source.raw)
-    tree = parser.parse(parse_bytes)  # type: ignore[attr-defined]
-    root = tree.root_node
+        parse_buffers, unclosed_script = _sfc_program_buffers(source.raw)
+    else:
+        parse_buffers = (source.raw,)
+    trees = tuple(
+        parser.parse(parse_bytes)  # type: ignore[attr-defined]
+        for parse_bytes in parse_buffers
+    )
+    roots = tuple(tree.root_node for tree in trees)
     module = _module_name(source.file)
+    module_span = _covering_span(source, roots)
     module_symbol = Symbol(
         symbol_id(source, (), SymbolKind.MODULE, module),
-        node_span(source, root),
+        module_span,
         Visibility.PUBLIC,
         f"module {module}",
-        body_lines=body_lines(root),
+        body_lines=module_span.end_line - module_span.start_line + 1,
     )
 
-    imports, reexports, import_boundaries = _imports_and_reexports(source, root)
+    imports: list[ImportRef] = []
+    reexports: list[Symbol] = []
     declarations = _Declarations(source)
-    declarations.boundaries.extend(import_boundaries)
-    declarations.scope(root, (), "module")
-    callables = declarations.freeze_callables()
+    for root in roots:
+        root_imports, root_reexports, import_boundaries = _imports_and_reexports(
+            source,
+            root,
+        )
+        imports.extend(root_imports)
+        reexports.extend(root_reexports)
+        declarations.boundaries.extend(import_boundaries)
+        declarations.scope(root, (), "module")
+    boundaries = tuple(declarations.boundaries)
+    ownership = ownership_context(boundaries, include_anonymous=True)
+    callables = declarations.freeze_callables(ownership)
 
     symbols: list[Symbol] = [module_symbol]
     if source.language in {Language.VUE, Language.SVELTE}:
@@ -1660,63 +1827,71 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
     symbols.extend(item.symbol for item in callables)
     symbols.sort(key=lambda item: item.span)
 
-    boundaries = tuple(declarations.boundaries)
     calls: list[CallRef] = []
     references: list[ReferenceRef] = list(declarations.references)
     bodies: list[BodyIR] = []
 
-    module_events = body_events(
-        source,
-        root,
-        owned_boundaries=boundaries,
-        include_anonymous=True,
+    module_events: list[BodyEvent] = []
+    for root in roots:
+        root_nodes = owned_nodes(source, root, ownership=ownership)
+        events, root_calls, root_references = _owned_facts(
+            source,
+            module_symbol.id,
+            root,
+            root_nodes,
+            ownership,
+        )
+        module_events.extend(events)
+        calls.extend(root_calls)
+        references.extend(root_references)
+    bodies.append(
+        BodyIR(
+            module_symbol.id,
+            module_span,
+            tuple(module_events),
+        )
     )
-    module_config = _config_references(source, module_symbol.id, root, boundaries)
-    module_events = _join_reference_events(module_events, module_config)
-    bodies.append(BodyIR(module_symbol.id, node_span(source, root), module_events))
-    calls.extend(_calls(source, module_symbol.id, root, boundaries))
-    references.extend(
-        _body_references(source, module_symbol.id, root, module_events, boundaries)
-    )
-    references.extend(module_config)
 
     for item in callables:
         body_span = _body_span(source, item.node)
         if body_span is None:
             continue
-        events = body_events(
+        events, item_calls, item_references = _owned_facts(
             source,
+            item.symbol.id,
             item.node,
-            owned_boundaries=boundaries,
-            include_anonymous=True,
+            item.owned,
+            ownership,
         )
-        config = _config_references(source, item.symbol.id, item.node, boundaries)
-        events = _join_reference_events(events, config)
         bodies.append(BodyIR(item.symbol.id, body_span, events))
-        calls.extend(_calls(source, item.symbol.id, item.node, boundaries))
-        references.extend(
-            _body_references(source, item.symbol.id, item.node, events, boundaries)
-        )
-        references.extend(config)
+        calls.extend(item_calls)
+        references.extend(item_references)
 
     for region in declarations.regions:
         body_span = _body_span(source, region.node)
         if body_span is None:
             continue
-        events = body_events(
+        region_nodes = owned_nodes(source, region.node, ownership=ownership)
+        events, region_calls, region_references = _owned_facts(
             source,
+            region.symbol.id,
             region.node,
-            owned_boundaries=boundaries,
-            include_anonymous=True,
+            region_nodes,
+            ownership,
         )
-        config = _config_references(source, region.symbol.id, region.node, boundaries)
-        events = _join_reference_events(events, config)
         bodies.append(BodyIR(region.symbol.id, body_span, events))
-        calls.extend(_calls(source, region.symbol.id, region.node, boundaries))
-        references.extend(
-            _body_references(source, region.symbol.id, region.node, events, boundaries)
+        calls.extend(region_calls)
+        references.extend(region_references)
+
+    diagnostics = tuple(
+        diagnostic
+        for index, root in enumerate(roots)
+        for diagnostic in _syntax_diagnostics(
+            source,
+            root,
+            unclosed_script=unclosed_script and index == len(roots) - 1,
         )
-        references.extend(config)
+    )
 
     return FileIR(
         source,
@@ -1728,7 +1903,7 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
                 key=lambda call: (call.span.start_line, call.span.start_column),
             )
         ),
-        imports=imports,
+        imports=tuple(imports),
         references=tuple(
             sorted(
                 ordered_unique(references),
@@ -1736,11 +1911,7 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
             )
         ),
         bodies=tuple(sorted(bodies, key=lambda item: item.span)),
-        diagnostics=_syntax_diagnostics(
-            source,
-            root,
-            unclosed_script=unclosed_script,
-        ),
+        diagnostics=ordered_unique(diagnostics),
     )
 
 

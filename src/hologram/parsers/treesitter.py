@@ -20,6 +20,12 @@ class GrammarMetadata:
     attribute: str = "language"
 
 
+@dataclass(frozen=True, slots=True)
+class OwnershipContext:
+    boundary_keys: frozenset[tuple[int, int, str]]
+    include_anonymous: bool = False
+
+
 GRAMMAR_METADATA: Mapping[Language, GrammarMetadata] = MappingProxyType(
     {
         Language.JAVA: GrammarMetadata("tree_sitter_java", "tree-sitter-java"),
@@ -1096,6 +1102,29 @@ def _node_key(node: object) -> tuple[int, int, str]:
     )
 
 
+def ownership_context(
+    owned_boundaries: Iterable[object] = (),
+    *,
+    include_anonymous: bool = False,
+) -> OwnershipContext:
+    """Precompute ownership boundaries for repeated walks in one extraction."""
+    return OwnershipContext(
+        frozenset(_node_key(node) for node in owned_boundaries),
+        include_anonymous,
+    )
+
+
+def _resolve_ownership(
+    ownership: OwnershipContext | None,
+    owned_boundaries: Iterable[object],
+    include_anonymous: bool,
+) -> OwnershipContext:
+    return ownership or ownership_context(
+        owned_boundaries,
+        include_anonymous=include_anonymous,
+    )
+
+
 def _field_roots(node: object, names: Iterable[str]) -> tuple[object, ...]:
     roots: list[object] = []
     for name in names:
@@ -1526,6 +1555,7 @@ class _TreeSitterBodyEventWalker:
         *,
         owned_boundaries: Iterable[object] = (),
         include_anonymous: bool = False,
+        ownership: OwnershipContext | None = None,
     ) -> None:
         self.source = source
         self.callable_node = callable_node
@@ -1533,10 +1563,13 @@ class _TreeSitterBodyEventWalker:
         self._events_seen: set[BodyEvent] = set()
         self.parameter_keys: frozenset[tuple[int, int, str]] = frozenset()
         self.local_keys: frozenset[tuple[int, int, str]] = frozenset()
-        self.owned_boundary_keys = frozenset(
-            _node_key(node) for node in owned_boundaries
+        context = _resolve_ownership(
+            ownership,
+            owned_boundaries,
+            include_anonymous,
         )
-        self.include_anonymous = include_anonymous
+        self.owned_boundary_keys = context.boundary_keys
+        self.include_anonymous = context.include_anonymous
 
     def event(self, kind: BodyEventKind, text: str, node: object) -> None:
         event = BodyEvent(kind, text, node_span(self.source, node))
@@ -1699,9 +1732,10 @@ def owned_nodes(
     *,
     owned_boundaries: Iterable[object] = (),
     include_anonymous: bool = False,
+    ownership: OwnershipContext | None = None,
 ) -> tuple[Any, ...]:
     """Return parameter/body nodes owned by one named or module declaration."""
-    explicit = frozenset(_node_key(node) for node in owned_boundaries)
+    context = _resolve_ownership(ownership, owned_boundaries, include_anonymous)
     roots = (*_parameter_parts(source, callable_node), *_body_parts(source, callable_node))
     found: list[Any] = []
     stack = list(reversed(roots))
@@ -1711,8 +1745,8 @@ def owned_nodes(
         if _node_key(node) not in root_keys and _owned_boundary(
             source,
             node,
-            explicit,
-            include_anonymous=include_anonymous,
+            context.boundary_keys,
+            include_anonymous=context.include_anonymous,
         ):
             continue
         found.append(node)
@@ -1726,6 +1760,7 @@ def body_events(
     *,
     owned_boundaries: Iterable[object] = (),
     include_anonymous: bool = False,
+    ownership: OwnershipContext | None = None,
 ) -> tuple[BodyEvent, ...]:
     """Emit facts from one Tree-sitter callable without entering nested callables."""
     return _TreeSitterBodyEventWalker(
@@ -1733,6 +1768,7 @@ def body_events(
         callable_node,
         owned_boundaries=owned_boundaries,
         include_anonymous=include_anonymous,
+        ownership=ownership,
     ).walk()
 
 
@@ -1742,6 +1778,7 @@ tree_sitter_body_events = body_events
 __all__ = [
     "GRAMMAR_METADATA",
     "GrammarMetadata",
+    "OwnershipContext",
     "ast_collect",
     "ast_field",
     "ast_text",
@@ -1751,6 +1788,7 @@ __all__ = [
     "load_parser",
     "node_span",
     "owned_nodes",
+    "ownership_context",
     "parser_versions",
     "tree_sitter_body_events",
 ]

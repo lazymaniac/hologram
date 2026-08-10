@@ -79,6 +79,30 @@ class TypeScriptExtractTest(unittest.TestCase):
         fn = next(s for s in syms if s.name == "formatCents")
         self.assertEqual(fn.visibility, Visibility.PUBLIC)
 
+    def test_legacy_constructor_projection_omits_canonical_calls(self):
+        path = Path("/repo/Construct.ts")
+        raw = b"class Construct { constructor() { boot(); this.init(); new Dep(); } }"
+        source = SourceFile(
+            path,
+            "Construct.ts",
+            detect_language(path),
+            SourceRole.PRODUCTION,
+            raw,
+            hashlib.sha256(raw).hexdigest(),
+        )
+        canonical = extract_canonical_file(source)
+        constructor = next(
+            item for item in canonical.symbols if item.kind is SymbolKind.CONSTRUCTOR
+        )
+        self.assertEqual(
+            {call.name for call in canonical.calls if call.caller == constructor.id},
+            {"boot", "init", "Dep"},
+        )
+
+        legacy = extract_file(path, path.parent, text=raw.decode())
+        legacy_constructor = next(item for item in legacy if item.kind == "ctor")
+        self.assertEqual(legacy_constructor.calls, [])
+
 
 @needs_ts
 class ArrowFunctionTest(unittest.TestCase):

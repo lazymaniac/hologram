@@ -22,6 +22,8 @@ from hologram.model import (
     SymbolKind,
     Visibility,
 )
+from hologram.parsers import treesitter as treesitter_parser
+from hologram.parsers import typescript as typescript_parser
 from hologram.parsers.api import DEFAULT_REGISTRY, extract_file
 from hologram.parsers.common import validate_body_events
 from hologram.scan import detect_language
@@ -581,6 +583,188 @@ class TypeScriptParserTest(unittest.TestCase):
         self.assertIn("real", {item.name for item in result.symbols})
         self.assertNotIn("fake", {item.name for item in result.symbols})
         self.assertEqual({call.name for call in result.calls}, {"visible"})
+
+    def test_adjacent_sfc_scripts_are_independent_original_byte_programs(self) -> None:
+        raw = (
+            b"<script>export const a=1</script>"
+            b"<script>export const b=2</script>"
+        )
+        for language, file in (
+            (Language.VUE, "Adjacent.vue"),
+            (Language.SVELTE, "Adjacent.svelte"),
+        ):
+            with self.subTest(language=language):
+                source = snapshot(raw, language=language, file=file)
+                result = extract_file(source)
+                self.assertFalse(result.diagnostics)
+                a = symbol(result, "a", SymbolKind.CONSTANT)
+                b = symbol(result, "b", SymbolKind.CONSTANT)
+                self.assertEqual(a.span, token_span(source, b"a=1"))
+                self.assertEqual(b.span, token_span(source, b"b=2"))
+                self.assertIs(a.id.language, language)
+                self.assertIs(b.id.language, language)
+                self.assertEqual(len({item.id for item in result.symbols}), len(result.symbols))
+
+    def test_comments_do_not_break_pending_member_decorators(self) -> None:
+        raw = b'''\
+class Decorated {
+  @first // first docs
+  @second /* second docs */
+  method(): void {}
+
+  @fieldDec
+  // field docs
+  field: Dep = make();
+}
+'''
+        result = extract_file(snapshot(raw, file="src/decorators.ts"))
+        method = symbol(result, "method", SymbolKind.METHOD, ("Decorated",))
+        field = symbol(result, "field", SymbolKind.FIELD, ("Decorated",))
+        self.assertEqual(method.annotations, ("first", "second"))
+        self.assertEqual(field.annotations, ("fieldDec",))
+        annotation_refs = {
+            (item.owner, item.name, item.context, item.confidence)
+            for item in result.references
+            if item.context is ReferenceContext.ANNOTATION
+        }
+        for owner, name in (
+            (method.id, "first"),
+            (method.id, "second"),
+            (field.id, "fieldDec"),
+        ):
+            self.assertIn(
+                (
+                    owner,
+                    name,
+                    ReferenceContext.ANNOTATION,
+                    ReferenceConfidence.POSSIBLE,
+                ),
+                annotation_refs,
+            )
+
+    def test_explicit_this_and_rest_parameters_share_signature_binding_events(self) -> None:
+        raw = b'''\
+function invoke(this: Client, ...args: string[]): void {
+  dispatch(this, args);
+}
+'''
+        result = extract_file(snapshot(raw, file="src/this-param.ts"))
+        invoke = symbol(result, "invoke", SymbolKind.FUNCTION)
+        self.assertEqual(invoke.params, ("Client", "string[]"))
+        self.assertEqual(invoke.id.signature_key, "(Client,string[])")
+        self.assertIn(Binding("this", "Client"), invoke.bindings)
+        self.assertIn(Binding("args", "string"), invoke.bindings)
+        body = next(item for item in result.bodies if item.owner == invoke.id)
+        param_events = {
+            (event.text, event.span)
+            for event in body.events
+            if event.kind is BodyEventKind.PARAM
+        }
+        self.assertIn(("this", token_span(result.source, b"this")), param_events)
+        self.assertIn(("args", token_span(result.source, b"args")), param_events)
+        assert_body_fact_events(self, result)
+
+    def test_overload_definitions_coalesce_and_descendants_use_signature_paths(self) -> None:
+        raw = b'''\
+function same(x: string): string;
+function same(x: string): string {
+  return normalize(x);
+}
+
+function choose(x: string): string;
+function choose(x: number): number;
+function choose(x: string | number): string | number {
+  function nested(): void { observe(x); }
+  nested();
+  return x;
+}
+'''
+        result = extract_file(snapshot(raw, file="src/overloads.ts"))
+        same = [
+            item
+            for item in result.symbols
+            if item.name == "same" and item.kind is SymbolKind.FUNCTION
+        ]
+        self.assertEqual(len(same), 1)
+        self.assertEqual(same[0].id.signature_key, "(string)")
+        self.assertIn(same[0].id, {item.owner for item in result.bodies})
+        self.assertEqual(
+            {call.name for call in result.calls if call.caller == same[0].id},
+            {"normalize"},
+        )
+
+        nested = symbol(result, "nested", SymbolKind.FUNCTION)
+        self.assertEqual(nested.id.container_path, ("choose(string | number)",))
+        self.assertEqual(len({item.id for item in result.symbols}), len(result.symbols))
+        assert_body_fact_events(self, result)
+
+    def test_declaration_and_intrinsic_jsx_names_are_not_definite_references(self) -> None:
+        raw = b'''\
+function id<T extends Base>(value: T): T { return value; }
+class RefShape { field: Dep = make(); }
+enum Choice { A, B = init() }
+const view = <div className="x"><Widget item={value} /></div>;
+'''
+        source = snapshot(raw, language=Language.TSX, file="src/refs.tsx")
+        result = extract_file(source)
+        definite = {
+            (item.name, item.span)
+            for item in result.references
+            if item.confidence is ReferenceConfidence.DEFINITE
+        }
+        for name, token, occurrence in (
+            ("T", b"T", 1),
+            ("field", b"field", 1),
+            ("A", b"A", 1),
+            ("B", b"B", 1),
+            ("div", b"div", 1),
+            ("div", b"div", 2),
+            ("className", b"className", 1),
+            ("item", b"item", 1),
+        ):
+            self.assertNotIn((name, token_span(source, token, occurrence=occurrence)), definite)
+        for name, token in (
+            ("Base", b"Base"),
+            ("Dep", b"Dep"),
+            ("make", b"make"),
+            ("init", b"init"),
+            ("Widget", b"Widget"),
+            ("value", b"value}"),
+        ):
+            expected = token_span(source, token)
+            if name == "value":
+                expected = SourceSpan(
+                    expected.file,
+                    expected.start_line,
+                    expected.start_column,
+                    expected.end_line,
+                    expected.end_column - 1,
+                )
+            self.assertIn((name, expected), definite)
+        assert_body_fact_events(self, result)
+
+    def test_ownership_boundary_context_is_built_once_per_extraction(self) -> None:
+        raw = b"\n".join(
+            f"function fn{index}(): void {{ call{index}(); }}".encode()
+            for index in range(12)
+        )
+        with (
+            patch.object(
+                typescript_parser,
+                "ownership_context",
+                wraps=typescript_parser.ownership_context,
+            ) as build_context,
+            patch.object(
+                treesitter_parser,
+                "ownership_context",
+                wraps=treesitter_parser.ownership_context,
+            ) as fallback_context,
+        ):
+            result = extract_file(snapshot(raw, file="src/many-owners.ts"))
+        self.assertEqual(build_context.call_count, 1)
+        self.assertEqual(fallback_context.call_count, 0)
+        self.assertEqual(len(result.calls), 12)
+        assert_body_fact_events(self, result)
 
     def test_body_categories_controls_utf8_spans_and_stable_ids(self) -> None:
         source = snapshot(BODY_SOURCE, file="src/body.ts")
