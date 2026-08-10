@@ -48,10 +48,8 @@ from .state import (
 _LEGACY_COMPAT_NAMES = frozenset(
     {
         "Symbol",
-        "_dep_lines",
         "_digest_state",
         "_hook_python",
-        "_missing_parser_langs",
         "_reduce_for_embed",
         "_state_hash",
         "_tree_lines",
@@ -79,6 +77,14 @@ _RESOLVE_NAMES = frozenset(
     }
 )
 
+_PIPELINE_NAMES = frozenset(
+    {
+        "BuildSnapshot",
+        "IncompleteBuildError",
+        "build_project",
+    }
+)
+
 __all__ = [
     "CONFIG_NAME",
     "CONFIG_SCHEMA_VERSION",
@@ -88,6 +94,7 @@ __all__ = [
     "BodyEvent",
     "BodyEventKind",
     "BodyIR",
+    "BuildSnapshot",
     "CallKind",
     "CallRef",
     "CanonicalSymbol",
@@ -96,6 +103,7 @@ __all__ = [
     "DiagnosticSeverity",
     "FileIR",
     "ImportRef",
+    "IncompleteBuildError",
     "Language",
     "ProjectConfig",
     "ProjectIR",
@@ -120,6 +128,7 @@ __all__ = [
     "SymbolKind",
     "Visibility",
     "build_digest",
+    "build_project",
     "canonical_config_bytes",
     "canonical_type_key",
     "compute_state",
@@ -141,6 +150,10 @@ __all__ = [
 
 def __getattr__(name: str):
     """Load modular APIs lazily and retain the temporary v1 compatibility surface."""
+    if name in _PIPELINE_NAMES:
+        value = getattr(import_module(".pipeline", __name__), name)
+        globals()[name] = value
+        return value
     if name in _RESOLVE_NAMES:
         value = getattr(import_module(".resolve", __name__), name)
         globals()[name] = value

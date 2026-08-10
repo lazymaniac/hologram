@@ -53,7 +53,7 @@ class CallExtractionTest(unittest.TestCase):
 class SimpleDigestTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.out = build_digest(JAVAMINI)
+        cls.out = build_digest(JAVAMINI, config=default_config())
 
     def test_signatures_present(self):
         self.assertIn("evaluate(OrderId,List<ItemId>):Quote", self.out)
@@ -82,29 +82,33 @@ class SimpleDigestTest(unittest.TestCase):
 @needs_java
 class SameShapeGroupingTest(unittest.TestCase):
     def test_identical_types_grouped_with_hole_notation(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         self.assertIn("ItemId,OrderId,UserId(R: String)", out)
         self.assertEqual(out.count("of(String):⟨X⟩"), 1)
         self.assertNotIn("of(String):UserId", out)
 
 
 class RenderUnitTest(unittest.TestCase):
-    def test_platform_and_ubiquitous_calls_filtered(self):
-        syms = []
-        for i in range(30):
-            syms.append(Symbol(name=f"fn{i}", kind="fn", file="a/mod.py", line=i,
-                               signature=f"fn{i}()", visibility="pub",
-                               calls=["requireNonNull", "helperCommon", f"helper{i}"]))
-            syms.append(Symbol(name=f"helper{i}", kind="fn", file="a/lib.py", line=i,
-                               signature=f"helper{i}()", visibility="priv"))
-        syms.append(Symbol(name="helperCommon", kind="fn", file="a/lib.py", line=99,
-                           signature="helperCommon()", visibility="priv"))
+    def test_render_treats_incoming_calls_as_pre_resolved(self):
+        syms = [
+            Symbol(
+                name="caller",
+                kind="fn",
+                file="a/mod.py",
+                line=1,
+                signature="caller()",
+                visibility="pub",
+                calls=["Target.fetch"],
+                bindings={"Target": "WrongType"},
+            ),
+        ]
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), syms, [], "regen")
-        chains = " ".join(ln.split(" > ", 1)[1] for ln in out.splitlines() if " > " in ln)
-        self.assertNotIn("requireNonNull", chains)  # not project-defined -> platform noise
-        self.assertNotIn("helperCommon", chains)    # project-defined but ubiquitous -> dropped
-        self.assertIn("helper3", chains)            # project-defined and rare -> kept
+        caller = next(
+            line for line in out.splitlines() if line.strip().startswith("caller()")
+        )
+        self.assertEqual(caller.strip(), "caller() > Target.fetch")
+        self.assertNotIn("WrongType.fetch", caller)
 
     def test_tree_shares_prefixes_once(self):
         types_by_dir = {"com/x/a": ["A(C)"], "com/x/b": ["B(C)"]}
@@ -134,7 +138,7 @@ class EnumValuesTest(unittest.TestCase):
 
     @needs_java
     def test_enum_values_rendered(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         self.assertIn("OrderStatus(E: NEW,PAID,SHIPPED)", out)
 
     def test_python_enum_values_extracted(self):
@@ -167,7 +171,7 @@ class InterfaceMethodTest(unittest.TestCase):
         self.assertIn("isTerminal", methods)
 
     def test_interface_methods_rendered(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         idx = out.index("PricePort(I)")
         after = out[idx:idx + 200]
         self.assertIn("quoteFor(OrderId):Quote", after)
@@ -181,7 +185,7 @@ class QualifiedCallTest(unittest.TestCase):
         self.assertIn("engine.evaluate", main.calls)
 
     def test_render_resolves_receiver_to_declared_type(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         main_line = next(ln for ln in out.splitlines() if "main(String[])" in ln)
         self.assertIn("PricingEngine.evaluate", main_line)   # engine -> its declared type
         self.assertNotIn("engine.evaluate", main_line)
@@ -192,14 +196,14 @@ class QualifiedCallTest(unittest.TestCase):
 @needs_java
 class CtorComponentsTest(unittest.TestCase):
     def test_class_constructor_params_shown_as_components(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         self.assertIn("PricingEngine(C: Map<ItemId,Long>)", out)
 
 
 @needs_java
 class ReconstructablePathTest(unittest.TestCase):
     def test_tree_labels_keep_real_path_segments(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         lines = out.splitlines()
         self.assertIn("src", lines)
         self.assertTrue(any(ln.strip() == "engine" for ln in lines))
@@ -212,9 +216,10 @@ class LanguageFilterTest(unittest.TestCase):
             root = Path(tmp) / "mixed"
             shutil.copytree(JAVAMINI, root)
             (root / "script.py").write_text("def py_helper() -> int:\n    return 1\n")
-            all_langs = build_digest(root)
+            config = default_config()
+            all_langs = build_digest(root, config=config)
             self.assertIn("py_helper", all_langs)
-            java_only = build_digest(root, langs={"java"})
+            java_only = build_digest(root, langs={"java"}, config=config)
             self.assertNotIn("py_helper", java_only)
             self.assertIn("PricingEngine", java_only)
 
@@ -244,7 +249,7 @@ class RelationsTest(unittest.TestCase):
         self.assertEqual(t.permits, ["AddOp", "RemoveOp"])
 
     def test_relations_rendered(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         self.assertIn("PricingEngine(C: Map<ItemId,Long>) : PricePort", out)
         self.assertIn("DeltaOp(I sealed: AddOp|RemoveOp)", out)
         self.assertIn("(R: String) : DeltaOp", out)
@@ -253,14 +258,14 @@ class RelationsTest(unittest.TestCase):
 @needs_java
 class LegendTest(unittest.TestCase):
     def test_legend_line_present(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         second = out.splitlines()[1]
         self.assertIn("legend", second)
         self.assertIn("⟨X⟩", second)
         self.assertIn("> calls", second)
 
     def test_query_recipes_line_present(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         third = out.splitlines()[2]
         self.assertIn("query this file", third)
         self.assertIn("who calls X", third)
@@ -281,7 +286,7 @@ class ThrowsTest(unittest.TestCase):
 
     @needs_java
     def test_throws_rendered_on_signature_exception_suffix_dropped(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         self.assertIn("evaluate(OrderId,List<ItemId>):Quote !UnknownItem", out)
         self.assertNotIn("!UnknownItemException", out)
 
@@ -415,7 +420,7 @@ class PrivateMembersTest(unittest.TestCase):
 @needs_java
 class TightFormatTest(unittest.TestCase):
     def test_ascii_return_sep_and_tight_commas(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         self.assertIn("evaluate(OrderId,List<ItemId>):Quote", out)
         self.assertIn("OrderStatus(E: NEW,PAID,SHIPPED)", out)
         self.assertIn("ItemId,OrderId,UserId(R: String)", out)
@@ -424,7 +429,7 @@ class TightFormatTest(unittest.TestCase):
         self.assertNotIn("→", ev)   # ascii `:Ret`, not the pretty arrow
 
     def test_no_fanin_zero_marker(self):
-        out = build_digest(JAVAMINI)
+        out = build_digest(JAVAMINI, config=default_config())
         self.assertNotIn("×0", out)
 
 

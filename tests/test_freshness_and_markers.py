@@ -1,4 +1,5 @@
-import shutil
+import contextlib
+import io
 import subprocess
 import sys
 import tempfile
@@ -12,11 +13,9 @@ import hologram  # noqa: E402
 from hologram import (  # noqa: E402
     CONFIG_NAME,
     ProjectConfig,
-    Symbol,
     build_digest,
     default_config,
     render_config,
-    render_simple,
     run_cli,
 )
 
@@ -207,13 +206,11 @@ class StateAndCheckTest(unittest.TestCase):
                 f"# proj · state={'0' * 64} · regen: old\n",
                 encoding="utf-8",
             )
-            real_scan = hologram.legacy.scan.scan_project
-            real_compute = hologram.legacy.compute_state
+            real_build = hologram.legacy.build_project
             snapshots = []
-            compute_snapshots = []
 
-            def scan_then_mutate(*args, **kwargs):
-                snapshot = real_scan(*args, **kwargs)
+            def build_then_mutate(*args, **kwargs):
+                snapshot = real_build(*args, **kwargs)
                 snapshots.append(snapshot)
                 (root / "svc.py").write_text(
                     "def disk_only() -> int:\n    return 2\n",
@@ -221,26 +218,10 @@ class StateAndCheckTest(unittest.TestCase):
                 )
                 return snapshot
 
-            def record_compute(root_arg, config_arg, scan_result, **kwargs):
-                compute_snapshots.append(scan_result)
-                return real_compute(
-                    root_arg,
-                    config_arg,
-                    scan_result,
-                    **kwargs,
-                )
-
-            with (
-                mock.patch.object(
-                    hologram.legacy.scan,
-                    "scan_project",
-                    side_effect=scan_then_mutate,
-                ),
-                mock.patch.object(
-                    hologram.legacy,
-                    "compute_state",
-                    side_effect=record_compute,
-                ),
+            with mock.patch.object(
+                hologram.legacy,
+                "build_project",
+                side_effect=build_then_mutate,
             ):
                 run_cli(
                     [
@@ -256,10 +237,6 @@ class StateAndCheckTest(unittest.TestCase):
 
             digest = out.read_text(encoding="utf-8")
         self.assertEqual(len(snapshots), 1)
-        self.assertGreaterEqual(len(compute_snapshots), 2)
-        self.assertTrue(
-            all(snapshot is snapshots[0] for snapshot in compute_snapshots)
-        )
         self.assertIn("Svc", digest)
         self.assertNotIn("disk_only", digest)
 
@@ -270,7 +247,9 @@ class StateAndCheckTest(unittest.TestCase):
                 (root / "svc.py").resolve(),
                 (root / "test_svc.py").resolve(),
             }
-            real_scan = hologram.legacy.scan.scan_project
+            from hologram import pipeline
+
+            real_scan = pipeline.scan_project
             real_read_bytes = Path.read_bytes
             real_read_text = Path.read_text
             scan_calls = 0
@@ -292,7 +271,7 @@ class StateAndCheckTest(unittest.TestCase):
 
             with (
                 mock.patch.object(
-                    hologram.legacy.scan,
+                    pipeline,
                     "scan_project",
                     side_effect=counted_scan,
                 ),
@@ -347,8 +326,8 @@ class StateAndCheckTest(unittest.TestCase):
                 root,
                 config,
                 scan_result,
-                extractor_versions=hologram.legacy.LEGACY_EXTRACTOR_VERSIONS,
-                parser_versions=hologram.legacy.LEGACY_PARSER_VERSIONS,
+                extractor_versions={},
+                parser_versions={},
             )
             out = Path(tmp) / "digest.md"
             out.write_text(
@@ -356,39 +335,38 @@ class StateAndCheckTest(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            actions = (
-                lambda: hologram._state_hash(root, config),
-                lambda: run_cli(
-                    [
-                        "check",
-                        "--root",
-                        str(root),
-                        "--out",
-                        str(out),
-                        "--quiet",
-                    ]
-                ),
-            )
-            for action in actions:
-                with self.subTest(action=action):
-                    with mock.patch.object(
-                        hologram.legacy.scan,
-                        "scan_project",
-                        return_value=scan_result,
-                    ):
-                        with self.assertRaises(SystemExit) as caught:
-                            action()
-                    self.assertEqual(
-                        str(caught.exception),
-                        "first failure; second failure",
+            with mock.patch(
+                "hologram.pipeline.scan_project",
+                return_value=scan_result,
+            ):
+                with self.assertRaises(
+                    hologram.IncompleteBuildError
+                ) as caught:
+                    hologram._state_hash(root, config)
+                self.assertEqual(caught.exception.diagnostics, diagnostics)
+
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    code = run_cli(
+                        [
+                            "check",
+                            "--root",
+                            str(root),
+                            "--out",
+                            str(out),
+                            "--quiet",
+                        ]
                     )
+                self.assertEqual(code, 3)
+                self.assertIn("scan-root-open-failed", stderr.getvalue())
+                self.assertIn("scan-walk-error", stderr.getvalue())
 
 
 class TestedMarkerTest(unittest.TestCase):
     def test_symbol_named_in_tests_gets_check(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            out = build_digest(root)
+            out = build_digest(root, config=default_config())
         run_line = next(ln for ln in out.splitlines() if "run()" in ln)
         self.assertIn("✓", run_line)                     # named in test file
         self.assertIn("✓=referenced from tests", out)    # legend
@@ -398,7 +376,7 @@ class TestedMarkerTest(unittest.TestCase):
             root = Path(tmp) / "p"
             root.mkdir()
             (root / "a.py").write_text("def lonely() -> int:\n    return 1\n")
-            out = build_digest(root)
+            out = build_digest(root, config=default_config())
         lonely = next(ln for ln in out.splitlines() if "lonely()" in ln)
         self.assertNotIn("✓", lonely)
 
@@ -411,7 +389,7 @@ class SizeMarkerTest(unittest.TestCase):
             root = Path(tmp) / "p"
             root.mkdir()
             (root / "a.py").write_text(big + "\ndef small() -> int:\n    return 1\n")
-            out = build_digest(root)
+            out = build_digest(root, config=default_config())
         big_line = next(ln for ln in out.splitlines() if "big()" in ln)
         self.assertIn("⋮", big_line)
         small_line = next(ln for ln in out.splitlines() if "small()" in ln)
@@ -422,24 +400,11 @@ class BehaviorsTest(unittest.TestCase):
     def test_opt_in_behavior_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            plain = build_digest(root)
-            with_b = build_digest(root, behaviors=True)
+            config = default_config()
+            plain = build_digest(root, config=config)
+            with_b = build_digest(root, behaviors=True, config=config)
         self.assertNotIn("? ", plain.split("legend")[1])
         self.assertIn("? test_svc: test_run_returns_one", with_b)
-
-
-class DepsMapTest(unittest.TestCase):
-    def test_cross_module_type_reference_produces_edge(self):
-        syms = [
-            Symbol(name="Core", kind="class", file="core/c.py", line=1,
-                   visibility="pub"),
-            Symbol(name="use_core", kind="fn", file="app/a.py", line=1,
-                   signature="use_core()", visibility="pub"),
-        ]
-        tokens = {"core/c.py": {"Core"},
-                  "app/a.py": {"use_core", "Core"}}
-        lines = hologram._dep_lines(syms, tokens, min_refs=1)
-        self.assertTrue(any("app→core" in ln for ln in lines))
 
 
 class EmbedTest(unittest.TestCase):
@@ -508,7 +473,6 @@ class DiffCommandTest(unittest.TestCase):
             (root / "svc.py").write_text(
                 (root / "svc.py").read_text()
                 + "\ndef fresh_fn() -> int:\n    return 9\n")
-            import contextlib, io
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 code = run_cli(["diff", "HEAD", "--root", str(root), "--quiet"])

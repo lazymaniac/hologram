@@ -21,6 +21,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from functools import lru_cache
@@ -33,20 +34,16 @@ from .config import (
     default_config,
     load_config,
 )
-from .model import CallKind, Language, SourceFile, SymbolKind, Visibility
+from .model import CallKind, Language, SourceFile, SymbolId, SymbolKind, Visibility
 from .model import FileIR as CanonicalFileIR
 from .parsers.api import DEFAULT_REGISTRY
 from .parsers.api import extract_file as extract_canonical_file
 from .parsers.treesitter import GRAMMAR_METADATA
-from .state import compute_state, read_digest_state
+from .pipeline import BuildSnapshot, IncompleteBuildError, build_project
+from .resolve import ResolutionStatus
+from .state import read_digest_state
 
 TYPE_KINDS = ("class", "interface", "record", "enum", "type")
-LEGACY_EXTRACTOR_VERSIONS = {
-    language.value: "legacy-1" for language in Language
-}
-LEGACY_PARSER_VERSIONS = {
-    language.value: "legacy" for language in Language
-}
 _LEGACY_STATE_FORMAT_VERSION = "hologram-legacy-render-state-v1"
 
 
@@ -99,11 +96,6 @@ def strip_comments_and_strings(text: str) -> str:
     text = _STRING_RE.sub('"s"', text)
     text = _LINE_COMMENT_RE.sub(" ", text)
     return text
-
-
-def _base_type(t: str) -> str:
-    """Bare type name: Map<K,V> -> Map, list[X] -> list, String[] -> String."""
-    return re.sub(r"[<\[(].*", "", t).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +681,11 @@ def _legacy_task6_container(language: Language, symbol) -> str | None:
     return _legacy_task5_container(language, symbol)
 
 
-def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
+def _canonical_to_legacy(
+    file_ir: CanonicalFileIR,
+    *,
+    resolved_calls: Mapping[SymbolId, tuple[str, ...]] | None = None,
+) -> list[Symbol]:
     projected: list[Symbol] = []
     type_paths = {
         (*symbol.id.container_path, symbol.name)
@@ -805,7 +801,11 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                     if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES
                     else symbol.lang.value
                 ),
-                calls=_legacy_calls(file_ir, symbol),
+                calls=(
+                    _legacy_calls(file_ir, symbol)
+                    if resolved_calls is None
+                    else list(resolved_calls.get(symbol.id, ()))
+                ),
                 supers=list(symbol.supers),
                 permits=list(symbol.permits),
                 raises=list(symbol.raises),
@@ -878,13 +878,11 @@ def _effective_config(
     config: ProjectConfig,
     langs: set[str] | None,
 ) -> ProjectConfig:
+    if langs is None:
+        return config
     return dataclasses.replace(
         config,
-        languages=(
-            tuple(Language(value) for value in sorted(langs))
-            if langs is not None
-            else config.languages
-        ),
+        languages=tuple(Language(value) for value in sorted(langs)),
     )
 
 
@@ -923,44 +921,45 @@ def _gather(
     private_sigs: bool = False,
     behaviors: bool = False,
     *,
-    scan_result: scan.ScanResult | None = None,
+    snapshot: BuildSnapshot | None = None,
 ):
     """Extract symbols, identifier-token sets per file, and the corpus state hash.
     `langs` restricts to those languages (e.g. {"java"}); None means all."""
     root = root.resolve()
     effective_config = _effective_config(config, langs)
-    if scan_result is None:
-        scan_result = scan.scan_project(root, effective_config)
-    if not scan_result.complete:
-        detail = "; ".join(
-            diagnostic.message for diagnostic in scan_result.diagnostics
-        )
-        raise SystemExit(detail or "source scan incomplete")
+    if snapshot is None:
+        snapshot = build_project(root, effective_config)
+    snapshot.require_complete()
 
-    files = [source.path for source in scan_result.sources]
-    missing = _missing_parser_langs(files)
-    if missing:
-        _bootstrap_or_die(missing, [])
-
+    files = [file_ir.source.path for file_ir in snapshot.project.files]
     symbols: list[Symbol] = []
     file_tokens: dict[str, set[str]] = {}
     loc = 0
-    for source in scan_result.sources:
+    resolved_calls: dict[SymbolId, list[str]] = {}
+    for resolved in snapshot.resolution.calls:
+        if (
+            resolved.status is ResolutionStatus.RESOLVED
+            and resolved.display_name is not None
+        ):
+            resolved_calls.setdefault(resolved.fact.caller, []).append(
+                resolved.display_name
+            )
+    stable_calls = {
+        owner: tuple(dict.fromkeys(calls))
+        for owner, calls in resolved_calls.items()
+    }
+    for file_ir in snapshot.project.files:
+        source = file_ir.source
         rel = source.file
         text = source.text
-        symbols.extend(extract_file(source.path, root, text))
+        symbols.extend(
+            _canonical_to_legacy(file_ir, resolved_calls=stable_calls)
+        )
         file_tokens[rel] = set(_IDENT_RE.findall(strip_comments_and_strings(text)))
         loc += text.count("\n") + 1
 
-    state = compute_state(
-        root,
-        effective_config,
-        scan_result,
-        extractor_versions=LEGACY_EXTRACTOR_VERSIONS,
-        parser_versions=LEGACY_PARSER_VERSIONS,
-    )
     rendered_state = _legacy_state(
-        state.value,
+        snapshot.state.value,
         private_sigs=private_sigs,
         behaviors=behaviors,
     )
@@ -974,27 +973,16 @@ def _state_hash(
     private_sigs: bool = False,
     behaviors: bool = False,
     *,
-    scan_result: scan.ScanResult | None = None,
+    snapshot: BuildSnapshot | None = None,
 ) -> str:
     """Compute the versioned state over one immutable scanner snapshot."""
     root = root.resolve()
     effective_config = _effective_config(config, langs)
-    if scan_result is None:
-        scan_result = scan.scan_project(root, effective_config)
-    state = compute_state(
-        root,
-        effective_config,
-        scan_result,
-        extractor_versions=LEGACY_EXTRACTOR_VERSIONS,
-        parser_versions=LEGACY_PARSER_VERSIONS,
-    )
-    if not state.complete:
-        detail = "; ".join(
-            diagnostic.message for diagnostic in state.diagnostics
-        )
-        raise SystemExit(detail or "source scan incomplete")
+    if snapshot is None:
+        snapshot = build_project(root, effective_config)
+    snapshot.require_complete()
     return _legacy_state(
-        state.value,
+        snapshot.state.value,
         private_sigs=private_sigs,
         behaviors=behaviors,
     )
@@ -1166,73 +1154,6 @@ def _reduce_calls(edges: dict[str, set[str]],
     return reduced
 
 
-_BOILERPLATE_PARTS = ("src", "main", "java", "kotlin", "test", "tests", "lib")
-
-
-def _dep_lines(symbols: list[Symbol], file_tokens: dict[str, set[str]],
-               min_refs: int = 2) -> list[str]:
-    """Module dependency edges (`a→b` = code in a references types defined in b),
-    from data already in hand. Modules are top path segments after boilerplate
-    and the corpus-wide shared prefix."""
-    type_dir: dict[str, str] = {}
-    for s in symbols:
-        if s.kind in TYPE_KINDS and not _is_test_path(s.file):
-            type_dir.setdefault(s.name, str(Path(s.file).parent))
-    dirs = {str(Path(rel).parent) for rel in file_tokens} | set(type_dir.values())
-    stripped = {d: [p for p in Path(d).parts if p not in _BOILERPLATE_PARTS]
-                for d in dirs}
-    common: list[str] = []
-    lists = [p for p in stripped.values() if p]
-    while lists and all(len(p) > len(common) + 1 for p in lists) \
-            and len({p[len(common)] for p in lists}) == 1:
-        common.append(lists[0][len(common)])
-
-    def label(d: str) -> str:
-        parts = stripped[d]
-        if common and parts[:len(common)] == common and len(parts) > len(common):
-            parts = parts[len(common):]
-        return parts[0] if parts else "."
-
-    counts: dict[tuple[str, str], int] = {}
-    for rel, toks in file_tokens.items():
-        if _is_test_path(rel):
-            continue
-        m_from = label(str(Path(rel).parent))
-        for t in toks & set(type_dir):
-            m_to = label(type_dir[t])
-            if m_from != m_to:
-                counts[(m_from, m_to)] = counts.get((m_from, m_to), 0) + 1
-    by_src: dict[str, list[str]] = {}
-    for (a, b), n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-        if n >= min_refs:
-            by_src.setdefault(a, []).append(b)
-    cells = [f"{a}→{','.join(bs)}" for a, bs in sorted(by_src.items())]
-    lines, cur = [], ""
-    for c in cells:
-        if cur and len(cur) + len(c) + 3 > 110:
-            lines.append(f"· deps {cur}")
-            cur = c
-        else:
-            cur = f"{cur} | {c}" if cur else c
-    if cur:
-        lines.append(f"· deps {cur}")
-    return lines
-
-
-def _ubiquitous_calls(fns_by_lang: dict[str, list[Symbol]]) -> set[str]:
-    """Callees named by >25% of a language's functions (log/guard helpers): noise."""
-    ubiquitous: set[str] = set()
-    for lang_fns in fns_by_lang.values():
-        if len(lang_fns) < 20:
-            continue
-        df: dict[str, int] = {}
-        for s in lang_fns:
-            for c in set(s.calls):
-                df[c] = df.get(c, 0) + 1
-        ubiquitous |= {c for c, n in df.items() if n / len(lang_fns) > 0.25}
-    return ubiquitous
-
-
 def _total_loc(files: list[Path]) -> int:
     loc = 0
     for f in files:
@@ -1286,62 +1207,15 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 key = (str(Path(s.file).parent), Path(s.file).name)
                 priv_top_by_file.setdefault(key, []).append(s.name)
 
-    defined = {s.name for s in symbols}
-    project_types = {s.name for s in prod if s.kind in TYPE_KINDS}
-    by_lang: dict[str, list[Symbol]] = {}
-    for s in prod:
-        if s.kind in ("fn", "method"):
-            by_lang.setdefault(s.lang, []).append(s)
-    ubiquitous = _ubiquitous_calls(by_lang)
-
-    # A call is shown only if it names something defined in this project — platform
-    # calls carry no project semantics. Receivers with a known declared type are
-    # resolved: rendered as Type.method when the type is project-owned, dropped when
-    # it is a platform type (kills name-collision noise like bigint.signum). Unknown
-    # receivers fall back to the name-based rule. Ubiquitous helpers always drop.
-    def _filter_calls(sym: Symbol) -> list[str]:
-        kept: list[str] = []
-        for c in sym.calls:
-            recv, _, m = c.rpartition(".")
-            if m in ubiquitous:
-                continue
-            if not recv:
-                if m in defined:
-                    kept.append(m)
-                continue
-            if recv in sym.bindings:
-                t = _base_type(sym.bindings[recv])
-                if t in project_types and m in defined:
-                    kept.append(f"{t}.{m}")
-                continue
-            if recv in project_types:
-                if m in defined:
-                    kept.append(c)
-                continue
-            if recv[:1].isupper():
-                continue  # unresolved TypeName (List, SpringApplication) -> platform
-            if m in defined:
-                kept.append(c)
-        return list(dict.fromkeys(kept))
-
-    # Call graph for transitive reduction. A method of a project type is the node
-    # Type.name; a resolved call targets exactly that node, a bare call targets the
-    # name node, which fans out to every Type.name defining it.
-    def _call_node(entry: str) -> str:
-        recv, _, m = entry.rpartition(".")
-        return entry if recv in project_types else m
-
+    # Calls already contain resolver-produced project targets. Rendering only
+    # deduplicates them before the temporary transitive-reduction pass.
     fns = [s for s in prod if s.kind in ("fn", "method")]
-    kept_by_sym = {id(s): _filter_calls(s) for s in fns}
-    nodes_by_sym = {sid: [_call_node(c) for c in calls]
-                    for sid, calls in kept_by_sym.items()}
+    kept_by_sym = {id(symbol): list(dict.fromkeys(symbol.calls)) for symbol in fns}
+    nodes_by_sym = dict(kept_by_sym)
     edges: dict[str, set[str]] = {}
     for s in fns:
-        src = (f"{s.container}.{s.name}"
-               if s.container in project_types else s.name)
+        src = f"{s.container}.{s.name}" if s.container else s.name
         edges.setdefault(src, set()).update(nodes_by_sym[id(s)])
-        if "." in src:  # bare-name node fans out to each qualified definition
-            edges.setdefault(s.name, set()).add(src)
     kept_by_sym = _reduce_calls(edges, nodes_by_sym, kept_by_sym)
 
     def _norm(text: str, own: str) -> str:
@@ -1496,7 +1370,7 @@ def _build_digest(
     behaviors: bool,
     config: ProjectConfig,
     *,
-    scan_result: scan.ScanResult | None = None,
+    snapshot: BuildSnapshot | None = None,
 ) -> str:
     files, symbols, file_tokens, state, loc = _gather(
         root,
@@ -1504,7 +1378,7 @@ def _build_digest(
         config,
         private_sigs,
         behaviors,
-        scan_result=scan_result,
+        snapshot=snapshot,
     )
     scores = _fan_in_from_tokens(symbols, file_tokens)
     test_tokens: set[str] = set()
@@ -1514,10 +1388,9 @@ def _build_digest(
     tested = {s.name for s in symbols
               if not _is_test_path(s.file) and s.visibility == "pub"
               and s.kind in ("fn", "method")} & test_tokens
-    deps = _dep_lines(symbols, file_tokens)
     return render_simple(root, symbols, files, regen_cmd, scores, private_sigs,
                          tested=tested, behaviors=behaviors, state=state,
-                         deps=deps, loc=loc)
+                         loc=loc)
 
 
 def build_digest(root: Path, regen_cmd: str = "hologram build",
@@ -1525,7 +1398,7 @@ def build_digest(root: Path, regen_cmd: str = "hologram build",
                  behaviors: bool = False,
                  config: ProjectConfig | None = None) -> str:
     if config is None:
-        config = default_config()
+        config = load_config(root.resolve())
     return _build_digest(
         root,
         regen_cmd,
@@ -1598,29 +1471,6 @@ def embed_digest(claude_path: Path, digest: str, max_tokens: int = 30000) -> str
         updated = existing.rstrip("\n") + sep + block + "\n"
     claude_path.write_text(updated)
     return tier
-
-
-def _missing_parser_langs(files: list[Path]) -> set[str]:
-    """Languages present in `files` that need a tree-sitter parser we don't have."""
-    return {
-        language
-        for language in {detect_language(path) for path in files}
-        if language is not None
-        and Language(language) in GRAMMAR_METADATA
-        and not has_parser(language)
-    }
-
-
-def _bootstrap_or_die(missing: set[str], argv: list[str]) -> None:
-    """Exit with installation guidance when requested parsers are unavailable."""
-    del argv
-    packages = " ".join(_grammar_pkgs(missing))
-    raise SystemExit(
-        f"missing tree-sitter parser for: {', '.join(sorted(missing))}\n"
-        f"install with: {sys.executable} -m pip install "
-        "'hologram-code-map[parsers]'\n"
-        f"required packages: {packages}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1749,7 +1599,7 @@ def _digest_regen_command(root: Path, out_path: Path,
     return _hologram_build_command(*regen_args)
 
 
-def run_cli(argv: list[str] | None = None) -> int:
+def _run_cli(argv: list[str] | None = None) -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--root", type=Path, default=Path.cwd())
     common.add_argument("--lang", action="append", default=None,
@@ -1797,20 +1647,20 @@ def run_cli(argv: list[str] | None = None) -> int:
         langs = {language.value for language in config.languages}
     out_path = (args.out or root / "PROJECT_DIGEST.md").resolve()
 
-    freshness_scan: scan.ScanResult | None = None
+    freshness_snapshot: BuildSnapshot | None = None
     fresh = False
     if args.cmd == "check" or (
         args.cmd == "build" and args.if_stale
     ):
         effective_config = _effective_config(config, langs)
-        freshness_scan = scan.scan_project(root, effective_config)
+        freshness_snapshot = build_project(root, effective_config)
         current_state = _state_hash(
             root,
             config,
             langs,
             private_sigs=args.private,
             behaviors=args.behaviors,
-            scan_result=freshness_scan,
+            snapshot=freshness_snapshot,
         )
         fresh = _digest_state(out_path) == current_state
 
@@ -1869,7 +1719,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         args.embed_max_tokens,
     )
     if args.cmd == "build" and args.if_stale:
-        assert freshness_scan is not None
+        assert freshness_snapshot is not None
         digest = _build_digest(
             root,
             regen_cmd,
@@ -1877,7 +1727,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             args.private,
             args.behaviors,
             config,
-            scan_result=freshness_scan,
+            snapshot=freshness_snapshot,
         )
     else:
         digest = build_digest(
@@ -1896,6 +1746,14 @@ def run_cli(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print(f"CLAUDE.md: digest embedded ({tier})")
     return 0
+
+
+def run_cli(argv: list[str] | None = None) -> int:
+    try:
+        return _run_cli(argv)
+    except IncompleteBuildError as error:
+        print(error, file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import contextlib
+import io
 import shlex
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import hologram  # noqa: E402
+import hologram.parsers.api as parser_api
 from hologram import (  # noqa: E402
     CONFIG_NAME,
     ConfigError,
@@ -23,7 +25,6 @@ from hologram import (  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
-PYMINI_FILE = FIXTURES / "pymini" / "app.py"
 
 needs_java = unittest.skipUnless(hologram.has_parser("java"),
                                  "tree-sitter-java not installed")
@@ -356,34 +357,74 @@ class InitLangTest(unittest.TestCase):
 
 
 class BootstrapTest(unittest.TestCase):
-    def test_missing_parser_langs_detects_gap(self):
-        files = [JAVAMINI / "src/App.java", PYMINI_FILE]
-        with mock.patch(
-            "hologram.legacy.has_parser",
-            side_effect=lambda language: language != "java",
-        ):
-            self.assertEqual(hologram._missing_parser_langs(files), {"java"})
-        # python never needs a parser
-        self.assertEqual(hologram._missing_parser_langs([PYMINI_FILE]), set())
+    def test_cli_returns_three_for_missing_parser_without_writes(self):
+        class MissingJavaRegistry:
+            def has_parser(self, language):
+                return language is not hologram.Language.JAVA
 
-    def test_cli_fails_fast_with_parser_extra_guidance_without_writes(self):
-        with mock.patch(
-            "hologram.legacy.has_parser",
-            side_effect=lambda language: language != "java",
-        ):
-            with tempfile.TemporaryDirectory() as tmp:
-                repo = _make_repo(Path(tmp))
-                write_manifest(repo)
-                out = Path(tmp) / "d.md"
-                with self.assertRaises(SystemExit) as ctx:
-                    run_cli(["build", "--root", str(repo), "--out", str(out),
-                             "--quiet"])
-                self.assertFalse(out.exists())
-            self.assertIn(
-                f"{sys.executable} -m pip install 'hologram-code-map[parsers]'",
-                str(ctx.exception),
+            def parser_for(self, language):
+                del language
+
+            def versions(self):
+                return {language.value: "test" for language in hologram.Language}
+
+        registry = MissingJavaRegistry()
+
+        def extract_without_java(root, sources):
+            return parser_api.extract_project(root, sources, registry=registry)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            write_manifest(repo)
+            out = Path(tmp) / "d.md"
+            stderr = io.StringIO()
+            with mock.patch(
+                "hologram.pipeline.extract_project",
+                side_effect=extract_without_java,
+            ), contextlib.redirect_stderr(stderr):
+                code = run_cli(
+                    [
+                        "build",
+                        "--root",
+                        str(repo),
+                        "--out",
+                        str(out),
+                        "--quiet",
+                    ]
+                )
+            self.assertFalse(out.exists())
+        self.assertEqual(code, 3)
+        self.assertIn("missing-parser", stderr.getvalue())
+
+    def test_module_entrypoint_returns_three_without_traceback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            write_manifest(repo)
+            (repo / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+            out = Path(tmp) / "d.md"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "hologram",
+                    "build",
+                    "--root",
+                    str(repo),
+                    "--out",
+                    str(out),
+                    "--quiet",
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
             )
-            self.assertIn("tree-sitter-java", str(ctx.exception))
+
+            self.assertEqual(result.returncode, 3, result.stderr)
+            self.assertFalse(out.exists())
+            self.assertIn("python-syntax-error", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
 
 
 class HookPythonSelectionTest(unittest.TestCase):
