@@ -56,8 +56,7 @@ _ITEM_KINDS = frozenset(
         "union_item",
     }
 )
-_CALLABLE_KINDS = frozenset({"closure_expression", "function_item"})
-_OWNERSHIP_BOUNDARIES = _ITEM_KINDS | _CALLABLE_KINDS | frozenset({"async_block"})
+_OWNERSHIP_BOUNDARIES = _ITEM_KINDS
 _TYPE_LEAVES = frozenset({"type_identifier"})
 _PRIMITIVES = frozenset(
     {
@@ -243,6 +242,14 @@ def _parameters(node: object | None) -> tuple[_Parameter, ...]:
         if parameter.type == "self_parameter":
             values.append(_Parameter("Self", ("self",), parameter, None, True))
             continue
+        if (
+            getattr(node, "type", "") == "closure_parameters"
+            and parameter.type != "parameter"
+        ):
+            names = _pattern_names(parameter)
+            if names:
+                values.append(_Parameter("?", names, parameter, None))
+            continue
         if parameter.type != "parameter":
             continue
         type_node = ast_field(parameter, "type")
@@ -373,10 +380,14 @@ def _flatten_use(
             )
         ]
     if node.type == "use_wildcard":
+        parts = (
+            *prefix,
+            *(part for part in _path_parts(node) if part != "*"),
+        )
         imported = _path_import(
             source,
             node,
-            prefix,
+            parts,
             alias=None,
             wildcard=True,
             reexport=reexport,
@@ -464,6 +475,12 @@ def _local_bindings(body: object | None) -> tuple[Binding, ...]:
                 {"match_pattern"},
             )
             values.extend(Binding(name, "?") for name in _pattern_names(pattern))
+        elif node.type == "closure_expression":
+            for parameter in _parameters(ast_field(node, "parameters")):
+                values.extend(
+                    Binding(name, _binding_type(parameter.type_name))
+                    for name in parameter.names
+                )
     return binding_tuple(values)
 
 
@@ -547,8 +564,9 @@ def _calls(
 def _trait_bounds(node: object | None) -> tuple[str, ...]:
     return ordered_unique(
         _binding_type(ast_text(child))
-        for child in walk_all(node)
-        if child.type in {"type_identifier", "scoped_type_identifier"}
+        for child in named_children(node)
+        if child.type
+        in {"generic_type", "scoped_type_identifier", "type_identifier"}
         and ast_text(child)
     )
 
@@ -724,13 +742,19 @@ class _Extractor:
             elif member.type == "type_item":
                 self.type_item(member, owned_path, implicit_public=True)
 
-    def impl_item(self, node: object, container_path: tuple[str, ...]) -> None:
+    def impl_item(
+        self,
+        node: object,
+        container_path: tuple[str, ...],
+    ) -> None:
         target = _binding_type(_type_text(ast_field(node, "type")))
         if not target:
             return
         trait = ast_field(node, "trait")
         override = trait is not None
         owned_path = (*container_path, target)
+        if trait is not None:
+            owned_path = (*owned_path, f"impl {_type_text(trait)}")
         body = ast_field(node, "body")
         for member in named_children(body):
             if member.type == "function_item":
@@ -868,7 +892,7 @@ class _Extractor:
         )
         if body is None:
             return
-        events = body_events(self.source, node)
+        events = body_events(self.source, node, include_anonymous=True)
         self.bodies.append(BodyIR(symbol.id, node_span(self.source, body), events))
         self.calls.extend(_calls(self.source, symbol.id, body))
         self.references.extend(

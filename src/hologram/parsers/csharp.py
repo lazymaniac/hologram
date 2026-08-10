@@ -67,6 +67,10 @@ _OWNERSHIP_BOUNDARIES = frozenset(
         "lambda_expression",
     }
 )
+_ANONYMOUS_CALLABLE_KINDS = frozenset(
+    {"anonymous_method_expression", "lambda_expression"}
+)
+_FACT_BOUNDARIES = _OWNERSHIP_BOUNDARIES - _ANONYMOUS_CALLABLE_KINDS
 _PRIMITIVES = frozenset(
     {
         "bool",
@@ -286,7 +290,20 @@ def _inferred_type(value: object | None) -> str | None:
 
 def _local_bindings(body: object | None) -> tuple[Binding, ...]:
     values: list[Binding] = []
-    for node in walk_owned(body, _OWNERSHIP_BOUNDARIES):
+    for node in walk_owned(body, _FACT_BOUNDARIES):
+        if node.type in _ANONYMOUS_CALLABLE_KINDS:
+            parameter_root = ast_field(node, "parameters") or direct_child(
+                node,
+                {"implicit_parameter", "parameter_list"},
+            )
+            parameters = _parameters(parameter_root)
+            values.extend(_parameter_bindings(parameters))
+            values.extend(
+                Binding(ast_text(child), "?")
+                for child in walk_all(parameter_root)
+                if child.type == "implicit_parameter"
+                and ast_text(child)
+            )
         if node.type != "variable_declaration":
             continue
         type_node = ast_field(node, "type")
@@ -369,7 +386,7 @@ def _calls(
 ) -> tuple[CallRef, ...]:
     nodes = [
         node
-        for node in walk_owned(root, _OWNERSHIP_BOUNDARIES)
+        for node in walk_owned(root, _FACT_BOUNDARIES)
         if node.type in _CALL_KINDS
     ]
     nodes.sort(key=lambda node: (node.start_byte, node.end_byte))
@@ -432,7 +449,7 @@ class _Extractor:
         span = body_span(self.source, node)
         if span is None:
             return
-        events = body_events(self.source, node)
+        events = body_events(self.source, node, include_anonymous=True)
         self.bodies.append(BodyIR(symbol.id, span, events))
         self.calls.extend(_calls(self.source, symbol.id, body_node(node)))
         self.references.extend(
@@ -508,7 +525,61 @@ class _Extractor:
         self.symbols.append(symbol)
         self.references.extend(_type_references(self.source, symbol.id, (type_node,)))
         self.add_annotations(symbol.id, node)
-        self.body_facts(symbol, node)
+        accessors = ast_field(node, "accessors") or direct_child(
+            node,
+            {"accessor_list"},
+        )
+        body_accessors = tuple(
+            accessor
+            for accessor in named_children(accessors)
+            if accessor.type == "accessor_declaration"
+            and body_node(accessor) is not None
+        )
+        for accessor in body_accessors:
+            accessor_name = next(
+                (
+                    ast_text(child)
+                    for child in children(accessor)
+                    if ast_text(child) in {"add", "get", "init", "remove", "set"}
+                ),
+                "accessor",
+            )
+            setter = accessor_name in {"init", "set"}
+            params = (type_name,) if setter and type_name else ()
+            accessor_symbol = Symbol(
+                symbol_id(
+                    self.source,
+                    (*container_path, name),
+                    SymbolKind.METHOD,
+                    accessor_name,
+                    params,
+                ),
+                node_span(self.source, accessor),
+                _visibility(accessor, default=symbol.visibility),
+                (
+                    f"{accessor_name}({type_name})"
+                    if params
+                    else f"{accessor_name}()"
+                ),
+                params=params,
+                returns=None if setter else type_name or None,
+                bindings=(Binding("value", simple_type(type_name)),)
+                if setter and type_name
+                else (),
+                annotations=_annotations(accessor),
+                modifiers=ordered_unique(
+                    (accessor_name, *_modifier_values(accessor))
+                ),
+                body_lines=body_lines(body_node(accessor)),
+            )
+            self.symbols.append(accessor_symbol)
+            self.references.extend(
+                _type_references(self.source, accessor_symbol.id, (type_node,))
+            )
+            self.add_annotations(accessor_symbol.id, accessor)
+            self.body_facts(accessor_symbol, accessor)
+        if not body_accessors:
+            self.body_facts(symbol, node)
         return Binding(name, simple_type(type_name)) if type_name else None
 
     def callable(
@@ -562,9 +633,7 @@ class _Extractor:
             ),
             annotations=_annotations(node, entrypoint=entrypoint),
             modifiers=modifiers,
-            # v1 reported constructor bodies as unknown while canonical BodyIR
-            # below still retains the complete constructor body and events.
-            body_lines=0 if constructor else body_lines(body),
+            body_lines=body_lines(body),
         )
         self.symbols.append(symbol)
         self.references.extend(
@@ -762,6 +831,33 @@ def _namespace_name(node: object | None) -> str | None:
     return ast_text(name) or None
 
 
+@dataclass(frozen=True, slots=True)
+class _NamespaceRegion:
+    name: str
+    node: Any
+    body: Any
+
+
+def _namespace_regions(
+    root: object | None,
+    prefix: tuple[str, ...] = (),
+) -> tuple[_NamespaceRegion, ...]:
+    regions: list[_NamespaceRegion] = []
+    for child in named_children(root):
+        if child.type != "namespace_declaration":
+            continue
+        local_name = _namespace_name(child)
+        if not local_name:
+            continue
+        parts = (*prefix, *(part for part in local_name.split(".") if part))
+        body = ast_field(child, "body")
+        if body is None:
+            continue
+        regions.append(_NamespaceRegion(".".join(parts), child, body))
+        regions.extend(_namespace_regions(body, parts))
+    return tuple(regions)
+
+
 def _imports(source: SourceFile, root: Any) -> tuple[ImportRef, ...]:
     values: list[ImportRef] = []
     for node in walk_all(root):
@@ -803,41 +899,89 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
         raise TypeError("C# extraction requires a Tree-sitter parser")
     tree = parser.parse(source.raw)  # type: ignore[attr-defined]
     root = tree.root_node
-    namespace = next(
+    file_namespace = next(
         (
-            node
-            for node in walk_all(root)
-            if node.type
-            in {"file_scoped_namespace_declaration", "namespace_declaration"}
+            child
+            for child in named_children(root)
+            if child.type == "file_scoped_namespace_declaration"
         ),
         None,
     )
-    module = _namespace_name(namespace) or file_module(source.file)
-    module_span = node_span(source, namespace if namespace is not None else root)
-    module_symbol = Symbol(
-        symbol_id(source, (), SymbolKind.MODULE, module),
-        module_span,
-        Visibility.PUBLIC,
-        f"module {module}",
-    )
-    extractor = _Extractor(source, root)
-    extractor.symbols.append(module_symbol)
-
-    if namespace is not None and namespace.type == "namespace_declaration":
-        declaration_root = ast_field(namespace, "body")
+    block_regions = _namespace_regions(root)
+    namespace_nodes: list[tuple[str, Any]] = []
+    if file_namespace is not None and (name := _namespace_name(file_namespace)):
+        namespace_nodes.append((name, file_namespace))
+    namespace_nodes.extend((region.name, region.node) for region in block_regions)
+    distinct_namespaces = tuple(dict.fromkeys(name for name, _ in namespace_nodes))
+    if not distinct_namespaces:
+        module: str | None = file_module(source.file)
+    elif len(distinct_namespaces) == 1:
+        module = distinct_namespaces[0]
     else:
-        declaration_root = root
-    for declaration in named_children(declaration_root):
-        if declaration.type in _TYPE_KINDS:
-            extractor.type_declaration(declaration, ())
-        elif declaration.type in _CALLABLE_KINDS:
-            extractor.callable(
-                declaration,
-                (),
-                None,
-                (),
-                default_visibility=Visibility.INTERNAL,
+        module = None
+
+    extractor = _Extractor(source, root)
+    if namespace_nodes:
+        seen_modules: set[str] = set()
+        for namespace_name, namespace_node in namespace_nodes:
+            if namespace_name in seen_modules:
+                continue
+            seen_modules.add(namespace_name)
+            extractor.symbols.append(
+                Symbol(
+                    symbol_id(source, (), SymbolKind.MODULE, namespace_name),
+                    node_span(source, namespace_node),
+                    Visibility.PUBLIC,
+                    f"module {namespace_name}",
+                )
             )
+    else:
+        assert module is not None
+        extractor.symbols.append(
+            Symbol(
+                symbol_id(source, (), SymbolKind.MODULE, module),
+                node_span(source, root),
+                Visibility.PUBLIC,
+                f"module {module}",
+            )
+        )
+
+    multiple_namespaces = len(distinct_namespaces) > 1
+
+    def extract_declarations(
+        declaration_root: object | None,
+        container_path: tuple[str, ...],
+    ) -> None:
+        for declaration in named_children(declaration_root):
+            if declaration.type in _TYPE_KINDS:
+                extractor.type_declaration(declaration, container_path)
+            elif declaration.type in _CALLABLE_KINDS:
+                extractor.callable(
+                    declaration,
+                    container_path,
+                    None,
+                    (),
+                    default_visibility=Visibility.INTERNAL,
+                )
+
+    if file_namespace is not None:
+        prefix = (
+            tuple(part for part in distinct_namespaces[0].split(".") if part)
+            if multiple_namespaces
+            else ()
+        )
+        extract_declarations(root, prefix)
+    elif block_regions:
+        extract_declarations(root, ())
+        for region in block_regions:
+            prefix = (
+                tuple(part for part in region.name.split(".") if part)
+                if multiple_namespaces
+                else ()
+            )
+            extract_declarations(region.body, prefix)
+    else:
+        extract_declarations(root, ())
 
     return assemble_file_ir(
         source,

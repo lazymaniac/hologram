@@ -918,7 +918,12 @@ def _legacy_task5_bindings(
             and symbol.id.container_path not in interface_paths
             and symbol.container is not None
         ):
-            result["self"] = symbol.container
+            result["self"] = (
+                symbol.id.container_path[-2]
+                if len(symbol.id.container_path) >= 2
+                and symbol.id.container_path[-1].startswith("impl ")
+                else symbol.container
+            )
         return result
 
     if language is Language.CSHARP:
@@ -1019,6 +1024,25 @@ def _legacy_go_shape(symbol) -> tuple[list[str], str | None, str]:
     return params, returns, signature
 
 
+def _legacy_kotlin_shape(symbol) -> tuple[list[str], str | None, str]:
+    params = list(symbol.params)
+    if "extension" not in symbol.modifiers or not params:
+        return params, symbol.returns, symbol.signature
+    params = params[1:]
+    suffix = f":{symbol.returns}" if symbol.returns and symbol.returns != "Unit" else ""
+    return params, symbol.returns, f"{symbol.name}({','.join(params)}){suffix}"
+
+
+def _legacy_task5_container(language: Language, symbol) -> str | None:
+    if (
+        language is Language.RUST
+        and len(symbol.id.container_path) >= 2
+        and symbol.id.container_path[-1].startswith("impl ")
+    ):
+        return symbol.id.container_path[-2]
+    return symbol.container
+
+
 def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
     projected: list[Symbol] = []
     type_paths = {
@@ -1075,11 +1099,16 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                 supported = False
             if not supported:
                 continue
-        params, returns, signature = (
-            _legacy_go_shape(symbol)
-            if file_ir.source.language is Language.GO
-            else (list(symbol.params), symbol.returns, symbol.signature)
-        )
+        if file_ir.source.language is Language.GO:
+            params, returns, signature = _legacy_go_shape(symbol)
+        elif file_ir.source.language is Language.KOTLIN:
+            params, returns, signature = _legacy_kotlin_shape(symbol)
+        else:
+            params, returns, signature = (
+                list(symbol.params),
+                symbol.returns,
+                symbol.signature,
+            )
         projected.append(
             Symbol(
                 name=symbol.name,
@@ -1114,7 +1143,7 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                         SymbolKind.RECORD,
                         SymbolKind.TYPE,
                     }
-                    else symbol.container
+                    else _legacy_task5_container(file_ir.source.language, symbol)
                 ),
                 lang=(
                     _legacy_typescript_lang(file_ir, symbol)
@@ -1141,7 +1170,10 @@ def _canonical_to_legacy(file_ir: CanonicalFileIR) -> list[Symbol]:
                 ),
                 size=(
                     0
-                    if file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES
+                    if (
+                        file_ir.source.language in _LEGACY_TYPESCRIPT_LANGUAGES
+                        or file_ir.source.language is Language.CSHARP
+                    )
                     and symbol.kind is SymbolKind.CONSTRUCTOR
                     else symbol.body_lines
                 ),

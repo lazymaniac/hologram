@@ -10,14 +10,18 @@ from hologram.model import (
     Binding,
     BodyEventKind,
     CallKind,
+    DiagnosticSeverity,
     Language,
+    ReferenceConfidence,
+    ReferenceContext,
     ReferenceKind,
     SourceFile,
     SourceRole,
+    SourceSpan,
     SymbolKind,
     Visibility,
 )
-from hologram.parsers.api import extract_file
+from hologram.parsers.api import extract_file, extract_project
 from hologram.parsers.common import validate_body_events
 from tests.parser_assertions import assert_body_fact_events
 
@@ -226,6 +230,149 @@ class GoParserTest(unittest.TestCase):
         self.assertNotIn("Store", run.calls)
         self.assertNotIn("Quote", run.calls)
 
+    def test_direct_struct_fields_multi_value_bindings_and_anonymous_callable_facts(
+        self,
+    ) -> None:
+        raw = b"""\
+package gaps
+type A struct{}
+type B struct{}
+var moduleA, moduleB = A{}, B{}
+type Outer struct {
+    Inner struct { X int }
+    Top string
+}
+func Run(input int) {
+    type Local struct { Value int }
+    var a, b = A{}, B{}
+    callback := func(value int) {
+        made := A{}
+        hidden(value, made)
+    }
+    callback(input)
+    _, _ = a, b
+}
+"""
+        result = extract_file(snapshot(raw, Language.GO, "src/gaps.go"))
+        outer = symbol(result, "Outer", SymbolKind.CLASS)
+        run = symbol(result, "Run", SymbolKind.FUNCTION)
+
+        module_a = symbol(result, "moduleA", SymbolKind.FIELD)
+        module_b = symbol(result, "moduleB", SymbolKind.FIELD)
+        self.assertEqual((module_a.returns, module_b.returns), ("A", "B"))
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == module_a.id],
+            ["A"],
+        )
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == module_b.id],
+            ["B"],
+        )
+
+        self.assertEqual(outer.components, ("Inner", "Top"))
+        self.assertEqual(
+            {
+                item.name
+                for item in result.symbols
+                if item.kind is SymbolKind.FIELD
+                and item.id.container_path == ("Outer",)
+            },
+            {"Inner", "Top"},
+        )
+        self.assertEqual(
+            symbol(result, "Local", SymbolKind.CLASS).id.container_path,
+            ("Run(int)",),
+        )
+        self.assertTrue(
+            {
+                Binding("input", "int"),
+                Binding("a", "A"),
+                Binding("b", "B"),
+                Binding("callback", "?"),
+                Binding("value", "int"),
+                Binding("made", "A"),
+            }.issubset(set(run.bindings))
+        )
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == run.id],
+            ["A", "B", "A", "hidden", "callback"],
+        )
+        body = next(item for item in result.bodies if item.owner == run.id)
+        self.assertIn(
+            (BodyEventKind.PARAM, "value"),
+            {(event.kind, event.text) for event in body.events},
+        )
+        self.assertIn(
+            (BodyEventKind.LOCAL, "made"),
+            {(event.kind, event.text) for event in body.events},
+        )
+        self.assertFalse(
+            {"callback", "made", "value"} & {item.name for item in result.symbols}
+        )
+        self.assertEqual(
+            len(result.bodies), len({item.owner for item in result.bodies})
+        )
+        assert_body_fact_events(self, result)
+
+    def test_utf8_exact_spans_reference_provenance_and_uncapped_calls(self) -> None:
+        line = "func Run(é OrderId) Quote { return é.Valid() }".encode()
+        raw = b"package utf\n" + line + b"\n"
+        source = snapshot(raw, Language.GO, "src/utf.go")
+        result = extract_file(source)
+        run = symbol(result, "Run", SymbolKind.FUNCTION)
+        call = next(item for item in result.calls if item.name == "Valid")
+        call_text = "é.Valid()".encode()
+        call_start = line.index(call_text)
+
+        self.assertEqual(
+            run.span,
+            SourceSpan("src/utf.go", 2, 0, 2, len(line)),
+        )
+        self.assertEqual(
+            call.span,
+            SourceSpan(
+                "src/utf.go",
+                2,
+                call_start,
+                2,
+                call_start + len(call_text),
+            ),
+        )
+        order_id = next(
+            item
+            for item in result.references
+            if item.owner == run.id and item.name == "OrderId"
+        )
+        self.assertEqual(order_id.context, ReferenceContext.TYPE)
+        self.assertEqual(order_id.confidence, ReferenceConfidence.DEFINITE)
+        type_start = line.index(b"OrderId")
+        self.assertEqual(
+            order_id.span,
+            SourceSpan(
+                "src/utf.go",
+                2,
+                type_start,
+                2,
+                type_start + len(b"OrderId"),
+            ),
+        )
+
+        statements = b"\n".join(
+            f"    call{index}({index})".encode() for index in range(14)
+        )
+        calls_result = extract_file(
+            snapshot(
+                b"package calls\nfunc Run() {\n" + statements + b"\n}\n",
+                Language.GO,
+                "src/calls.go",
+            )
+        )
+        calls_run = symbol(calls_result, "Run", SymbolKind.FUNCTION)
+        self.assertEqual(
+            [call.name for call in calls_result.calls if call.caller == calls_run.id],
+            [f"call{index}" for index in range(14)],
+        )
+
 
 @unittest.skipUnless(hologram.has_parser("rust"), "tree-sitter-rust not installed")
 class RustParserTest(unittest.TestCase):
@@ -266,7 +413,8 @@ class RustParserTest(unittest.TestCase):
         quote = next(
             item
             for item in result.symbols
-            if item.name == "quote" and item.id.container_path == ("Rational",)
+            if item.name == "quote"
+            and item.id.container_path == ("Rational", "impl Pricer")
         )
         run = symbol(result, "run", SymbolKind.FUNCTION)
         self.assertIn(Binding("self", "Rational"), quote.bindings)
@@ -336,6 +484,217 @@ class RustParserTest(unittest.TestCase):
             },
         )
         self.assertEqual(of.calls, ["Rational"])
+
+    def test_use_wildcard_direct_trait_bounds_and_trait_impl_owners_are_exact(
+        self,
+    ) -> None:
+        raw = b"""\
+use foo::*;
+pub trait Parent: Outer<Inner> + crate::Other {}
+pub trait A { fn f(&self); }
+pub trait B { fn f(&self); }
+pub struct S;
+impl A for S { fn f(&self) { a_call(); } }
+impl B for S { fn f(&self) { b_call(); } }
+"""
+        result = extract_file(snapshot(raw, Language.RUST, "src/traits.rs"))
+
+        self.assertEqual(
+            [
+                (item.module, item.name, item.alias, item.wildcard)
+                for item in result.imports
+            ],
+            [("foo", None, None, True)],
+        )
+        parent = symbol(result, "Parent", SymbolKind.INTERFACE)
+        self.assertEqual(parent.supers, ("Outer", "Other"))
+        self.assertTrue(
+            {"Outer", "Inner", "Other"}.issubset(
+                {
+                    item.name
+                    for item in result.references
+                    if item.owner == parent.id and item.kind is ReferenceKind.TYPE
+                }
+            )
+        )
+        struct = symbol(result, "S", SymbolKind.CLASS)
+        self.assertEqual(struct.supers, ("A", "B"))
+        implementations = [
+            item
+            for item in result.symbols
+            if item.name == "f" and item.kind is SymbolKind.METHOD and item.body_lines
+        ]
+        self.assertEqual(
+            [item.id.container_path for item in implementations],
+            [("S", "impl A"), ("S", "impl B")],
+        )
+        self.assertEqual(len({item.id for item in implementations}), 2)
+        self.assertEqual(
+            [
+                [call.name for call in result.calls if call.caller == item.id]
+                for item in implementations
+            ],
+            [["a_call"], ["b_call"]],
+        )
+        self.assertEqual(
+            len(result.bodies), len({item.owner for item in result.bodies})
+        )
+
+        projected = hologram.extract_file(
+            Path("/repo/src/traits.rs"),
+            Path("/repo"),
+            text=raw.decode(),
+        )
+        self.assertEqual(
+            [item.container for item in projected if item.name == "f"],
+            ["A", "B", "S", "S"],
+        )
+
+    def test_closure_facts_nested_type_utf8_spans_and_provenance(self) -> None:
+        raw = b"""\
+fn outer(input: OrderId) {
+    struct Local { value: i32 }
+    let callback = |value: OrderId| {
+        let made = Widget::new(value);
+        hidden(made);
+    };
+    callback(input);
+}
+"""
+        result = extract_file(snapshot(raw, Language.RUST, "src/closure.rs"))
+        outer = symbol(result, "outer", SymbolKind.FUNCTION)
+        self.assertEqual(
+            symbol(result, "Local", SymbolKind.CLASS).id.container_path,
+            ("outer(OrderId)",),
+        )
+        self.assertTrue(
+            {
+                Binding("input", "OrderId"),
+                Binding("callback", "?"),
+                Binding("value", "OrderId"),
+                Binding("made", "Widget"),
+            }.issubset(set(outer.bindings))
+        )
+        self.assertEqual(
+            [call.name for call in result.calls if call.caller == outer.id],
+            ["new", "hidden", "callback"],
+        )
+        body = next(item for item in result.bodies if item.owner == outer.id)
+        self.assertIn(
+            (BodyEventKind.PARAM, "value"),
+            {(event.kind, event.text) for event in body.events},
+        )
+        self.assertIn(
+            (BodyEventKind.LOCAL, "made"),
+            {(event.kind, event.text) for event in body.events},
+        )
+        self.assertFalse(
+            {"callback", "made"} & {item.name for item in result.symbols}
+        )
+        self.assertEqual(
+            symbol(result, "value", SymbolKind.FIELD).id.container_path,
+            ("outer(OrderId)", "Local"),
+        )
+        assert_body_fact_events(self, result)
+
+        line = "pub fn run(é: OrderId) -> Quote { é.valid() }".encode()
+        source = snapshot(line + b"\n", Language.RUST, "src/utf.rs")
+        utf_result = extract_file(source)
+        run = symbol(utf_result, "run", SymbolKind.FUNCTION)
+        call = next(item for item in utf_result.calls if item.name == "valid")
+        call_text = "é.valid()".encode()
+        call_start = line.index(call_text)
+        self.assertEqual(run.span, SourceSpan("src/utf.rs", 1, 0, 1, len(line)))
+        self.assertEqual(
+            call.span,
+            SourceSpan(
+                "src/utf.rs",
+                1,
+                call_start,
+                1,
+                call_start + len(call_text),
+            ),
+        )
+        order_id = next(
+            item
+            for item in utf_result.references
+            if item.owner == run.id and item.name == "OrderId"
+        )
+        self.assertEqual(order_id.context, ReferenceContext.TYPE)
+        self.assertEqual(order_id.confidence, ReferenceConfidence.DEFINITE)
+        type_start = line.index(b"OrderId")
+        self.assertEqual(
+            order_id.span,
+            SourceSpan(
+                "src/utf.rs",
+                1,
+                type_start,
+                1,
+                type_start + len(b"OrderId"),
+            ),
+        )
+
+
+class GoRustSyntaxDiagnosticTest(unittest.TestCase):
+    def test_syntax_errors_retain_partial_facts_and_make_projects_incomplete(
+        self,
+    ) -> None:
+        cases = (
+            (
+                Language.GO,
+                "broken.go",
+                (
+                    b"package broken\ntype Kept struct{}\nfunc Ok(){ alive() }\n"
+                    b"func Broken( {\n"
+                ),
+                SourceSpan("broken.go", 4, 0, 4, 14),
+                {"broken", "Kept", "Ok"},
+                "Ok",
+                SourceSpan("broken.go", 3, 9, 3, 20),
+            ),
+            (
+                Language.RUST,
+                "broken.rs",
+                b"pub struct Kept;\nfn ok(){ alive(); }\nfn broken( {\n",
+                SourceSpan("broken.rs", 3, 0, 3, 12),
+                {"broken", "Kept", "ok"},
+                "ok",
+                SourceSpan("broken.rs", 2, 7, 2, 19),
+            ),
+        )
+        for language, file, raw, error_span, names, callable_name, body_span in cases:
+            if not hologram.has_parser(language.value):
+                continue
+            with self.subTest(language=language):
+                source = snapshot(raw, language, file)
+                result = extract_file(source)
+                project = extract_project(Path("/repo"), (source,))
+                self.assertIs(result.source, source)
+                self.assertTrue(names.issubset({item.name for item in result.symbols}))
+                self.assertEqual(
+                    [item.code for item in result.diagnostics],
+                    ["tree-sitter-syntax-error"],
+                )
+                self.assertEqual(
+                    result.diagnostics[0].severity,
+                    DiagnosticSeverity.ERROR,
+                )
+                self.assertEqual(result.diagnostics[0].span, error_span)
+                callable_symbol = symbol(result, callable_name)
+                self.assertEqual(
+                    [call.name for call in result.calls if call.caller == callable_symbol.id],
+                    ["alive"],
+                )
+                self.assertEqual(
+                    next(
+                        body.span
+                        for body in result.bodies
+                        if body.owner == callable_symbol.id
+                    ),
+                    body_span,
+                )
+                assert_body_fact_events(self, result)
+                self.assertFalse(project.complete)
 
 
 if __name__ == "__main__":

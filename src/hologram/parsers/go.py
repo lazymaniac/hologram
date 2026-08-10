@@ -39,10 +39,9 @@ from ._treesitter_common import (
 from .common import ordered_unique, reference, symbol_id, tight_type
 from .treesitter import ast_field, ast_text, body_events, body_lines, node_span
 
-_CALLABLE_KINDS = frozenset(
-    {"func_literal", "function_declaration", "method_declaration"}
+_DECLARATION_BOUNDARIES = frozenset(
+    {"function_declaration", "method_declaration", "type_declaration"}
 )
-_DECLARATION_BOUNDARIES = _CALLABLE_KINDS | frozenset({"type_declaration"})
 _PRIMITIVES = frozenset(
     {
         "any",
@@ -255,16 +254,17 @@ def _local_bindings(body: object | None) -> tuple[Binding, ...]:
             names = field_nodes(node, "name")
             type_node = ast_field(node, "type")
             value = ast_field(node, "value")
-            type_name = (
-                _binding_type(_type_text(type_node))
-                if type_node is not None
-                else _infer_type(value)
-            )
-            result.extend(
-                Binding(ast_text(name), type_name)
-                for name in names
-                if ast_text(name) != "_"
-            )
+            values = named_children(value) if value is not None else ()
+            for index, name_node in enumerate(names):
+                name = ast_text(name_node)
+                if name == "_":
+                    continue
+                type_name = (
+                    _binding_type(_type_text(type_node))
+                    if type_node is not None
+                    else _infer_type(values[index] if index < len(values) else None)
+                )
+                result.append(Binding(name, type_name))
         elif node.type == "short_var_declaration":
             left = ast_field(node, "left")
             right = ast_field(node, "right")
@@ -281,6 +281,12 @@ def _local_bindings(body: object | None) -> tuple[Binding, ...]:
                 name = ast_text(name_node)
                 if name != "_":
                     result.append(Binding(name, "?"))
+        elif node.type == "func_literal":
+            result.extend(
+                Binding(parameter.name, _binding_type(parameter.type_name))
+                for parameter in _parameters(ast_field(node, "parameters"))
+                if parameter.name is not None and parameter.name != "_"
+            )
     return binding_tuple(result)
 
 
@@ -385,9 +391,17 @@ class _Extractor:
         if type_node.type == "struct_type":
             kind = SymbolKind.CLASS
             signature = f"struct {name}"
+            field_list = next(
+                (
+                    child
+                    for child in named_children(type_node)
+                    if child.type == "field_declaration_list"
+                ),
+                None,
+            )
             fields = tuple(
                 child
-                for child in walk_all(ast_field(type_node, "body") or type_node)
+                for child in named_children(field_list)
                 if child.type == "field_declaration"
             )
             params: list[str] = []
@@ -521,14 +535,17 @@ class _Extractor:
             type_node = ast_field(spec, "type")
             value_node = ast_field(spec, "value")
             names = field_nodes(spec, "name")
-            for name_node in names:
+            values = named_children(value_node)
+            aligned_values = len(values) == len(names)
+            for index, name_node in enumerate(names):
                 name = ast_text(name_node)
                 if not name or name == "_":
                     continue
+                value = values[index] if aligned_values else value_node
                 inferred = (
                     _type_text(type_node)
                     if type_node is not None
-                    else _infer_type(value_node)
+                    else _infer_type(value)
                 )
                 returns = inferred if inferred != "?" else None
                 symbol = Symbol(
@@ -542,7 +559,7 @@ class _Extractor:
                 self.references.extend(
                     _type_references(self.source, symbol.id, (type_node,))
                 )
-                self.calls.extend(_calls(self.source, symbol.id, value_node))
+                self.calls.extend(_calls(self.source, symbol.id, value))
 
     def callable(self, node: Any, container_path: tuple[str, ...]) -> None:
         name = ast_text(ast_field(node, "name"))
@@ -603,7 +620,7 @@ class _Extractor:
         )
         if body is None:
             return
-        events = body_events(self.source, node)
+        events = body_events(self.source, node, include_anonymous=True)
         self.bodies.append(BodyIR(symbol.id, node_span(self.source, body), events))
         self.calls.extend(_calls(self.source, symbol.id, body))
         self.references.extend(

@@ -306,6 +306,18 @@ _CALLABLE_KINDS_BY_LANGUAGE: Mapping[Language, frozenset[str]] = MappingProxyTyp
         Language.HELM: frozenset(),
     }
 )
+_ANONYMOUS_CALLABLE_KINDS_BY_LANGUAGE: Mapping[
+    Language, frozenset[str]
+] = MappingProxyType(
+    {
+        Language.KOTLIN: frozenset({"anonymous_function", "lambda_literal"}),
+        Language.GO: frozenset({"func_literal"}),
+        Language.RUST: frozenset({"async_block", "closure_expression"}),
+        Language.CSHARP: frozenset(
+            {"anonymous_method_expression", "lambda_expression"}
+        ),
+    }
+)
 _TYPESCRIPT_DECLARATION_BOUNDARIES = frozenset(
     {
         "abstract_class_declaration",
@@ -534,6 +546,7 @@ _PARAMETER_FIELDS_BY_LANGUAGE: Mapping[Language, tuple[str, ...]] = MappingProxy
 )
 _BODY_KINDS = frozenset(
     {
+        "arrow_expression_clause",
         "block",
         "compound_statement",
         "constructor_body",
@@ -1444,6 +1457,45 @@ def _local_keys(
     )
 
 
+def _anonymous_callable_kinds(language: Language) -> frozenset[str]:
+    if language in {
+        Language.TYPESCRIPT,
+        Language.JAVASCRIPT,
+        Language.TSX,
+        Language.VUE,
+        Language.SVELTE,
+    }:
+        return _CALLABLE_KINDS_BY_LANGUAGE[language]
+    return _ANONYMOUS_CALLABLE_KINDS_BY_LANGUAGE.get(language, frozenset())
+
+
+def _anonymous_callables(
+    source: SourceFile,
+    bodies: Iterable[object],
+    owned_boundaries: frozenset[tuple[int, int, str]],
+) -> tuple[object, ...]:
+    anonymous_kinds = _anonymous_callable_kinds(source.language)
+    if not anonymous_kinds:
+        return ()
+    boundaries = _OWNED_BOUNDARIES_BY_LANGUAGE[source.language] - anonymous_kinds
+    found: list[object] = []
+    for body in bodies:
+        stack = [body]
+        while stack:
+            node = stack.pop()
+            key = _node_key(node)
+            if key in owned_boundaries and node is not body:
+                continue
+            if key[2] in anonymous_kinds:
+                found.append(node)
+            for child in reversed(tuple(getattr(node, "children", ()))):
+                child_key = _node_key(child)
+                if child_key in owned_boundaries or child_key[2] in boundaries:
+                    continue
+                stack.append(child)
+    return tuple(found)
+
+
 def _is_member_child(
     parent: object | None,
     node: object,
@@ -1580,8 +1632,29 @@ class _TreeSitterBodyEventWalker:
     def walk(self) -> tuple[BodyEvent, ...]:
         parameters = _parameter_parts(self.source, self.callable_node)
         bodies = _body_parts(self.source, self.callable_node)
+        anonymous = (
+            _anonymous_callables(self.source, bodies, self.owned_boundary_keys)
+            if self.include_anonymous
+            else ()
+        )
+        parameters = (
+            *parameters,
+            *(
+                parameter
+                for callable_node in anonymous
+                for parameter in _parameter_parts(self.source, callable_node)
+            ),
+        )
+        local_bodies = (
+            *bodies,
+            *(
+                body
+                for callable_node in anonymous
+                for body in _body_parts(self.source, callable_node)
+            ),
+        )
         self.parameter_keys = _parameter_keys(self.source, parameters)
-        self.local_keys = _local_keys(self.source, bodies)
+        self.local_keys = _local_keys(self.source, local_bodies)
         for parameter in parameters:
             self.visit(parameter, self.callable_node)
         for body in bodies:
@@ -1715,15 +1788,9 @@ def _owned_boundary(
     kind = key[2]
     if kind not in _OWNED_BOUNDARIES_BY_LANGUAGE[source.language]:
         return False
-    if not include_anonymous or source.language not in {
-        Language.TYPESCRIPT,
-        Language.JAVASCRIPT,
-        Language.TSX,
-        Language.VUE,
-        Language.SVELTE,
-    }:
+    if not include_anonymous:
         return True
-    return kind not in _CALLABLE_KINDS_BY_LANGUAGE[source.language]
+    return kind not in _anonymous_callable_kinds(source.language)
 
 
 def owned_nodes(

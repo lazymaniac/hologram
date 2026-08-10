@@ -34,6 +34,7 @@ from ._treesitter_common import (
     direct_child,
     file_module,
     named_children,
+    same_node,
     simple_type,
     syntax_diagnostics,
     walk_all,
@@ -60,6 +61,8 @@ _OWNERSHIP_BOUNDARIES = frozenset(
         "lambda_literal",
     }
 )
+_ANONYMOUS_CALLABLE_KINDS = frozenset({"anonymous_function", "lambda_literal"})
+_FACT_BOUNDARIES = _OWNERSHIP_BOUNDARIES - _ANONYMOUS_CALLABLE_KINDS
 _TYPE_NODE_KINDS = frozenset(
     {
         "function_type",
@@ -138,6 +141,15 @@ def _annotation_nodes(node: object | None) -> tuple[Any, ...]:
 def _annotation_target(annotation: object) -> Any | None:
     type_node = direct_child(annotation, _TYPE_NODE_KINDS)
     if type_node is None:
+        type_node = next(
+            (
+                node
+                for node in walk_all(annotation)
+                if node is not annotation and node.type in _TYPE_NODE_KINDS
+            ),
+            None,
+        )
+    if type_node is None:
         return None
     leaves = [node for node in walk_all(type_node) if node.type in _TYPE_LEAF_KINDS]
     return leaves[-1] if leaves else type_node
@@ -179,7 +191,7 @@ def _annotation_references(
 def _parameter_container(node: object | None) -> Any | None:
     return direct_child(
         node,
-        {"class_parameters", "function_value_parameters"},
+        {"class_parameters", "function_value_parameters", "lambda_parameters"},
     )
 
 
@@ -188,7 +200,11 @@ def _parameters(node: object | None) -> tuple[_Parameter, ...]:
         return ()
     values: list[_Parameter] = []
     for parameter in named_children(node):
-        if parameter.type not in {"class_parameter", "parameter"}:
+        if parameter.type not in {
+            "class_parameter",
+            "parameter",
+            "variable_declaration",
+        }:
             continue
         named = named_children(parameter)
         name_node = next(
@@ -233,6 +249,16 @@ def _return_type(node: object) -> tuple[str | None, Any | None]:
     return None, None
 
 
+def _extension_receiver(node: object) -> Any | None:
+    name = ast_field(node, "name")
+    for child in named_children(node):
+        if same_node(child, name):
+            break
+        if child.type in _TYPE_NODE_KINDS:
+            return child
+    return None
+
+
 def _type_leaf_nodes(root: object | None) -> tuple[Any, ...]:
     if root is None:
         return ()
@@ -243,6 +269,8 @@ def _type_references(
     source: SourceFile,
     owner: SymbolId,
     nodes: Iterable[object | None],
+    *,
+    include_primitives: bool = False,
 ) -> tuple[ReferenceRef, ...]:
     return ordered_unique(
         reference(
@@ -256,7 +284,7 @@ def _type_references(
         )
         for node in nodes
         for leaf in _type_leaf_nodes(node)
-        if ast_text(leaf) not in _PRIMITIVES
+        if include_primitives or ast_text(leaf) not in _PRIMITIVES
     )
 
 
@@ -336,7 +364,7 @@ def _calls(
 ) -> tuple[CallRef, ...]:
     nodes = [
         node
-        for node in walk_owned(root, _OWNERSHIP_BOUNDARIES)
+        for node in walk_owned(root, _FACT_BOUNDARIES)
         if node.type in _CALL_KINDS
     ]
     nodes.sort(key=lambda node: (node.start_byte, node.end_byte))
@@ -347,6 +375,8 @@ def _calls(
 
 def _inferred_type(value: object | None) -> str | None:
     if value is None:
+        return None
+    if getattr(value, "type", "") in _ANONYMOUS_CALLABLE_KINDS:
         return None
     calls = [node for node in walk_all(value) if node.type == "call_expression"]
     calls.sort(key=lambda node: (node.start_byte, node.end_byte))
@@ -359,7 +389,20 @@ def _inferred_type(value: object | None) -> str | None:
 
 def _local_bindings(body: object | None) -> tuple[Binding, ...]:
     values: list[Binding] = []
-    for node in walk_owned(body, _OWNERSHIP_BOUNDARIES):
+    for node in walk_owned(body, _FACT_BOUNDARIES):
+        if node.type in _ANONYMOUS_CALLABLE_KINDS:
+            parameter_root = _parameter_container(node)
+            parameters = _parameters(parameter_root)
+            values.extend(_parameter_bindings(parameters))
+            typed_names = {parameter.name for parameter in parameters}
+            values.extend(
+                Binding(ast_text(name), "?")
+                for parameter in named_children(parameter_root)
+                for name in named_children(parameter)
+                if parameter.type == "variable_declaration"
+                and name.type == "identifier"
+                and ast_text(name) not in typed_names
+            )
         if node.type != "property_declaration":
             continue
         name_node, type_node, value = _property_parts(node)
@@ -370,8 +413,7 @@ def _local_bindings(body: object | None) -> tuple[Binding, ...]:
             if type_node is not None
             else _inferred_type(value)
         )
-        if type_name:
-            values.append(Binding(ast_text(name_node), type_name))
+        values.append(Binding(ast_text(name_node), type_name or "?"))
     return binding_tuple(values)
 
 
@@ -460,7 +502,7 @@ class _Extractor:
                 )
         if span is None:
             return
-        events = body_events(self.source, node)
+        events = body_events(self.source, node, include_anonymous=True)
         self.bodies.append(BodyIR(symbol.id, span, events))
         call_roots = [
             root
@@ -513,6 +555,45 @@ class _Extractor:
         )
         return Binding(name, inferred) if inferred else None
 
+    def type_alias(
+        self,
+        node: Any,
+        container_path: tuple[str, ...],
+    ) -> None:
+        name_node = ast_field(node, "type")
+        target = next(
+            (
+                child
+                for child in reversed(named_children(node))
+                if not same_node(child, name_node)
+                and child.type in _TYPE_NODE_KINDS
+            ),
+            None,
+        )
+        name = ast_text(name_node)
+        value = tight_type(ast_text(target))
+        if not name or target is None or not value:
+            return
+        symbol = Symbol(
+            symbol_id(self.source, container_path, SymbolKind.TYPE, name),
+            node_span(self.source, node),
+            _visibility(node, default=Visibility.PUBLIC),
+            f"type {name}",
+            params=(value,),
+            annotations=_annotations(node),
+            modifiers=_modifier_values(node),
+        )
+        self.symbols.append(symbol)
+        self.references.extend(
+            _type_references(
+                self.source,
+                symbol.id,
+                (target,),
+                include_primitives=True,
+            )
+        )
+        self.add_annotations(symbol.id, node)
+
     def callable(
         self,
         node: Any,
@@ -527,9 +608,16 @@ class _Extractor:
         name = type_name if constructor else ast_text(name_node)
         if not name:
             return
+        receiver_node = None if constructor else _extension_receiver(node)
+        receiver_type = (
+            tight_type(ast_text(receiver_node)) if receiver_node is not None else None
+        )
         parameter_node = _parameter_container(node)
         parameters = _parameters(parameter_node)
-        params = tuple(parameter.type_name for parameter in parameters)
+        params = (
+            *((receiver_type,) if receiver_type else ()),
+            *(parameter.type_name for parameter in parameters),
+        )
         returns, return_node = (type_name, None) if constructor else _return_type(node)
         kind = (
             SymbolKind.CONSTRUCTOR
@@ -538,7 +626,9 @@ class _Extractor:
             if type_name is not None
             else SymbolKind.FUNCTION
         )
-        modifiers = _modifier_values(node)
+        modifiers = ordered_unique(
+            (*_modifier_values(node), *(("extension",) if receiver_type else ()))
+        )
         entrypoint = name == "main" and type_name is None
         body = body_node(node)
         suffix = (
@@ -554,6 +644,11 @@ class _Extractor:
             bindings=binding_tuple(
                 (
                     *class_bindings,
+                    *(
+                        (Binding("this", simple_type(receiver_type.rstrip("?"))),)
+                        if receiver_type
+                        else ()
+                    ),
                     *_parameter_bindings(parameters),
                     *_local_bindings(body),
                 )
@@ -570,6 +665,15 @@ class _Extractor:
                 (*(parameter.type_node for parameter in parameters), return_node),
             )
         )
+        if receiver_node is not None:
+            self.references.extend(
+                _type_references(
+                    self.source,
+                    symbol.id,
+                    (receiver_node,),
+                    include_primitives=True,
+                )
+            )
         self.add_annotations(symbol.id, node)
         self.body_facts(symbol, node)
 
@@ -596,10 +700,7 @@ class _Extractor:
             if node.type in _TYPE_KINDS or node.type == "function_declaration":
                 found.append(node)
                 continue
-            if node.type in _CALLABLE_KINDS or node.type in {
-                "anonymous_function",
-                "lambda_literal",
-            }:
+            if node.type in _CALLABLE_KINDS - _ANONYMOUS_CALLABLE_KINDS:
                 continue
             stack.extend(reversed(children(node)))
         return tuple(found)
@@ -737,7 +838,7 @@ class _Extractor:
             tuple(parameter.name for parameter in parameters if parameter.property)
             if kind is SymbolKind.RECORD
             else tuple(
-                ast_text(next(iter(named_children(entry)), entry))
+                ast_text(direct_child(entry, {"identifier"}))
                 for entry in enum_entries
             )
             if kind is SymbolKind.ENUM
@@ -810,23 +911,25 @@ class _Extractor:
             )
 
         for entry in enum_entries:
-            named = named_children(entry)
-            if not named:
+            entry_name_node = direct_child(entry, {"identifier"})
+            if entry_name_node is None:
                 continue
-            entry_name = ast_text(named[0])
-            self.symbols.append(
-                Symbol(
-                    symbol_id(
-                        self.source,
-                        owned_path,
-                        SymbolKind.CONSTANT,
-                        entry_name,
-                    ),
-                    node_span(self.source, entry),
-                    Visibility.PUBLIC,
+            entry_name = ast_text(entry_name_node)
+            constant = Symbol(
+                symbol_id(
+                    self.source,
+                    owned_path,
+                    SymbolKind.CONSTANT,
                     entry_name,
-                )
+                ),
+                node_span(self.source, entry),
+                Visibility.PUBLIC,
+                entry_name,
+                annotations=_annotations(entry),
+                modifiers=_modifier_values(entry),
             )
+            self.symbols.append(constant)
+            self.add_annotations(constant.id, entry)
 
         if constructor is not None:
             self.primary_constructor(
@@ -903,6 +1006,8 @@ def extract(source: SourceFile, parser: object | None) -> FileIR:
     for declaration in named_children(root):
         if declaration.type in _TYPE_KINDS:
             extractor.type_declaration(declaration, ())
+        elif declaration.type == "type_alias":
+            extractor.type_alias(declaration, ())
         elif declaration.type == "property_declaration":
             extractor.property(
                 declaration,
