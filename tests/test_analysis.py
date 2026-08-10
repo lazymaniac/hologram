@@ -9,12 +9,23 @@ from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import PropertyMock, patch
 
+import hologram.analysis as analysis_module
 from hologram.analysis import (
+    AnalyzedProject,
+    AnalyzedSymbol,
+    BodyProfile,
+    ReferenceFacts,
     ZeroReference,
     _body_index,
+    _control_paths,
+    _jaccard,
     _resolved_body_targets,
+    _score_duplicate,
     analyze_project,
     canonical_body,
+    combine_similarity,
+    find_diff_duplicates,
+    score_duplicate,
 )
 from hologram.model import (
     BodyEvent,
@@ -40,6 +51,7 @@ from hologram.model import (
 )
 from hologram.parsers.api import extract_file
 from hologram.resolve import (
+    UNKNOWN_TYPE_KEY,
     ResolutionResult,
     ResolutionStatus,
     ResolvedCall,
@@ -1867,6 +1879,680 @@ def compute(value: int) -> int:
         self.assertIsNotNone(after_profile)
         assert after_profile is not None
         self.assertIsNone(after_profile.excluded_reason)
+
+
+_Shingle = tuple[str, str, str, str, str]
+
+
+def _shingles(prefix: str, count: int) -> frozenset[_Shingle]:
+    return frozenset(
+        (f"{prefix}:{index}", "one", "two", "three", "four") for index in range(count)
+    )
+
+
+def _profile(
+    label: str,
+    *,
+    semantic_tokens: tuple[str, ...] | None = None,
+    ast_shingles: frozenset[_Shingle] | None = None,
+    control_flow: tuple[str, ...] = ("if:0",),
+    resolved_calls: frozenset[SymbolId] | None = None,
+    name_tokens: frozenset[str] | None = None,
+    arity: int = 1,
+    return_key: str = "int",
+    semantic_size: int = 12,
+    excluded_reason: str | None = None,
+) -> BodyProfile:
+    tokens = semantic_tokens or tuple(
+        f"{label}:TOKEN:{index}" for index in range(semantic_size)
+    )
+    shingles = ast_shingles
+    if shingles is None:
+        shingles = frozenset(
+            zip(tokens, tokens[1:], tokens[2:], tokens[3:], tokens[4:])
+        )
+    return BodyProfile(
+        tokens,
+        shingles,
+        control_flow,
+        resolved_calls if resolved_calls is not None else frozenset(),
+        name_tokens if name_tokens is not None else frozenset({label}),
+        arity,
+        return_key,
+        semantic_size,
+        excluded_reason,
+    )
+
+
+def _analyzed(symbol: Symbol, body: BodyProfile | None) -> AnalyzedSymbol:
+    return AnalyzedSymbol(
+        symbol,
+        ReferenceFacts((), (), (), (), ZeroReference.STRONG),
+        body,
+        (),
+    )
+
+
+def _clone_fixture(
+    count: int,
+    *,
+    bodyless: int = 0,
+    reverse: bool = False,
+) -> tuple[ProjectIR, tuple[SymbolId, ...]]:
+    files: list[FileIR] = []
+    identifiers: list[SymbolId] = []
+    for index in range(count):
+        symbol = _symbol(
+            f"src/clone_{index:03d}.py",
+            f"clone_{index:03d}",
+            returns="int",
+        )
+        events = _substantive_events(symbol)
+        files.append(_body_file(symbol, events))
+        identifiers.append(symbol.id)
+    for index in range(bodyless):
+        symbol = _symbol(
+            f"src/bodyless_{index:03d}.py",
+            f"bodyless_{index:03d}",
+            returns="int",
+        )
+        files.append(_file(symbol.file, symbols=(symbol,)))
+    if reverse:
+        files.reverse()
+    return _project(*files), tuple(identifiers)
+
+
+class DuplicateAnalysisTest(unittest.TestCase):
+    @staticmethod
+    def _pair(
+        left_body: BodyProfile | None,
+        right_body: BodyProfile | None,
+        *,
+        left: Symbol | None = None,
+        right: Symbol | None = None,
+    ) -> tuple[AnalyzedSymbol, AnalyzedSymbol]:
+        left_symbol = left or _symbol("src/left.py", "left", params=("int",))
+        right_symbol = right or _symbol("src/right.py", "right", params=("int",))
+        return _analyzed(left_symbol, left_body), _analyzed(right_symbol, right_body)
+
+    def test_jaccard_and_weighted_score_use_frozen_arithmetic(self) -> None:
+        left = frozenset({"a", "b", "c"})
+        right = frozenset({"b", "c", "d"})
+        self.assertEqual(_jaccard(frozenset(), frozenset()), 0.0)
+        self.assertEqual(_jaccard(left, frozenset()), 0.0)
+        self.assertEqual(_jaccard(left, left), 1.0)
+        self.assertEqual(_jaccard(left, frozenset({"x"})), 0.0)
+        self.assertEqual(_jaccard(left, right), 0.5)
+
+        score = combine_similarity(
+            ast=0.92,
+            control_flow=1.0,
+            calls=0.5,
+            names=0.25,
+            exact=False,
+        )
+        self.assertEqual(
+            (score.ast, score.control_flow, score.calls, score.names),
+            (0.92, 1.0, 0.5, 0.25),
+        )
+        self.assertAlmostEqual(
+            score.total,
+            0.55 * 0.92 + 0.20 * 1.0 + 0.15 * 0.5 + 0.10 * 0.25,
+        )
+        self.assertFalse(score.exact)
+        with self.assertRaises(FrozenInstanceError):
+            score.total = 0.0  # type: ignore[misc]
+
+    def test_task3_public_module_exports_are_exact(self) -> None:
+        self.assertEqual(
+            analysis_module.__all__,
+            [
+                "DIFF_AST_MIN",
+                "DIFF_TOTAL_MIN",
+                "MAP_AST_MIN",
+                "MAP_TOTAL_MIN",
+                "AnalyzedProject",
+                "AnalyzedSymbol",
+                "BodyProfile",
+                "DuplicateMatch",
+                "DuplicateScore",
+                "ReferenceFacts",
+                "ZeroReference",
+                "analyze_project",
+                "canonical_body",
+                "combine_similarity",
+                "find_diff_duplicates",
+                "score_duplicate",
+            ],
+        )
+
+    def test_map_and_diff_threshold_boundaries_are_inclusive(self) -> None:
+        target = _symbol("lib/target.py", "target").id
+        shared_map = _shingles("map-shared", 22)
+        left, map_ast_boundary = self._pair(
+            _profile(
+                "left",
+                ast_shingles=shared_map,
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"shared"}),
+            ),
+            _profile(
+                "right",
+                ast_shingles=shared_map | _shingles("map-extra", 3),
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"shared"}),
+            ),
+        )
+        boundary = score_duplicate(left, map_ast_boundary, policy="map")
+        self.assertIsNotNone(boundary)
+        assert boundary is not None
+        self.assertEqual(boundary.ast, 0.88)
+        self.assertFalse(boundary.exact)
+        _, map_ast_below = self._pair(
+            left.body,
+            _profile(
+                "right",
+                ast_shingles=shared_map | _shingles("map-extra", 4),
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"shared"}),
+            ),
+        )
+        self.assertIsNone(score_duplicate(left, map_ast_below, policy="map"))
+
+        identical_shingles = _shingles("total", 12)
+        map_total_left, map_total_right = self._pair(
+            _profile(
+                "total-left",
+                ast_shingles=identical_shingles,
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"left"}),
+            ),
+            _profile(
+                "total-right",
+                ast_shingles=identical_shingles,
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"right"}),
+            ),
+        )
+        map_total = score_duplicate(map_total_left, map_total_right, policy="map")
+        self.assertIsNotNone(map_total)
+        assert map_total is not None
+        self.assertEqual(map_total.total, 0.90)
+
+        common_calls = frozenset(
+            _symbol(f"lib/call_{index}.py", f"call_{index}").id for index in range(14)
+        )
+        extra_call = _symbol("lib/extra.py", "extra").id
+        below_total_left, below_total_right = self._pair(
+            _profile(
+                "below-left",
+                ast_shingles=identical_shingles,
+                resolved_calls=common_calls,
+                name_tokens=frozenset({"left"}),
+            ),
+            _profile(
+                "below-right",
+                ast_shingles=identical_shingles,
+                resolved_calls=common_calls | {extra_call},
+                name_tokens=frozenset({"right"}),
+            ),
+        )
+        self.assertIsNone(
+            score_duplicate(below_total_left, below_total_right, policy="map")
+        )
+
+        shared_diff = _shingles("diff-shared", 18)
+        diff_left, diff_ast_boundary = self._pair(
+            _profile(
+                "diff-left",
+                ast_shingles=shared_diff,
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"shared"}),
+            ),
+            _profile(
+                "diff-right",
+                ast_shingles=shared_diff | _shingles("diff-extra", 7),
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"shared"}),
+            ),
+        )
+        diff_boundary = score_duplicate(diff_left, diff_ast_boundary, policy="diff")
+        self.assertIsNotNone(diff_boundary)
+        assert diff_boundary is not None
+        self.assertEqual(diff_boundary.ast, 0.72)
+        _, diff_ast_below = self._pair(
+            diff_left.body,
+            _profile(
+                "diff-right",
+                ast_shingles=shared_diff | _shingles("diff-extra", 8),
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"shared"}),
+            ),
+        )
+        self.assertIsNone(score_duplicate(diff_left, diff_ast_below, policy="diff"))
+
+        diff_total_left, diff_total_right = self._pair(
+            _profile(
+                "diff-total-left",
+                ast_shingles=identical_shingles,
+                control_flow=("shared:0", "shared:1"),
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"left"}),
+            ),
+            _profile(
+                "diff-total-right",
+                ast_shingles=identical_shingles,
+                control_flow=(
+                    "shared:0",
+                    "shared:1",
+                    "extra:0",
+                    "extra:1",
+                    "extra:2",
+                ),
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"right"}),
+            ),
+        )
+        diff_total = score_duplicate(diff_total_left, diff_total_right, policy="diff")
+        self.assertIsNotNone(diff_total)
+        assert diff_total is not None
+        self.assertAlmostEqual(diff_total.total, 0.78)
+        _, diff_total_below = self._pair(
+            diff_total_left.body,
+            _profile(
+                "diff-total-right",
+                ast_shingles=identical_shingles,
+                control_flow=(
+                    "shared:0",
+                    "shared:1",
+                    "extra:0",
+                    "extra:1",
+                    "extra:2",
+                    "extra:3",
+                ),
+                resolved_calls=frozenset({target}),
+                name_tokens=frozenset({"right"}),
+            ),
+        )
+        self.assertIsNone(
+            score_duplicate(diff_total_left, diff_total_below, policy="diff")
+        )
+
+    def test_exact_body_semantics_bypass_thresholds_and_name_corroboration(
+        self,
+    ) -> None:
+        tokens = tuple(f"TOKEN:{index}" for index in range(12))
+        exact_shingles = frozenset(
+            zip(tokens, tokens[1:], tokens[2:], tokens[3:], tokens[4:])
+        )
+        left, right = self._pair(
+            _profile(
+                "left",
+                semantic_tokens=tokens,
+                ast_shingles=exact_shingles,
+                control_flow=(),
+                resolved_calls=frozenset(),
+                name_tokens=frozenset({"alpha"}),
+            ),
+            _profile(
+                "right",
+                semantic_tokens=tokens,
+                ast_shingles=exact_shingles,
+                control_flow=(),
+                resolved_calls=frozenset(),
+                name_tokens=frozenset({"omega"}),
+            ),
+        )
+        for policy in ("map", "diff"):
+            with self.subTest(policy=policy):
+                score = score_duplicate(left, right, policy=policy)
+                self.assertIsNotNone(score)
+                assert score is not None
+                self.assertTrue(score.exact)
+                self.assertEqual(score.total, 0.55)
+
+        target = _symbol("lib/target.py", "target").id
+        baseline = _profile(
+            "baseline",
+            semantic_tokens=tokens,
+            ast_shingles=exact_shingles,
+            control_flow=("if:0", "loop:0"),
+            resolved_calls=frozenset({target}),
+            name_tokens=frozenset({"same"}),
+        )
+        variants = (
+            _profile(
+                "changed-token",
+                ast_shingles=exact_shingles,
+                control_flow=baseline.control_flow,
+                resolved_calls=baseline.resolved_calls,
+                name_tokens=baseline.name_tokens,
+            ),
+            _profile(
+                "baseline",
+                semantic_tokens=tokens,
+                ast_shingles=exact_shingles,
+                control_flow=tuple(reversed(baseline.control_flow)),
+                resolved_calls=baseline.resolved_calls,
+                name_tokens=baseline.name_tokens,
+            ),
+            _profile(
+                "baseline",
+                semantic_tokens=tokens,
+                ast_shingles=exact_shingles,
+                control_flow=baseline.control_flow,
+                resolved_calls=frozenset({target, _symbol("lib/other.py", "other").id}),
+                name_tokens=baseline.name_tokens,
+            ),
+        )
+        baseline_item, _ = self._pair(baseline, baseline)
+        for variant in variants:
+            _, variant_item = self._pair(baseline, variant)
+            score = score_duplicate(baseline_item, variant_item, policy="diff")
+            self.assertIsNotNone(score)
+            assert score is not None
+            self.assertFalse(score.exact)
+
+    def test_all_compatibility_exclusion_and_policy_gates_are_conservative(
+        self,
+    ) -> None:
+        tokens = tuple(f"TOKEN:{index}" for index in range(12))
+        exact = _profile(
+            "exact",
+            semantic_tokens=tokens,
+            control_flow=(),
+            name_tokens=frozenset(),
+        )
+        left, right = self._pair(exact, exact)
+        self.assertIsNotNone(score_duplicate(left, right, policy="map"))
+        self.assertIsNone(
+            score_duplicate(left, _analyzed(right.symbol, None), policy="map")
+        )
+
+        for reason in (
+            "test",
+            "generated",
+            "constructor",
+            "accessor",
+            "trivial-delegate",
+            "fewer-than-12-semantic-tokens",
+            "future-exclusion",
+        ):
+            excluded = _profile("excluded", excluded_reason=reason)
+            with self.subTest(excluded_reason=reason):
+                self.assertIsNone(
+                    score_duplicate(
+                        left, _analyzed(right.symbol, excluded), policy="map"
+                    )
+                )
+
+        javascript = _symbol(
+            right.symbol.file,
+            right.symbol.name,
+            language=Language.JAVASCRIPT,
+            params=("int",),
+        )
+        self.assertIsNone(
+            score_duplicate(left, _analyzed(javascript, exact), policy="map")
+        )
+        typescript = _symbol(
+            "src/left.ts",
+            "convert",
+            language=Language.TYPESCRIPT,
+            params=("int",),
+        )
+        javascript_family = _symbol(
+            "src/right.js",
+            "convert",
+            language=Language.JAVASCRIPT,
+            params=("int",),
+        )
+        self.assertIsNone(
+            score_duplicate(
+                _analyzed(typescript, exact),
+                _analyzed(javascript_family, exact),
+                policy="map",
+            )
+        )
+        method = _symbol(
+            right.symbol.file,
+            right.symbol.name,
+            kind=SymbolKind.METHOD,
+            params=("int",),
+        )
+        self.assertIsNone(score_duplicate(left, _analyzed(method, exact), policy="map"))
+        self.assertIsNone(
+            score_duplicate(
+                left,
+                _analyzed(right.symbol, _profile("arity", arity=2)),
+                policy="map",
+            )
+        )
+        self.assertIsNone(
+            score_duplicate(
+                left,
+                _analyzed(right.symbol, _profile("return", return_key="str")),
+                policy="map",
+            )
+        )
+        unknown = _profile(
+            "unknown",
+            semantic_tokens=tokens,
+            control_flow=(),
+            name_tokens=frozenset(),
+            return_key=UNKNOWN_TYPE_KEY,
+        )
+        self.assertIsNone(
+            score_duplicate(left, _analyzed(right.symbol, unknown), policy="map")
+        )
+        unknown_left, unknown_right = self._pair(unknown, unknown)
+        self.assertIsNotNone(score_duplicate(unknown_left, unknown_right, policy="map"))
+
+        size_12 = _profile(
+            "size",
+            semantic_tokens=tokens,
+            control_flow=(),
+            name_tokens=frozenset(),
+            semantic_size=12,
+        )
+        size_18 = _profile(
+            "size",
+            semantic_tokens=tokens,
+            control_flow=(),
+            name_tokens=frozenset(),
+            semantic_size=18,
+        )
+        size_19 = _profile(
+            "size",
+            semantic_tokens=tokens,
+            control_flow=(),
+            name_tokens=frozenset(),
+            semantic_size=19,
+        )
+        size_left, size_boundary = self._pair(size_12, size_18)
+        self.assertIsNotNone(score_duplicate(size_left, size_boundary, policy="map"))
+        self.assertIsNotNone(score_duplicate(size_boundary, size_left, policy="map"))
+        _, size_outside = self._pair(size_12, size_19)
+        self.assertIsNone(score_duplicate(size_left, size_outside, policy="map"))
+        self.assertIsNone(score_duplicate(size_outside, size_left, policy="map"))
+
+        same_identity = _analyzed(left.symbol, exact)
+        self.assertIsNone(score_duplicate(left, same_identity, policy="map"))
+        bodyless = _analyzed(_symbol("src/none.py", "none"), None)
+        with self.assertRaisesRegex(ValueError, "policy"):
+            score_duplicate(bodyless, bodyless, policy="invalid")
+
+        unrelated_left, unrelated_right = self._pair(
+            _profile(
+                "unrelated-left",
+                ast_shingles=_shingles("same", 12),
+                control_flow=("if:0",),
+                resolved_calls=frozenset(),
+                name_tokens=frozenset({"alpha"}),
+            ),
+            _profile(
+                "unrelated-right",
+                ast_shingles=_shingles("same", 12),
+                control_flow=("if:0",),
+                resolved_calls=frozenset(),
+                name_tokens=frozenset({"omega"}),
+            ),
+        )
+        self.assertIsNone(
+            score_duplicate(unrelated_left, unrelated_right, policy="diff")
+        )
+
+    def test_three_exact_clones_have_stable_matches_peers_and_provenance(self) -> None:
+        project, identifiers = _clone_fixture(3, reverse=True)
+        analyzed = analyze_project(project, _resolution(), hot_threshold=10)
+        expected_pairs = (
+            (identifiers[0], identifiers[1]),
+            (identifiers[0], identifiers[2]),
+            (identifiers[1], identifiers[2]),
+        )
+        self.assertEqual(
+            tuple((match.left, match.right) for match in analyzed.map_duplicates),
+            expected_pairs,
+        )
+        by_id = {item.symbol.id: item for item in analyzed.symbols}
+        for index, identifier in enumerate(identifiers):
+            expected_peers = tuple(
+                candidate
+                for peer_index, candidate in enumerate(identifiers)
+                if peer_index != index
+            )
+            self.assertEqual(by_id[identifier].duplicate_peers, expected_peers)
+        for match in analyzed.map_duplicates:
+            self.assertEqual(match.left_span, by_id[match.left].symbol.span)
+            self.assertEqual(match.right_span, by_id[match.right].symbol.span)
+            self.assertTrue(match.score.exact)
+            self.assertLess(match.score.total, 0.90)
+        self.assertIsInstance(analyzed.map_duplicates, tuple)
+        self.assertTrue(
+            all(isinstance(item.duplicate_peers, tuple) for item in analyzed.symbols)
+        )
+        with self.assertRaises(FrozenInstanceError):
+            analyzed.map_duplicates[0].left = identifiers[2]  # type: ignore[misc]
+
+    def test_diff_accepts_broader_candidate_without_mutating_map_analysis(self) -> None:
+        target = _symbol("lib/target.py", "target").id
+        shared = _shingles("broad-shared", 20)
+        left_body = _profile(
+            "broad-left",
+            ast_shingles=shared,
+            resolved_calls=frozenset({target}),
+            name_tokens=frozenset({"shared"}),
+        )
+        right_body = _profile(
+            "broad-right",
+            ast_shingles=shared | _shingles("broad-extra", 5),
+            resolved_calls=frozenset({target}),
+            name_tokens=frozenset({"shared"}),
+        )
+        left, right = self._pair(left_body, right_body)
+        self.assertIsNone(score_duplicate(left, right, policy="map"))
+        broad = score_duplicate(left, right, policy="diff")
+        self.assertIsNotNone(broad)
+        assert broad is not None
+        self.assertEqual(broad.ast, 0.8)
+        self.assertAlmostEqual(broad.total, 0.89)
+
+        analyzed = AnalyzedProject(
+            _project(),
+            _resolution(),
+            (right, left),
+            (),
+        )
+        before_symbols = analyzed.symbols
+        before_map = analyzed.map_duplicates
+        matches = find_diff_duplicates(analyzed)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(
+            (matches[0].left, matches[0].right), (left.symbol.id, right.symbol.id)
+        )
+        self.assertEqual(analyzed.symbols, before_symbols)
+        self.assertEqual(analyzed.map_duplicates, before_map)
+        self.assertEqual(left.duplicate_peers, ())
+        self.assertEqual(right.duplicate_peers, ())
+
+    def test_project_permutation_keeps_match_and_peer_order(self) -> None:
+        forward, _ = _clone_fixture(5)
+        reversed_project, _ = _clone_fixture(5, reverse=True)
+        forward_analysis = analyze_project(forward, _resolution(), hot_threshold=10)
+        reversed_analysis = analyze_project(
+            reversed_project,
+            _resolution(),
+            hot_threshold=10,
+        )
+        self.assertEqual(
+            forward_analysis.map_duplicates,
+            reversed_analysis.map_duplicates,
+        )
+        self.assertEqual(
+            tuple(
+                (item.symbol.id, item.duplicate_peers)
+                for item in forward_analysis.symbols
+            ),
+            tuple(
+                (item.symbol.id, item.duplicate_peers)
+                for item in reversed_analysis.symbols
+            ),
+        )
+        self.assertEqual(
+            find_diff_duplicates(forward_analysis),
+            find_diff_duplicates(reversed_analysis),
+        )
+
+    def test_duplicate_analyzed_symbol_ids_raise_before_pair_generation(self) -> None:
+        symbol = _symbol("src/duplicate.py", "duplicate")
+        item = _analyzed(symbol, _profile("duplicate"))
+        malformed = AnalyzedProject(
+            _project(),
+            _resolution(),
+            (item, item),
+            (),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate.*SymbolId"):
+            find_diff_duplicates(malformed)
+
+        duplicate_project = _project(_file(symbol.file, symbols=(symbol, symbol)))
+        with self.assertRaisesRegex(ValueError, "duplicate.*SymbolId"):
+            analyze_project(duplicate_project, _resolution(), hot_threshold=10)
+
+    def test_scale_filters_bodyless_symbols_and_scores_each_pair_once(self) -> None:
+        count = 24
+        project, identifiers = _clone_fixture(count, bodyless=7, reverse=True)
+        with (
+            patch(
+                "hologram.analysis._score_duplicate",
+                wraps=_score_duplicate,
+            ) as scoring,
+            patch(
+                "hologram.analysis._control_paths",
+                wraps=_control_paths,
+            ) as normalized_controls,
+        ):
+            analyzed = analyze_project(project, _resolution(), hot_threshold=10)
+        expected_count = count * (count - 1) // 2
+        self.assertEqual(scoring.call_count, expected_count)
+        self.assertEqual(normalized_controls.call_count, count)
+        observed: list[tuple[SymbolId, SymbolId]] = []
+        for scored in scoring.call_args_list:
+            left, right = scored.args
+            self.assertEqual(scored.kwargs["policy"], "map")
+            self.assertIn("left_control_flow", scored.kwargs)
+            self.assertIn("right_control_flow", scored.kwargs)
+            self.assertNotEqual(left.symbol.id, right.symbol.id)
+            observed.append((left.symbol.id, right.symbol.id))
+        self.assertEqual(len(set(observed)), expected_count)
+        self.assertTrue(all(left < right for left, right in observed))
+        self.assertEqual(len(analyzed.map_duplicates), expected_count)
+        peers = {
+            item.symbol.id: item.duplicate_peers
+            for item in analyzed.symbols
+            if item.symbol.id in set(identifiers)
+        }
+        self.assertTrue(all(len(value) == count - 1 for value in peers.values()))
 
 
 if __name__ == "__main__":

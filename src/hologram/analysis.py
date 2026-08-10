@@ -5,6 +5,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from itertools import combinations
 from pathlib import PurePosixPath
 
 from .model import (
@@ -650,6 +651,167 @@ def _body_index(project: ProjectIR) -> dict[SymbolId, BodyIR]:
     return bodies
 
 
+def _jaccard(left: frozenset[object], right: frozenset[object]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def combine_similarity(
+    *,
+    ast: float,
+    control_flow: float,
+    calls: float,
+    names: float,
+    exact: bool,
+) -> DuplicateScore:
+    return DuplicateScore(
+        ast,
+        control_flow,
+        calls,
+        names,
+        0.55 * ast + 0.20 * control_flow + 0.15 * calls + 0.10 * names,
+        exact,
+    )
+
+
+def _control_paths(body: BodyProfile) -> frozenset[str]:
+    return frozenset(path for path in body.control_flow if path)
+
+
+def _score_duplicate(
+    left: AnalyzedSymbol,
+    right: AnalyzedSymbol,
+    *,
+    policy: str,
+    left_control_flow: frozenset[str] | None = None,
+    right_control_flow: frozenset[str] | None = None,
+) -> DuplicateScore | None:
+    if policy not in {"map", "diff"}:
+        raise ValueError(f"unknown duplicate policy {policy!r}")
+    if left.symbol.id == right.symbol.id:
+        return None
+    left_body = left.body
+    right_body = right.body
+    if left_body is None or right_body is None:
+        return None
+    if left_body.excluded_reason is not None or right_body.excluded_reason is not None:
+        return None
+    if (
+        left.symbol.lang is not right.symbol.lang
+        or left.symbol.kind is not right.symbol.kind
+    ):
+        return None
+    if left_body.arity != right_body.arity:
+        return None
+    if left_body.return_key != right_body.return_key:
+        return None
+    smaller_size = min(left_body.semantic_size, right_body.semantic_size)
+    larger_size = max(left_body.semantic_size, right_body.semantic_size)
+    if smaller_size <= 0 or 3 * smaller_size < 2 * larger_size:
+        return None
+
+    exact = (
+        left_body.semantic_tokens == right_body.semantic_tokens
+        and left_body.control_flow == right_body.control_flow
+        and left_body.resolved_calls == right_body.resolved_calls
+    )
+    ast = _jaccard(left_body.ast_shingles, right_body.ast_shingles)
+    control_flow = _jaccard(
+        left_control_flow
+        if left_control_flow is not None
+        else _control_paths(left_body),
+        right_control_flow
+        if right_control_flow is not None
+        else _control_paths(right_body),
+    )
+    calls = _jaccard(left_body.resolved_calls, right_body.resolved_calls)
+    names = _jaccard(left_body.name_tokens, right_body.name_tokens)
+    score = combine_similarity(
+        ast=ast,
+        control_flow=control_flow,
+        calls=calls,
+        names=names,
+        exact=exact,
+    )
+    if exact:
+        return score
+    if calls <= 0.0 and names <= 0.0:
+        return None
+    ast_min, total_min = (
+        (MAP_AST_MIN, MAP_TOTAL_MIN)
+        if policy == "map"
+        else (DIFF_AST_MIN, DIFF_TOTAL_MIN)
+    )
+    if ast < ast_min or score.total < total_min:
+        return None
+    return score
+
+
+def score_duplicate(
+    left: AnalyzedSymbol,
+    right: AnalyzedSymbol,
+    *,
+    policy: str,
+) -> DuplicateScore | None:
+    return _score_duplicate(left, right, policy=policy)
+
+
+def _eligible_duplicate_symbols(
+    symbols: tuple[AnalyzedSymbol, ...],
+) -> tuple[AnalyzedSymbol, ...]:
+    ordered = tuple(sorted(symbols, key=lambda item: _symbol_order(item.symbol)))
+    seen: set[SymbolId] = set()
+    for item in ordered:
+        if item.symbol.id in seen:
+            raise ValueError(f"duplicate analyzed SymbolId {item.symbol.id!r}")
+        seen.add(item.symbol.id)
+    return tuple(
+        item
+        for item in ordered
+        if item.body is not None and item.body.excluded_reason is None
+    )
+
+
+def _duplicate_matches(
+    symbols: tuple[AnalyzedSymbol, ...],
+    *,
+    policy: str,
+) -> tuple[DuplicateMatch, ...]:
+    eligible = _eligible_duplicate_symbols(symbols)
+    control_paths = {
+        item.symbol.id: _control_paths(item.body)
+        for item in eligible
+        if item.body is not None
+    }
+    matches: list[DuplicateMatch] = []
+    for left, right in combinations(eligible, 2):
+        score = _score_duplicate(
+            left,
+            right,
+            policy=policy,
+            left_control_flow=control_paths[left.symbol.id],
+            right_control_flow=control_paths[right.symbol.id],
+        )
+        if score is None:
+            continue
+        matches.append(
+            DuplicateMatch(
+                left.symbol.id,
+                right.symbol.id,
+                left.symbol.span,
+                right.symbol.span,
+                score,
+            )
+        )
+    return tuple(matches)
+
+
+def find_diff_duplicates(project: AnalyzedProject) -> tuple[DuplicateMatch, ...]:
+    """Return broad duplicate candidates without changing map peer state."""
+    return _duplicate_matches(project.symbols, policy="diff")
+
+
 def analyze_project(
     project: ProjectIR,
     resolution: ResolutionResult,
@@ -667,26 +829,47 @@ def analyze_project(
         (symbol for file_ir in project.files for symbol in file_ir.symbols),
         key=_symbol_order,
     )
+    analyzed = tuple(
+        AnalyzedSymbol(
+            symbol,
+            references[symbol.id],
+            _canonical_body(
+                symbol,
+                files_by_symbol[symbol.id],
+                bodies_by_owner[symbol.id],
+                resolved_targets,
+            )
+            if symbol.id in bodies_by_owner
+            else None,
+            (),
+        )
+        for symbol in symbols
+    )
+    map_duplicates = _duplicate_matches(analyzed, policy="map")
+    peers: dict[SymbolId, set[SymbolId]] = {item.symbol.id: set() for item in analyzed}
+    for match in map_duplicates:
+        peers[match.left].add(match.right)
+        peers[match.right].add(match.left)
+    symbols_by_id = {item.symbol.id: item.symbol for item in analyzed}
+    with_peers = tuple(
+        AnalyzedSymbol(
+            item.symbol,
+            item.references,
+            item.body,
+            tuple(
+                sorted(
+                    peers[item.symbol.id],
+                    key=lambda symbol_id: _symbol_order(symbols_by_id[symbol_id]),
+                )
+            ),
+        )
+        for item in analyzed
+    )
     return AnalyzedProject(
         project,
         resolution,
-        tuple(
-            AnalyzedSymbol(
-                symbol,
-                references[symbol.id],
-                _canonical_body(
-                    symbol,
-                    files_by_symbol[symbol.id],
-                    bodies_by_owner[symbol.id],
-                    resolved_targets,
-                )
-                if symbol.id in bodies_by_owner
-                else None,
-                (),
-            )
-            for symbol in symbols
-        ),
-        (),
+        with_peers,
+        map_duplicates,
     )
 
 
@@ -704,4 +887,7 @@ __all__ = [
     "ZeroReference",
     "analyze_project",
     "canonical_body",
+    "combine_similarity",
+    "find_diff_duplicates",
+    "score_duplicate",
 ]
