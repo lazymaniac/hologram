@@ -85,11 +85,28 @@ _PIPELINE_NAMES = frozenset(
     }
 )
 
+_ANALYSIS_NAMES = frozenset(
+    {
+        "AnalyzedProject",
+        "analyze_project",
+    }
+)
+
+_RENDER_NAMES = frozenset(
+    {
+        "RenderIR",
+        "decode_render",
+        "project_render_ir",
+        "render_project",
+    }
+)
+
 __all__ = [
     "CONFIG_NAME",
     "CONFIG_SCHEMA_VERSION",
     "STATE_FORMAT_VERSION",
     "UNKNOWN_TYPE_KEY",
+    "AnalyzedProject",
     "Binding",
     "BodyEvent",
     "BodyEventKind",
@@ -111,6 +128,7 @@ __all__ = [
     "ReferenceContext",
     "ReferenceKind",
     "ReferenceRef",
+    "RenderIR",
     "ResolutionResult",
     "ResolutionStatus",
     "ResolvedCall",
@@ -127,19 +145,23 @@ __all__ = [
     "SymbolId",
     "SymbolKind",
     "Visibility",
+    "analyze_project",
     "build_digest",
     "build_project",
     "canonical_config_bytes",
     "canonical_type_key",
     "compute_state",
+    "decode_render",
     "default_config",
     "detect_language",
     "embed_digest",
     "extract_file",
     "has_parser",
     "load_config",
+    "project_render_ir",
     "read_digest_state",
     "render_config",
+    "render_project",
     "render_simple",
     "resolve_project",
     "run_cli",
@@ -156,6 +178,14 @@ def __getattr__(name: str):
         return value
     if name in _RESOLVE_NAMES:
         value = getattr(import_module(".resolve", __name__), name)
+        globals()[name] = value
+        return value
+    if name in _ANALYSIS_NAMES:
+        value = getattr(import_module(".analysis", __name__), name)
+        globals()[name] = value
+        return value
+    if name in _RENDER_NAMES:
+        value = getattr(import_module(".render", __name__), name)
         globals()[name] = value
         return value
     if name not in _LEGACY_COMPAT_NAMES:

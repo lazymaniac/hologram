@@ -79,6 +79,60 @@ any LLM:
 - **`state`** in the header is a hash of the exact sources the digest was built from —
   the freshness mechanism described below.
 
+### Canonical v2 analysis maps (library phase)
+
+The tree-shaped digest above is the current legacy CLI and embed format. The
+canonical v2 map is currently available through the library phase API only;
+`hologram build`, `--out`, `--embed`, and existing managed blocks continue to use
+the legacy representation until the delivery phase switches them over.
+
+The six lazy root exports are `AnalyzedProject`, `analyze_project`, `RenderIR`,
+`project_render_ir`, `render_project`, and `decode_render`. They compose with the
+existing snapshot pipeline without rereading source files:
+
+```python
+snapshot = hologram.build_project(root, config).require_complete()
+analyzed = hologram.analyze_project(
+    snapshot.project,
+    snapshot.resolution,
+    hot_threshold=config.hot_threshold,
+)
+render_ir = hologram.project_render_ir(
+    analyzed,
+    state=snapshot.state.value,
+    hot_threshold=config.hot_threshold,
+)
+text = hologram.render_project(render_ir)
+assert hologram.decode_render(text) == render_ir
+```
+
+Canonical text uses explicit file leaves and source positions, so every symbol has
+exact provenance rather than belonging to a compressed cross-file group:
+
+```text
+# hologram:2 state=0000000000000000000000000000000000000000000000000000000000000000 · regen: hologram build
+· deps ["app→core"]
+@ "src/core.py" "python" "production" "core"
+  :4:0 [[],"fn","public_surface","(int)"] "pub"
+    signature "public_surface(int):int"
+    param ["int"]
+    return "int"
+    body 2
+    mark ["×0?"]
+```
+
+The v2 advisory markers are deliberately conservative:
+
+- `×0` is a strong static candidate, not proof that code is semantically dead.
+- `×0?` means reachability is uncertain or may be external; never propose deletion
+  from the map alone.
+- `✓` records a reference from test code, not proof of correctness or coverage.
+- `≈N` counts conservative duplicate peers; inspect the bodies before consolidating.
+
+Canonical v2 maps are complete inventories: they are never budget-truncated or
+ranked. That completeness statement applies to this library format, not to the
+current legacy embed degradation tiers described below.
+
 ## Languages
 
 | Language | What you get |
