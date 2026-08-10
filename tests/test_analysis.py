@@ -1,14 +1,25 @@
 from __future__ import annotations
 
 import hashlib
+import tempfile
 import unittest
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import PropertyMock, patch
 
-from hologram.analysis import ZeroReference, analyze_project
+from hologram.analysis import (
+    ZeroReference,
+    _body_index,
+    _resolved_body_targets,
+    analyze_project,
+    canonical_body,
+)
 from hologram.model import (
+    BodyEvent,
+    BodyEventKind,
+    BodyIR,
     CallKind,
     CallRef,
     FileIR,
@@ -27,6 +38,7 @@ from hologram.model import (
     SymbolKind,
     Visibility,
 )
+from hologram.parsers.api import extract_file
 from hologram.resolve import (
     ResolutionResult,
     ResolutionStatus,
@@ -104,6 +116,7 @@ def _file(
     calls: tuple[CallRef, ...] = (),
     imports: tuple[ImportRef, ...] = (),
     references: tuple[ReferenceRef, ...] = (),
+    bodies: tuple[BodyIR, ...] = (),
     raw: bytes = b"\n",
     language: Language = Language.PYTHON,
 ) -> FileIR:
@@ -113,6 +126,79 @@ def _file(
         calls=calls,
         imports=imports,
         references=references,
+        bodies=bodies,
+    )
+
+
+def _event(
+    symbol: Symbol,
+    line: int,
+    kind: BodyEventKind,
+    text: str,
+) -> BodyEvent:
+    return BodyEvent(kind, text, _span(symbol.file, line))
+
+
+def _body(
+    symbol: Symbol,
+    events: tuple[BodyEvent, ...],
+) -> BodyIR:
+    end_line = max((event.span.end_line for event in events), default=1)
+    return BodyIR(
+        symbol.id,
+        SourceSpan(symbol.file, 1, 0, end_line, 1),
+        events,
+    )
+
+
+def _body_file(
+    symbol: Symbol,
+    events: tuple[BodyEvent, ...],
+    *,
+    role: SourceRole = SourceRole.PRODUCTION,
+    raw: bytes = b"frozen body bytes\n",
+) -> FileIR:
+    return _file(
+        symbol.file,
+        role=role,
+        language=symbol.lang,
+        symbols=(symbol,),
+        bodies=(_body(symbol, events),),
+        raw=raw,
+    )
+
+
+def _substantive_events(
+    symbol: Symbol,
+    *,
+    parameter: str = "input_value",
+    local: str = "running_total",
+    member: str = "amount",
+    operator: str = "+",
+    literal: str = "<number>",
+    control: str = "if",
+    call_name: str = "normalize",
+) -> tuple[BodyEvent, ...]:
+    values = (
+        (BodyEventKind.PARAM, parameter),
+        (BodyEventKind.LOCAL, local),
+        (BodyEventKind.NAME, parameter),
+        (BodyEventKind.OPERATOR, "="),
+        (BodyEventKind.LITERAL, literal),
+        (BodyEventKind.CONTROL_ENTER, control),
+        (BodyEventKind.NAME, local),
+        (BodyEventKind.OPERATOR, operator),
+        (BodyEventKind.LITERAL, "<number>"),
+        (BodyEventKind.CALL, call_name),
+        (BodyEventKind.NAME, local),
+        (BodyEventKind.MEMBER, member),
+        (BodyEventKind.KEYWORD, "return"),
+        (BodyEventKind.NAME, local),
+        (BodyEventKind.CONTROL_EXIT, control),
+    )
+    return tuple(
+        _event(symbol, index + 2, kind, text)
+        for index, (kind, text) in enumerate(values)
     )
 
 
@@ -758,6 +844,91 @@ class ReferenceAnalysisTest(unittest.TestCase):
             ("generated/module_consumer.py",),
         )
 
+    def test_source_roles_override_test_like_and_production_like_paths(self) -> None:
+        tested = _symbol("tests/production_api.py", "tested")
+        produced = _symbol("src/production_api.py", "produced")
+        test_caller = _symbol("src/checks.py", "test_call")
+        production_caller = _symbol("tests/runtime.py", "runtime_call")
+        test_declaration = _symbol("src/support.py", "test_support")
+        tested_call, tested_result = _call(test_caller.id, tested.id, line=2)
+        produced_call, produced_result = _call(
+            production_caller.id,
+            produced.id,
+            line=2,
+        )
+        project = _project(
+            _file(tested.file, symbols=(tested,)),
+            _file(produced.file, symbols=(produced,)),
+            _file(
+                test_caller.file,
+                role=SourceRole.TEST,
+                symbols=(test_caller,),
+                calls=(tested_call,),
+            ),
+            _file(
+                production_caller.file,
+                role=SourceRole.PRODUCTION,
+                symbols=(production_caller,),
+                calls=(produced_call,),
+            ),
+            _file(
+                test_declaration.file,
+                role=SourceRole.TEST,
+                symbols=(test_declaration,),
+            ),
+        )
+        analyzed = analyze_project(
+            project,
+            _resolution(calls=(produced_result, tested_result)),
+            hot_threshold=1,
+        )
+        by_id = {item.symbol.id: item.references for item in analyzed.symbols}
+        self.assertEqual(
+            tuple(map(str, by_id[tested.id].test_files)),
+            ("src/checks.py",),
+        )
+        self.assertEqual(by_id[tested.id].production_files, ())
+        self.assertEqual(
+            tuple(map(str, by_id[produced.id].production_files)),
+            ("tests/runtime.py",),
+        )
+        self.assertEqual(by_id[test_declaration.id].zero, ZeroReference.NONE)
+
+    def test_fact_permutation_and_overload_identity_are_deterministic(self) -> None:
+        selected = _symbol("lib/api.py", "convert", params=("int",))
+        unused = _symbol("lib/api.py", "convert", params=("str",), line=2)
+        first = _symbol("z.py", "first")
+        second = _symbol("a.py", "second")
+        first_call, first_result = _call(first.id, selected.id, line=2)
+        second_call, second_result = _call(second.id, selected.id, line=2)
+        files = (
+            _file(
+                selected.file,
+                symbols=(unused, selected),
+            ),
+            _file(first.file, symbols=(first,), calls=(first_call,)),
+            _file(second.file, symbols=(second,), calls=(second_call,)),
+        )
+        forward = analyze_project(
+            _project(*files),
+            _resolution(calls=(first_result, second_result)),
+            hot_threshold=2,
+        )
+        reversed_ = analyze_project(
+            _project(*reversed(files)),
+            _resolution(calls=(second_result, first_result)),
+            hot_threshold=2,
+        )
+        forward_by_id = {item.symbol.id: item.references for item in forward.symbols}
+        reverse_by_id = {item.symbol.id: item.references for item in reversed_.symbols}
+        self.assertEqual(forward_by_id, reverse_by_id)
+        self.assertEqual(
+            tuple(map(str, forward_by_id[selected.id].production_files)),
+            ("a.py", "z.py"),
+        )
+        self.assertEqual(forward_by_id[selected.id].zero, ZeroReference.NONE)
+        self.assertEqual(forward_by_id[unused.id].zero, ZeroReference.STRONG)
+
     def test_results_are_frozen_sorted_and_preserve_phase_inputs(self) -> None:
         project, resolution, _ = intrinsic_reachability_fixture()
         analyzed = analyze_project(project, resolution, hot_threshold=2)
@@ -773,6 +944,929 @@ class ReferenceAnalysisTest(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             analyzed.symbols = ()  # type: ignore[misc]
         self.assertFalse(hasattr(analyzed, "__dict__"))
+
+
+class BodyProfileTest(unittest.TestCase):
+    @staticmethod
+    def _call_target_map(
+        events: tuple[BodyEvent, ...],
+        target: SymbolId,
+    ) -> Mapping[tuple[BodyEventKind, SourceSpan], SymbolId]:
+        call = next(event for event in events if event.kind is BodyEventKind.CALL)
+        return MappingProxyType({(BodyEventKind.CALL, call.span): target})
+
+    def test_comments_formatting_and_local_names_share_exact_profile(self) -> None:
+        target = _symbol("lib/normalize.py", "normalize", params=("int",))
+        left = _symbol(
+            "left.py",
+            "transform_value",
+            params=("Input",),
+            returns="list < int >",
+        )
+        right = _symbol(
+            "right.py",
+            "transform_value",
+            params=("Input",),
+            returns="list<int>",
+        )
+        left_events = _substantive_events(
+            left,
+            parameter="incoming_value",
+            local="running_total",
+        )
+        right_events = _substantive_events(
+            right,
+            parameter="source",
+            local="sum_value",
+        )
+        left_file = _body_file(
+            left,
+            left_events,
+            raw=b"# comments and formatting are frozen but irrelevant\n",
+        )
+        right_file = _body_file(right, right_events, raw=b"different bytes\n")
+        self.assertEqual(
+            canonical_body(
+                left,
+                left_file,
+                self._call_target_map(left_events, target.id),
+            ),
+            canonical_body(
+                right,
+                right_file,
+                self._call_target_map(right_events, target.id),
+            ),
+        )
+
+    def test_operator_member_literal_control_and_resolved_call_are_preserved(
+        self,
+    ) -> None:
+        target = _symbol("lib/normalize.py", "normalize")
+        other_target = _symbol("lib/convert.py", "convert")
+        base_symbol = _symbol("base.py", "transform")
+        base_events = _substantive_events(base_symbol)
+        base = canonical_body(
+            base_symbol,
+            _body_file(base_symbol, base_events),
+            self._call_target_map(base_events, target.id),
+        )
+        variants: tuple[tuple[str, dict[str, str], SymbolId], ...] = (
+            ("operator", {"operator": "-"}, target.id),
+            ("member", {"member": "balance"}, target.id),
+            ("literal", {"literal": "<string>"}, target.id),
+            ("control", {"control": "loop"}, target.id),
+            ("call", {}, other_target.id),
+        )
+        for index, (name, changes, resolved_target) in enumerate(variants, start=1):
+            changed = _symbol(f"changed-{index}.py", "transform")
+            changed_events = _substantive_events(changed, **changes)
+            profile = canonical_body(
+                changed,
+                _body_file(changed, changed_events),
+                self._call_target_map(changed_events, resolved_target),
+            )
+            with self.subTest(change=name):
+                self.assertNotEqual(base.semantic_tokens, profile.semantic_tokens)
+
+    def test_literal_categories_ref_serialization_names_and_control_paths_are_exact(
+        self,
+    ) -> None:
+        symbol = _symbol(
+            "src/profile.py",
+            "HTTP_response_value",
+            params=("value",),
+            returns=" list < int > ",
+        )
+        target = _symbol(
+            "lib/target.py",
+            "normalize",
+            container=("Outer",),
+            params=("int",),
+        )
+        constructed = _symbol(
+            "lib/widget.py",
+            "Widget",
+            kind=SymbolKind.CLASS,
+        )
+        values = (
+            (BodyEventKind.PARAM, "value"),
+            (BodyEventKind.LITERAL, "<string>"),
+            (BodyEventKind.LITERAL, "<number>"),
+            (BodyEventKind.LITERAL, "<bool>"),
+            (BodyEventKind.LITERAL, "<null>"),
+            (BodyEventKind.LITERAL, "secret-value"),
+            (BodyEventKind.CONTROL_ENTER, "loop"),
+            (BodyEventKind.CONTROL_ENTER, "if"),
+            (BodyEventKind.NAME, "value"),
+            (BodyEventKind.CONTROL_EXIT, "if"),
+            (BodyEventKind.CONTROL_ENTER, "if"),
+            (BodyEventKind.MEMBER, "HTTPServerURL"),
+            (BodyEventKind.CALL, "normalize"),
+            (BodyEventKind.CONSTRUCT, "Widget"),
+            (BodyEventKind.CONTROL_EXIT, "if"),
+            (BodyEventKind.CONTROL_EXIT, "loop"),
+            (BodyEventKind.CONTROL_ENTER, "try"),
+            (BodyEventKind.KEYWORD, "return"),
+            (BodyEventKind.CONTROL_EXIT, "try"),
+        )
+        events = tuple(
+            _event(symbol, index + 2, kind, text)
+            for index, (kind, text) in enumerate(values)
+        )
+        call = next(event for event in events if event.kind is BodyEventKind.CALL)
+        construct = next(
+            event for event in events if event.kind is BodyEventKind.CONSTRUCT
+        )
+        profile = canonical_body(
+            symbol,
+            _body_file(symbol, events),
+            {
+                (BodyEventKind.CALL, call.span): target.id,
+                (BodyEventKind.CONSTRUCT, construct.span): constructed.id,
+            },
+        )
+        for category in ("STR", "NUM", "BOOL", "NULL", "OTHER"):
+            self.assertIn(f"LITERAL:{category}", profile.semantic_tokens)
+        self.assertFalse(
+            any("secret-value" in token for token in profile.semantic_tokens)
+        )
+        self.assertIn(
+            'REF:["python","lib/target.py",["Outer"],"fn","normalize","(int)"]',
+            profile.semantic_tokens,
+        )
+        self.assertIn(
+            'REF:["python","lib/widget.py",[],"class","Widget",""]',
+            profile.semantic_tokens,
+        )
+        self.assertEqual(
+            profile.control_flow,
+            ("loop:0", "loop:0/if:0", "loop:0/if:1", "try:1"),
+        )
+        self.assertEqual(
+            profile.resolved_calls,
+            frozenset({target.id, constructed.id}),
+        )
+        self.assertEqual(profile.return_key, "list<int>")
+        self.assertEqual(profile.arity, 1)
+        self.assertEqual(profile.semantic_size, len(profile.semantic_tokens))
+        self.assertEqual(
+            profile.name_tokens,
+            frozenset({"http", "response", "value"}),
+        )
+        self.assertEqual(
+            profile.ast_shingles,
+            frozenset(
+                zip(
+                    profile.semantic_tokens,
+                    profile.semantic_tokens[1:],
+                    profile.semantic_tokens[2:],
+                    profile.semantic_tokens[3:],
+                    profile.semantic_tokens[4:],
+                )
+            ),
+        )
+
+    def test_only_exact_frozen_literal_tags_define_categories(self) -> None:
+        symbol = _symbol("src/literals.py", "classify")
+        expected = {
+            "<string>": "STR",
+            "<number>": "NUM",
+            "<bool>": "BOOL",
+            "<null>": "NULL",
+            "string": "OTHER",
+            "int": "OTHER",
+            "true": "OTHER",
+            "null": "OTHER",
+            "<STRING>": "OTHER",
+            " <number>": "OTHER",
+        }
+        for payload, category in expected.items():
+            event = _event(symbol, 2, BodyEventKind.LITERAL, payload)
+            profile = canonical_body(symbol, _body_file(symbol, (event,)), {})
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    profile.semantic_tokens,
+                    (f"LITERAL:{category}",),
+                )
+
+    def test_unresolved_real_java_generic_types_ignore_source_spacing(self) -> None:
+        compact_raw = b"""\
+class C {
+    List<String> transform(List<String> value) {
+        List<String> copy = value;
+        return copy;
+    }
+}
+"""
+        spaced_raw = b"""\
+class C {
+    List < String > transform(List < String > value) {
+        List < String > copy = value;
+        return copy;
+    }
+}
+"""
+        profiles = []
+        for file, raw in (("Compact.java", compact_raw), ("Spaced.java", spaced_raw)):
+            file_ir = extract_file(_source(file, language=Language.JAVA, raw=raw))
+            self.assertFalse(file_ir.diagnostics)
+            symbol = next(
+                item
+                for item in file_ir.symbols
+                if item.name == "transform" and item.kind is SymbolKind.METHOD
+            )
+            profiles.append(canonical_body(symbol, file_ir, {}))
+        self.assertEqual(profiles[0], profiles[1])
+
+    def test_ineligible_bodies_record_exact_precedence_and_source_roles(self) -> None:
+        target = _symbol("lib/target.py", "target")
+        cases: list[tuple[Symbol, FileIR, str]] = []
+
+        test_symbol = _symbol("src/test_named.py", "test helper")
+        test_events = _substantive_events(test_symbol)
+        cases.append(
+            (
+                test_symbol,
+                _body_file(test_symbol, test_events, role=SourceRole.TEST),
+                "test",
+            )
+        )
+
+        generated = _symbol("src/client.py", "generated helper")
+        generated_events = _substantive_events(generated)
+        cases.append(
+            (
+                generated,
+                _body_file(generated, generated_events, role=SourceRole.GENERATED),
+                "generated",
+            )
+        )
+
+        constructor = _symbol(
+            "src/model.py",
+            "Model",
+            kind=SymbolKind.CONSTRUCTOR,
+        )
+        constructor_events = _substantive_events(constructor)
+        cases.append(
+            (
+                constructor,
+                _body_file(constructor, constructor_events),
+                "constructor",
+            )
+        )
+
+        accessor = _symbol(
+            "src/model.py",
+            "value",
+            kind=SymbolKind.PROPERTY,
+            line=20,
+        )
+        accessor_events = _substantive_events(accessor)
+        cases.append((accessor, _body_file(accessor, accessor_events), "accessor"))
+
+        getter = _symbol(
+            "src/model.py",
+            "get",
+            kind=SymbolKind.METHOD,
+            modifiers=("get",),
+            line=40,
+        )
+        getter_events = _substantive_events(getter)
+        cases.append((getter, _body_file(getter, getter_events), "accessor"))
+
+        delegate = _symbol("src/delegate.py", "delegate")
+        delegate_events = tuple(
+            _event(delegate, index + 2, kind, text)
+            for index, (kind, text) in enumerate(
+                (
+                    (BodyEventKind.KEYWORD, "const"),
+                    (BodyEventKind.LOCAL, "delegate"),
+                    (BodyEventKind.OPERATOR, "="),
+                    (BodyEventKind.PARAM, "value"),
+                    (BodyEventKind.KEYWORD, "return"),
+                    (BodyEventKind.CALL, "target"),
+                    (BodyEventKind.NAME, "value"),
+                )
+            )
+        )
+        cases.append(
+            (delegate, _body_file(delegate, delegate_events), "trivial-delegate")
+        )
+
+        tiny = _symbol("src/tiny.py", "tiny")
+        tiny_events = (
+            _event(tiny, 2, BodyEventKind.KEYWORD, "return"),
+            _event(tiny, 3, BodyEventKind.LITERAL, "<number>"),
+        )
+        cases.append(
+            (tiny, _body_file(tiny, tiny_events), "fewer-than-12-semantic-tokens")
+        )
+
+        for candidate, file_ir, expected in cases:
+            with self.subTest(symbol=candidate.name):
+                self.assertEqual(
+                    canonical_body(candidate, file_ir, {}).excluded_reason,
+                    expected,
+                )
+
+        production = _symbol("tests/production.py", "production helper")
+        production_events = _substantive_events(production)
+        production_profile = canonical_body(
+            production,
+            _body_file(
+                production,
+                production_events,
+                role=SourceRole.PRODUCTION,
+            ),
+            self._call_target_map(production_events, target.id),
+        )
+        self.assertIsNone(production_profile.excluded_reason)
+
+    def test_real_language_forwarders_are_trivial_despite_declaration_artifacts(
+        self,
+    ) -> None:
+        samples = (
+            (
+                Language.PYTHON,
+                "forward.py",
+                "forward",
+                b"def forward(value):\n    return target(value)\n",
+            ),
+            (
+                Language.TYPESCRIPT,
+                "forward.ts",
+                "forward",
+                b"const forward = (value: number): number => target(value);\n",
+            ),
+            (
+                Language.CSHARP,
+                "Forward.cs",
+                "Forward",
+                b"class C { int Forward(int value) => target(value); }\n",
+            ),
+            (
+                Language.KOTLIN,
+                "Forward.kt",
+                "forward",
+                b"fun forward(value: Int): Int = target(value)\n",
+            ),
+            (
+                Language.JAVA,
+                "Forward.java",
+                "forward",
+                b"class C { static int forward(int value) { return target(value); } }\n",
+            ),
+            (
+                Language.GO,
+                "forward.go",
+                "forward",
+                b"package p\nfunc forward(value int) int { return target(value) }\n",
+            ),
+            (
+                Language.RUST,
+                "forward.rs",
+                "forward",
+                b"fn forward(value: i32) -> i32 { target(value) }\n",
+            ),
+            (
+                Language.RUST,
+                "async_forward.rs",
+                "forward",
+                b"async fn forward(value: i32) -> i32 { target(value).await }\n",
+            ),
+        )
+        for language, file, name, raw in samples:
+            file_ir = extract_file(_source(file, language=language, raw=raw))
+            self.assertFalse(file_ir.diagnostics)
+            body_owners = {body.owner for body in file_ir.bodies}
+            symbol = next(
+                item
+                for item in file_ir.symbols
+                if item.name == name
+                and item.kind in _CALLABLE_KINDS
+                and item.id in body_owners
+            )
+            with self.subTest(language=language.value, file=file):
+                self.assertEqual(
+                    canonical_body(symbol, file_ir, {}).excluded_reason,
+                    "trivial-delegate",
+                )
+
+        kotlin_raw = b"""\
+fun transform(value: Int): Int {
+    val result = target(value)
+    return result
+}
+"""
+        kotlin_ir = extract_file(
+            _source("Transform.kt", language=Language.KOTLIN, raw=kotlin_raw)
+        )
+        transform = next(item for item in kotlin_ir.symbols if item.name == "transform")
+        self.assertNotEqual(
+            canonical_body(transform, kotlin_ir, {}).excluded_reason,
+            "trivial-delegate",
+        )
+
+        side_effect_raw = b"""\
+def forward(value):
+    target(value)
+    return value
+"""
+        side_effect_ir = extract_file(
+            _source(
+                "side_effect.py",
+                language=Language.PYTHON,
+                raw=side_effect_raw,
+            )
+        )
+        side_effect = next(
+            item
+            for item in side_effect_ir.symbols
+            if item.name == "forward" and item.kind is SymbolKind.FUNCTION
+        )
+        self.assertNotEqual(
+            canonical_body(side_effect, side_effect_ir, {}).excluded_reason,
+            "trivial-delegate",
+        )
+
+        separate_await_raw = b"""\
+async fn forward(value: i32) -> i32 {
+    target(value);
+    other.await
+}
+"""
+        separate_await_ir = extract_file(
+            _source(
+                "separate_await.rs",
+                language=Language.RUST,
+                raw=separate_await_raw,
+            )
+        )
+        separate_await = next(
+            item
+            for item in separate_await_ir.symbols
+            if item.name == "forward" and item.kind is SymbolKind.FUNCTION
+        )
+        self.assertNotEqual(
+            canonical_body(
+                separate_await,
+                separate_await_ir,
+                {},
+            ).excluded_reason,
+            "trivial-delegate",
+        )
+
+        rejected_artifacts = {
+            "other-local": ((BodyEventKind.LOCAL, "result"),),
+            "literal": ((BodyEventKind.LITERAL, "<number>"),),
+            "control": (
+                (BodyEventKind.CONTROL_ENTER, "if"),
+                (BodyEventKind.CONTROL_EXIT, "if"),
+            ),
+            "semantic-operator": ((BodyEventKind.OPERATOR, "+"),),
+            "assignment-after-name": (
+                (BodyEventKind.NAME, "field"),
+                (BodyEventKind.OPERATOR, "="),
+            ),
+        }
+        negative = _symbol("negative.py", "forward")
+        for case, artifacts in rejected_artifacts.items():
+            values = (
+                (BodyEventKind.PARAM, "value"),
+                *artifacts,
+                (BodyEventKind.CALL, "target"),
+                (BodyEventKind.NAME, "value"),
+            )
+            events = tuple(
+                _event(negative, index + 2, kind, text)
+                for index, (kind, text) in enumerate(values)
+            )
+            with self.subTest(rejected=case):
+                self.assertNotEqual(
+                    canonical_body(
+                        negative, _body_file(negative, events), {}
+                    ).excluded_reason,
+                    "trivial-delegate",
+                )
+
+        for keyword in ("return", "yield"):
+            values = (
+                (BodyEventKind.PARAM, "value"),
+                (BodyEventKind.CALL, "target"),
+                (BodyEventKind.NAME, "value"),
+                (BodyEventKind.KEYWORD, keyword),
+                (BodyEventKind.NAME, "value"),
+            )
+            events = tuple(
+                _event(negative, index + 2, kind, text)
+                for index, (kind, text) in enumerate(values)
+            )
+            with self.subTest(post_call_keyword=keyword):
+                self.assertNotEqual(
+                    canonical_body(
+                        negative,
+                        _body_file(negative, events),
+                        {},
+                    ).excluded_reason,
+                    "trivial-delegate",
+                )
+
+    def test_missing_body_is_none_in_analysis_but_direct_body_count_is_strict(
+        self,
+    ) -> None:
+        symbol = _symbol("src/bodyless.py", "bodyless")
+        bodyless = _file(symbol.file, symbols=(symbol,))
+        analyzed = analyze_project(
+            _project(bodyless),
+            _resolution(),
+            hot_threshold=2,
+        )
+        self.assertIsNone(analyzed.symbols[0].body)
+        with self.assertRaisesRegex(ValueError, "expected exactly one body"):
+            canonical_body(symbol, bodyless, {})
+
+        events = _substantive_events(symbol)
+        body = _body(symbol, events)
+        duplicated = _file(
+            symbol.file,
+            symbols=(symbol,),
+            bodies=(body, body),
+        )
+        with self.assertRaisesRegex(ValueError, "expected exactly one body"):
+            canonical_body(symbol, duplicated, {})
+        with self.assertRaisesRegex(ValueError, "expected exactly one body"):
+            analyze_project(
+                _project(duplicated),
+                _resolution(),
+                hot_threshold=2,
+            )
+
+    def test_resolved_body_targets_keep_unique_facts_and_reject_conflicts(self) -> None:
+        caller = _symbol("src/caller.py", "caller")
+        left = _symbol("src/left.py", "work")
+        right = _symbol("src/right.py", "work")
+        constructed = _symbol(
+            "src/widget.py",
+            "Widget",
+            kind=SymbolKind.CLASS,
+        )
+        left_fact, left_result = _call(caller.id, left.id, line=3)
+        duplicate_result = ResolvedCall(
+            left_fact,
+            ResolutionStatus.RESOLVED,
+            left.id,
+            (left.id,),
+            left.name,
+        )
+        mapping = _resolved_body_targets(
+            _resolution(calls=(duplicate_result, left_result))
+        )
+        self.assertEqual(
+            mapping[(BodyEventKind.CALL, left_fact.span)],
+            left.id,
+        )
+
+        construct_fact = CallRef(
+            caller.id,
+            _span(caller.file, 4),
+            constructed.name,
+            None,
+            CallKind.CONSTRUCT,
+            0,
+        )
+        construct_result = ResolvedCall(
+            construct_fact,
+            ResolutionStatus.RESOLVED,
+            constructed.id,
+            (constructed.id,),
+            constructed.name,
+        )
+        name_fact = ReferenceRef(
+            caller.id,
+            _span(caller.file, 5),
+            left.name,
+            None,
+            ReferenceKind.NAME,
+            ReferenceContext.CODE,
+            ReferenceConfidence.DEFINITE,
+        )
+        name_result = ResolvedReference(
+            name_fact,
+            ResolutionStatus.RESOLVED,
+            left.id,
+            (left.id,),
+        )
+        type_fact = ReferenceRef(
+            caller.id,
+            _span(caller.file, 6),
+            constructed.name,
+            None,
+            ReferenceKind.TYPE,
+            ReferenceContext.REFLECTION,
+            ReferenceConfidence.POSSIBLE,
+        )
+        type_result = ResolvedReference(
+            type_fact,
+            ResolutionStatus.RESOLVED,
+            constructed.id,
+            (constructed.id,),
+        )
+        joined = _resolved_body_targets(
+            _resolution(
+                calls=(construct_result, left_result),
+                references=(type_result, name_result),
+            )
+        )
+        self.assertEqual(
+            joined[(BodyEventKind.CONSTRUCT, construct_fact.span)],
+            constructed.id,
+        )
+        self.assertEqual(joined[(BodyEventKind.NAME, name_fact.span)], left.id)
+        self.assertEqual(
+            joined[(BodyEventKind.TYPE, type_fact.span)],
+            constructed.id,
+        )
+
+        right_fact = CallRef(
+            caller.id,
+            left_fact.span,
+            right.name,
+            None,
+            CallKind.CALL,
+            0,
+        )
+        right_result = ResolvedCall(
+            right_fact,
+            ResolutionStatus.RESOLVED,
+            right.id,
+            (right.id,),
+            right.name,
+        )
+        with self.assertRaisesRegex(ValueError, "conflicting resolved body targets"):
+            _resolved_body_targets(_resolution(calls=(left_result, right_result)))
+
+        conflicting_name_fact = ReferenceRef(
+            caller.id,
+            name_fact.span,
+            right.name,
+            None,
+            ReferenceKind.NAME,
+            ReferenceContext.CODE,
+            ReferenceConfidence.DEFINITE,
+        )
+        conflicting_name = ResolvedReference(
+            conflicting_name_fact,
+            ResolutionStatus.RESOLVED,
+            right.id,
+            (right.id,),
+        )
+        with self.assertRaisesRegex(ValueError, "conflicting resolved body targets"):
+            _resolved_body_targets(
+                _resolution(references=(name_result, conflicting_name))
+            )
+
+        ambiguous = ResolvedCall(
+            right_fact,
+            ResolutionStatus.AMBIGUOUS,
+            None,
+            (left.id, right.id),
+            None,
+        )
+        self.assertEqual(_resolved_body_targets(_resolution(calls=(ambiguous,))), {})
+
+        ambiguous_reference = ResolvedReference(
+            name_fact,
+            ResolutionStatus.AMBIGUOUS,
+            None,
+            (left.id, right.id),
+        )
+        self.assertEqual(
+            _resolved_body_targets(_resolution(references=(ambiguous_reference,))),
+            {},
+        )
+
+    def test_malformed_control_streams_raise_local_invariant_errors(self) -> None:
+        symbol = _symbol("src/broken.py", "broken")
+        malformed = {
+            "underflow": ((BodyEventKind.CONTROL_EXIT, "if"),),
+            "mismatch": (
+                (BodyEventKind.CONTROL_ENTER, "if"),
+                (BodyEventKind.CONTROL_EXIT, "loop"),
+            ),
+            "unclosed": ((BodyEventKind.CONTROL_ENTER, "if"),),
+        }
+        for name, values in malformed.items():
+            events = tuple(
+                _event(symbol, index + 2, kind, text)
+                for index, (kind, text) in enumerate(values)
+            )
+            with self.subTest(case=name), self.assertRaises(ValueError):
+                canonical_body(symbol, _body_file(symbol, events), {})
+
+        excluded = (
+            (
+                _symbol("tests/broken.py", "broken_test"),
+                SourceRole.TEST,
+            ),
+            (
+                _symbol("generated/broken.py", "broken_generated"),
+                SourceRole.GENERATED,
+            ),
+            (
+                _symbol(
+                    "src/broken_constructor.py",
+                    "Broken",
+                    kind=SymbolKind.CONSTRUCTOR,
+                ),
+                SourceRole.PRODUCTION,
+            ),
+            (
+                _symbol(
+                    "src/broken_accessor.py",
+                    "value",
+                    kind=SymbolKind.PROPERTY,
+                ),
+                SourceRole.PRODUCTION,
+            ),
+        )
+        for candidate, role in excluded:
+            events = (_event(candidate, 2, BodyEventKind.CONTROL_EXIT, "if"),)
+            with (
+                self.subTest(excluded=candidate.name),
+                self.assertRaisesRegex(ValueError, "control stack underflow"),
+            ):
+                canonical_body(
+                    candidate,
+                    _body_file(candidate, events, role=role),
+                    {},
+                )
+
+    def test_analyze_builds_join_once_and_populates_only_owned_bodies(self) -> None:
+        target = _symbol("lib/target.py", "normalize")
+        first = _symbol("src/first.py", "first")
+        second = _symbol("src/second.py", "second")
+        first_events = _substantive_events(first)
+        second_events = _substantive_events(second)
+        first_call_event = next(
+            event for event in first_events if event.kind is BodyEventKind.CALL
+        )
+        second_call_event = next(
+            event for event in second_events if event.kind is BodyEventKind.CALL
+        )
+        first_fact = CallRef(
+            first.id,
+            first_call_event.span,
+            target.name,
+            None,
+            CallKind.CALL,
+            0,
+        )
+        second_fact = CallRef(
+            second.id,
+            second_call_event.span,
+            target.name,
+            None,
+            CallKind.CALL,
+            0,
+        )
+        resolution = _resolution(
+            calls=(
+                ResolvedCall(
+                    second_fact,
+                    ResolutionStatus.RESOLVED,
+                    target.id,
+                    (target.id,),
+                    target.name,
+                ),
+                ResolvedCall(
+                    first_fact,
+                    ResolutionStatus.RESOLVED,
+                    target.id,
+                    (target.id,),
+                    target.name,
+                ),
+            )
+        )
+        project = _project(
+            _body_file(second, second_events),
+            _file(target.file, symbols=(target,)),
+            _body_file(first, first_events),
+        )
+        with patch(
+            "hologram.analysis._resolved_body_targets",
+            wraps=_resolved_body_targets,
+        ) as joined:
+            analyzed = analyze_project(project, resolution, hot_threshold=2)
+        joined.assert_called_once_with(resolution)
+        by_id = {item.symbol.id: item for item in analyzed.symbols}
+        self.assertIsNone(by_id[target.id].body)
+        first_body = by_id[first.id].body
+        second_body = by_id[second.id].body
+        self.assertIsNotNone(first_body)
+        self.assertIsNotNone(second_body)
+        assert first_body is not None
+        assert second_body is not None
+        self.assertEqual(first_body.resolved_calls, frozenset({target.id}))
+        self.assertEqual(second_body.resolved_calls, frozenset({target.id}))
+
+    def test_analyze_indexes_many_one_file_bodies_once_without_public_scans(
+        self,
+    ) -> None:
+        symbols = tuple(
+            _symbol("src/many.py", f"worker_{index:03d}", line=index + 1)
+            for index in range(128)
+        )
+        bodies = tuple(
+            _body(
+                symbol,
+                (
+                    _event(
+                        symbol, symbol.span.start_line, BodyEventKind.KEYWORD, "return"
+                    ),
+                    _event(
+                        symbol,
+                        symbol.span.start_line,
+                        BodyEventKind.LITERAL,
+                        "<number>",
+                    ),
+                ),
+            )
+            for symbol in symbols
+        )
+        project = _project(
+            _file("src/many.py", symbols=tuple(reversed(symbols)), bodies=bodies)
+        )
+        with (
+            patch("hologram.analysis._body_index", wraps=_body_index) as indexed,
+            patch(
+                "hologram.analysis.canonical_body",
+                side_effect=AssertionError("public body scan"),
+            ) as public_scan,
+        ):
+            analyzed = analyze_project(project, _resolution(), hot_threshold=2)
+        indexed.assert_called_once_with(project)
+        public_scan.assert_not_called()
+        self.assertEqual(
+            tuple(item.symbol.id for item in analyzed.symbols),
+            tuple(symbol.id for symbol in symbols),
+        )
+        self.assertTrue(all(item.body is not None for item in analyzed.symbols))
+
+    def test_frozen_body_analysis_survives_disk_mutation_without_any_reread(
+        self,
+    ) -> None:
+        raw = b"""\
+def compute(value: int) -> int:
+    total = value + 1
+    if total > 2:
+        total = total * 3
+    return total
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "compute.py"
+            path.write_bytes(raw)
+            source = SourceFile(
+                path,
+                "compute.py",
+                Language.PYTHON,
+                SourceRole.PRODUCTION,
+                raw,
+                hashlib.sha256(raw).hexdigest(),
+            )
+            file_ir = extract_file(source)
+            project = ProjectIR(Path(directory), (file_ir,), (), True)
+            before = analyze_project(project, _resolution(), hot_threshold=2)
+            path.write_text("def compute(value):\n    return 999\n", encoding="utf-8")
+            with (
+                patch.object(
+                    Path,
+                    "read_bytes",
+                    side_effect=AssertionError("disk reread"),
+                ),
+                patch.object(
+                    Path,
+                    "read_text",
+                    side_effect=AssertionError("disk reread"),
+                ),
+                patch.object(
+                    SourceFile,
+                    "text",
+                    new_callable=PropertyMock,
+                    side_effect=AssertionError("source text access"),
+                ),
+            ):
+                after = analyze_project(project, _resolution(), hot_threshold=2)
+        before_profile = next(
+            item.body for item in before.symbols if item.symbol.name == "compute"
+        )
+        after_profile = next(
+            item.body for item in after.symbols if item.symbol.name == "compute"
+        )
+        self.assertEqual(before_profile, after_profile)
+        self.assertIsNotNone(after_profile)
+        assert after_profile is not None
+        self.assertIsNone(after_profile.excluded_reason)
 
 
 if __name__ == "__main__":
