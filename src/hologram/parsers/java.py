@@ -699,7 +699,7 @@ def _annotation_references_from_nodes(
                     owner,
                     node_span(source, literal),
                     callback,
-                    name,
+                    None,
                     ReferenceKind.NAME,
                     context=ReferenceContext.ANNOTATION,
                     confidence=ReferenceConfidence.POSSIBLE,

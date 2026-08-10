@@ -369,6 +369,7 @@ class JavaParserTest(unittest.TestCase):
         self.assertEqual(len(callbacks), 1)
         self.assertEqual(callbacks[0].owner, listen.id)
         self.assertEqual(callbacks[0].kind, ReferenceKind.NAME)
+        self.assertIsNone(callbacks[0].qualifier)
         self.assertEqual(callbacks[0].confidence, ReferenceConfidence.POSSIBLE)
         self.assertEqual(callbacks[0].span.start_line, 10)
         self.assertFalse(
