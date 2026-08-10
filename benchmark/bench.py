@@ -229,7 +229,7 @@ def claude_version(run=subprocess.run) -> str:
     return match.group(1)
 
 
-def _timeout_text(value: str | bytes | None) -> str:
+def _process_text(value: str | bytes | None) -> str:
     if value is None:
         return ""
     if isinstance(value, bytes):
@@ -267,8 +267,8 @@ def claude_runner(
         )
     except subprocess.TimeoutExpired as error:
         return ProcessResult(
-            _timeout_text(error.stdout),
-            _timeout_text(error.stderr),
+            _process_text(error.stdout),
+            _process_text(error.stderr),
             124,
             timed_out=True,
         )
@@ -307,14 +307,6 @@ def _digest_of(ws: Path, workspace_assets: Sequence[str] = ()) -> str:
             out.unlink(missing_ok=True)
 
 
-def _verifier_text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value
-
-
 def _run_task_verifier(
     task: Task,
     workspace: Path,
@@ -339,8 +331,8 @@ def _run_task_verifier(
         stderr = completed.stderr
         returncode = completed.returncode
     except subprocess.TimeoutExpired as error:
-        stdout = _verifier_text(error.stdout)
-        stderr = _verifier_text(error.stderr)
+        stdout = _process_text(error.stdout)
+        stderr = _process_text(error.stderr)
         returncode = 124
     log_path.write_text(
         "stdout:\n" + stdout + "\nstderr:\n" + stderr,
