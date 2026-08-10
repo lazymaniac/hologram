@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from hologram.model import (
     BodyEventKind,
+    BodyIR,
     Diagnostic,
     DiagnosticSeverity,
     FileIR,
@@ -23,6 +24,7 @@ from hologram.model import (
     SourceSpan,
     SymbolKind,
 )
+from hologram.parsers import treesitter as treesitter_runtime
 from hologram.parsers.api import (
     EXTRACTOR_VERSIONS,
     ParserRegistry,
@@ -45,6 +47,7 @@ from hologram.parsers.common import (
     validate_body_events,
 )
 from hologram.parsers.treesitter import ast_collect, body_events, node_span
+from tests.parser_assertions import assert_body_fact_events
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -808,12 +811,1006 @@ class ParserHelperTest(unittest.TestCase):
             ("local_one", 2),
             ("local_two", 2),
         ):
-            expected_kind = (
-                BodyEventKind.PARAM if line == 1 else BodyEventKind.LOCAL
-            )
+            expected_kind = BodyEventKind.PARAM if line == 1 else BodyEventKind.LOCAL
             span = token_span(snapshot, line, name)
             self.assertIn((expected_kind, span), event_pairs)
             self.assertNotIn((BodyEventKind.NAME, span), event_pairs)
+
+    def test_tree_sitter_nested_callable_shape_matrix_is_owner_scoped(self) -> None:
+        cases = (
+            (
+                Language.JAVA,
+                (
+                    b"class Probe { void run() {\n"
+                    b"  Runnable nested = () -> hidden();\n"
+                    b"  record Local(int value) { Local { hidden(); } }\n"
+                    b"  visible();\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+            ),
+            (
+                Language.TYPESCRIPT,
+                (
+                    b"function run() {\n"
+                    b"  function* nested() { hidden(); }\n"
+                    b"  const generated = function* () { hidden(); };\n"
+                    b"  visible();\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+            ),
+            (
+                Language.KOTLIN,
+                (b"fun run() {\n  val nested = { hidden() }\n  visible()\n}\n"),
+                ("function_declaration",),
+            ),
+            (
+                Language.GO,
+                (
+                    b"package probe\n"
+                    b"func run() {\n"
+                    b"  nested := func() { hidden() }\n"
+                    b"  visible()\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+            ),
+            (
+                Language.RUST,
+                (b"fn run() {\n  let nested = || hidden();\n  visible();\n}\n"),
+                ("function_item",),
+            ),
+            (
+                Language.CSHARP,
+                (
+                    b"class Probe { void run() {\n"
+                    b"  void nested() { hidden(); }\n"
+                    b"  System.Action action = delegate { hidden(); };\n"
+                    b"  visible();\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+            ),
+            (
+                Language.CPP,
+                (
+                    b"void run() {\n"
+                    b"  auto nested = []() { hidden(); };\n"
+                    b"  visible();\n"
+                    b"}\n"
+                ),
+                ("function_definition",),
+            ),
+            (
+                Language.LUA,
+                (
+                    b"function run()\n"
+                    b"  local nested = function() hidden() end\n"
+                    b"  visible()\n"
+                    b"end\n"
+                ),
+                ("function_declaration",),
+            ),
+        )
+        for language, raw, callable_kinds in cases:
+            with self.subTest(language=language):
+                _, _, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                calls = {
+                    event.text for event in events if event.kind is BodyEventKind.CALL
+                }
+
+                self.assertIn("visible", calls)
+                self.assertNotIn("hidden", calls)
+
+    def test_callable_metadata_covers_installed_grammar_shapes(self) -> None:
+        expected = {
+            Language.JAVA: {
+                "compact_constructor_declaration",
+                "constructor_declaration",
+                "lambda_expression",
+                "method_declaration",
+            },
+            Language.TYPESCRIPT: {
+                "arrow_function",
+                "function_declaration",
+                "function_expression",
+                "generator_function",
+                "generator_function_declaration",
+                "method_definition",
+            },
+            Language.KOTLIN: {
+                "anonymous_function",
+                "function_declaration",
+                "getter",
+                "lambda_literal",
+                "secondary_constructor",
+                "setter",
+            },
+            Language.GO: {
+                "func_literal",
+                "function_declaration",
+                "method_declaration",
+            },
+            Language.RUST: {"closure_expression", "function_item"},
+            Language.CSHARP: {
+                "accessor_declaration",
+                "anonymous_method_expression",
+                "constructor_declaration",
+                "conversion_operator_declaration",
+                "destructor_declaration",
+                "indexer_declaration",
+                "lambda_expression",
+                "local_function_statement",
+                "method_declaration",
+                "operator_declaration",
+            },
+            Language.C: {"function_definition"},
+            Language.CPP: {"function_definition", "lambda_expression"},
+            Language.LUA: {"function_declaration", "function_definition"},
+            Language.HTML: set(),
+        }
+        metadata = getattr(
+            treesitter_runtime,
+            "_CALLABLE_KINDS_BY_LANGUAGE",
+            {},
+        )
+
+        for language, required in expected.items():
+            with self.subTest(language=language):
+                self.assertTrue(required.issubset(metadata.get(language, frozenset())))
+
+    def test_tree_sitter_binding_shape_matrix_uses_only_binder_roots(self) -> None:
+        cases = (
+            (
+                Language.JAVA,
+                (
+                    b"class Probe { void run(Object value, String... rest) {\n"
+                    b"  if (value instanceof Thing found) visible(found);\n"
+                    b"  if (value instanceof Point(int first_component, "
+                    b"int second_component)) visible(first_component, second_component);\n"
+                    b"  try { visible(); } catch (Exception error) { visible(error); }\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+                (
+                    (BodyEventKind.PARAM, 1, "value", 1),
+                    (BodyEventKind.PARAM, 1, "rest", 1),
+                    (BodyEventKind.LOCAL, 2, "found", 1),
+                    (BodyEventKind.LOCAL, 3, "first_component", 1),
+                    (BodyEventKind.LOCAL, 3, "second_component", 1),
+                    (BodyEventKind.LOCAL, 4, "error", 1),
+                ),
+                (
+                    (2, "value", 1),
+                    (2, "found", 2),
+                    (3, "value", 1),
+                    (4, "error", 2),
+                ),
+            ),
+            (
+                Language.TYPESCRIPT,
+                (
+                    b"function run({left: renamed, short, fallback = init}: Input, "
+                    b"...rest: Input[]) {\n"
+                    b"  const [first, second] = source;\n"
+                    b"  try {} catch ({message}) {\n"
+                    b"    visible(renamed, short, first, second, message, source);\n"
+                    b"  }\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                (
+                    (BodyEventKind.PARAM, 1, "renamed", 1),
+                    (BodyEventKind.PARAM, 1, "short", 1),
+                    (BodyEventKind.PARAM, 1, "fallback", 1),
+                    (BodyEventKind.PARAM, 1, "rest", 1),
+                    (BodyEventKind.LOCAL, 2, "first", 1),
+                    (BodyEventKind.LOCAL, 2, "second", 1),
+                    (BodyEventKind.LOCAL, 3, "message", 1),
+                ),
+                ((1, "left", 1), (1, "init", 1), (2, "source", 1)),
+            ),
+            (
+                Language.TYPESCRIPT,
+                b"const run = bare => { visible(bare); };\n",
+                ("arrow_function",),
+                ((BodyEventKind.PARAM, 1, "bare", 1),),
+                (),
+            ),
+            (
+                Language.C,
+                (
+                    b"void run(int bound, int values[bound], int extent) {\n"
+                    b"  int local[extent];\n"
+                    b"  visible(values, local, bound, extent);\n"
+                    b"}\n"
+                ),
+                ("function_definition",),
+                (
+                    (BodyEventKind.PARAM, 1, "bound", 1),
+                    (BodyEventKind.PARAM, 1, "values", 1),
+                    (BodyEventKind.PARAM, 1, "extent", 1),
+                    (BodyEventKind.LOCAL, 2, "local", 1),
+                ),
+                ((1, "bound", 2), (2, "extent", 1)),
+            ),
+            (
+                Language.C,
+                (
+                    b"void run(void (*callback)(int callback_signature)) {\n"
+                    b"  int (*factory)(int signature_name) = source;\n"
+                    b"  visible(callback, factory);\n"
+                    b"}\n"
+                ),
+                ("function_definition",),
+                (
+                    (BodyEventKind.PARAM, 1, "callback", 1),
+                    (BodyEventKind.LOCAL, 2, "factory", 1),
+                ),
+                (
+                    (1, "callback_signature", 1),
+                    (2, "signature_name", 1),
+                    (2, "source", 1),
+                ),
+            ),
+            (
+                Language.CPP,
+                (
+                    b"void run(int bound, int values[bound], int extent) {\n"
+                    b"  int local[extent];\n"
+                    b"  try { visible(); } catch (const Error& error) { visible(error); }\n"
+                    b"}\n"
+                ),
+                ("function_definition",),
+                (
+                    (BodyEventKind.PARAM, 1, "bound", 1),
+                    (BodyEventKind.PARAM, 1, "values", 1),
+                    (BodyEventKind.PARAM, 1, "extent", 1),
+                    (BodyEventKind.LOCAL, 2, "local", 1),
+                    (BodyEventKind.LOCAL, 3, "error", 1),
+                ),
+                (
+                    (1, "bound", 2),
+                    (2, "extent", 1),
+                    (3, "error", 2),
+                ),
+            ),
+            (
+                Language.CPP,
+                (
+                    b"void run(void (*callback)(int callback_signature)) {\n"
+                    b"  int (*factory)(int signature_name) = source;\n"
+                    b"  visible(callback, factory);\n"
+                    b"}\n"
+                ),
+                ("function_definition",),
+                (
+                    (BodyEventKind.PARAM, 1, "callback", 1),
+                    (BodyEventKind.LOCAL, 2, "factory", 1),
+                ),
+                (
+                    (1, "callback_signature", 1),
+                    (2, "signature_name", 1),
+                    (2, "source", 1),
+                ),
+            ),
+            (
+                Language.CPP,
+                (
+                    b"void run(int value = fallback) {\n"
+                    b"  auto [first, second] = pair();\n"
+                    b"  visible(value, first, second);\n"
+                    b"}\n"
+                ),
+                ("function_definition",),
+                (
+                    (BodyEventKind.PARAM, 1, "value", 1),
+                    (BodyEventKind.LOCAL, 2, "first", 1),
+                    (BodyEventKind.LOCAL, 2, "second", 1),
+                ),
+                ((1, "fallback", 1), (2, "pair", 1)),
+            ),
+            (
+                Language.GO,
+                (
+                    b"package probe\n"
+                    b"func run(items []int) {\n"
+                    b"  var first, second = source(), source()\n"
+                    b"  third, fourth := pair()\n"
+                    b"  for key, value := range items {\n"
+                    b"    visible(first, second, third, fourth, key, value)\n"
+                    b"  }\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                (
+                    (BodyEventKind.PARAM, 2, "items", 1),
+                    (BodyEventKind.LOCAL, 3, "first", 1),
+                    (BodyEventKind.LOCAL, 3, "second", 1),
+                    (BodyEventKind.LOCAL, 4, "third", 1),
+                    (BodyEventKind.LOCAL, 4, "fourth", 1),
+                    (BodyEventKind.LOCAL, 5, "key", 1),
+                    (BodyEventKind.LOCAL, 5, "value", 1),
+                ),
+                ((5, "items", 1),),
+            ),
+            (
+                Language.RUST,
+                (
+                    b"fn run(items: Vec<Option<i32>>) {\n"
+                    b"  let (first, second) = pair();\n"
+                    b"  for (index, value) in items.iter() { visible(index, value); }\n"
+                    b"  if let Some(found) = maybe() { visible(found); }\n"
+                    b"  match maybe() { Some(matched) => visible(matched), _ => {} }\n"
+                    b"}\n"
+                ),
+                ("function_item",),
+                (
+                    (BodyEventKind.PARAM, 1, "items", 1),
+                    (BodyEventKind.LOCAL, 2, "first", 1),
+                    (BodyEventKind.LOCAL, 2, "second", 1),
+                    (BodyEventKind.LOCAL, 3, "index", 1),
+                    (BodyEventKind.LOCAL, 3, "value", 1),
+                    (BodyEventKind.LOCAL, 4, "found", 1),
+                    (BodyEventKind.LOCAL, 5, "matched", 1),
+                ),
+                ((2, "pair", 1),),
+            ),
+            (
+                Language.RUST,
+                (
+                    b"struct Point { first: i32, second: i32 }\n"
+                    b"fn run(point: Point) {\n"
+                    b"  let Point { first, second: renamed } = point;\n"
+                    b"  visible(first, renamed);\n"
+                    b"}\n"
+                ),
+                ("function_item",),
+                (
+                    (BodyEventKind.PARAM, 2, "point", 1),
+                    (BodyEventKind.LOCAL, 3, "first", 1),
+                    (BodyEventKind.LOCAL, 3, "renamed", 1),
+                ),
+                ((3, "second", 1), (3, "point", 1)),
+            ),
+            (
+                Language.CSHARP,
+                (
+                    b"class Probe { void run() {\n"
+                    b"  try { visible(); } catch (System.Exception error) { visible(error); }\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+                ((BodyEventKind.LOCAL, 2, "error", 1),),
+                ((2, "error", 2),),
+            ),
+            (
+                Language.CSHARP,
+                (
+                    b"class Probe { void run(object items) {\n"
+                    b"  foreach (var item in items) { visible(item); }\n"
+                    b"  if (source(out var found)) visible(found);\n"
+                    b"  (int first, int second) = pair();\n"
+                    b"  visible(first, second);\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+                (
+                    (BodyEventKind.PARAM, 1, "items", 1),
+                    (BodyEventKind.LOCAL, 2, "item", 1),
+                    (BodyEventKind.LOCAL, 3, "found", 1),
+                    (BodyEventKind.LOCAL, 4, "first", 1),
+                    (BodyEventKind.LOCAL, 4, "second", 1),
+                ),
+                (
+                    (2, "items", 1),
+                    (3, "source", 1),
+                    (4, "pair", 1),
+                ),
+            ),
+            (
+                Language.KOTLIN,
+                (
+                    b"fun run() {\n"
+                    b"  try { visible() } catch (error: Exception) { visible(error) }\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                ((BodyEventKind.LOCAL, 2, "error", 1),),
+                ((2, "error", 2),),
+            ),
+            (
+                Language.KOTLIN,
+                (
+                    b"fun run() {\n"
+                    b"  val (first, second) = pair()\n"
+                    b"  visible(first, second)\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+                (
+                    (BodyEventKind.LOCAL, 2, "first", 1),
+                    (BodyEventKind.LOCAL, 2, "second", 1),
+                ),
+                ((2, "pair", 1),),
+            ),
+            (
+                Language.KOTLIN,
+                (
+                    b"val action = { first, second ->\n"
+                    b"  visible(first)\n"
+                    b"  visible(second)\n"
+                    b"}\n"
+                ),
+                ("lambda_literal",),
+                (
+                    (BodyEventKind.PARAM, 1, "first", 1),
+                    (BodyEventKind.PARAM, 1, "second", 1),
+                ),
+                (),
+            ),
+            (
+                Language.KOTLIN,
+                (
+                    b"class Probe { var item: Int = 0\n"
+                    b"  set(next) {\n"
+                    b"    visible(next)\n"
+                    b"    field = next\n"
+                    b"  }\n"
+                    b"}\n"
+                ),
+                ("setter",),
+                ((BodyEventKind.PARAM, 2, "next", 1),),
+                ((4, "next", 1),),
+            ),
+            (
+                Language.LUA,
+                (
+                    b"function run(items)\n"
+                    b"  for index = start, finish do visible(index) end\n"
+                    b"  for key, value in iterate(items) do visible(key, value) end\n"
+                    b"end\n"
+                ),
+                ("function_declaration",),
+                (
+                    (BodyEventKind.PARAM, 1, "items", 1),
+                    (BodyEventKind.LOCAL, 2, "index", 1),
+                    (BodyEventKind.LOCAL, 3, "key", 1),
+                    (BodyEventKind.LOCAL, 3, "value", 1),
+                ),
+                (
+                    (2, "start", 1),
+                    (2, "finish", 1),
+                    (3, "iterate", 1),
+                    (3, "items", 1),
+                ),
+            ),
+        )
+        for language, raw, callable_kinds, bindings, names in cases:
+            with self.subTest(language=language):
+                snapshot, _, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                event_pairs = {(event.kind, event.span) for event in events}
+
+                for kind, line, name, occurrence in bindings:
+                    span = token_span(
+                        snapshot,
+                        line,
+                        name,
+                        occurrence=occurrence,
+                    )
+                    self.assertIn((kind, span), event_pairs)
+                    self.assertNotIn((BodyEventKind.NAME, span), event_pairs)
+                for line, name, occurrence in names:
+                    span = token_span(
+                        snapshot,
+                        line,
+                        name,
+                        occurrence=occurrence,
+                    )
+                    self.assertIn((BodyEventKind.NAME, span), event_pairs)
+                    self.assertNotIn((BodyEventKind.PARAM, span), event_pairs)
+                    self.assertNotIn((BodyEventKind.LOCAL, span), event_pairs)
+                if language is Language.RUST and b"Some(" in raw:
+                    for line in (4, 5):
+                        span = token_span(snapshot, line, "Some")
+                        self.assertIn((BodyEventKind.TYPE, span), event_pairs)
+                        self.assertNotIn((BodyEventKind.PARAM, span), event_pairs)
+                        self.assertNotIn((BodyEventKind.LOCAL, span), event_pairs)
+
+    def test_tree_sitter_literal_shape_matrix_is_explicit_and_exact(self) -> None:
+        cases = (
+            (
+                Language.JAVA,
+                b"class Probe { void run() { consume('x', 2); } }\n",
+                ("method_declaration",),
+                (
+                    ("character_literal", "<string>"),
+                    ("decimal_integer_literal", "<number>"),
+                ),
+            ),
+            (
+                Language.TYPESCRIPT,
+                b'function run() { consume("x", 2); }\n',
+                ("function_declaration",),
+                (("string", "<string>"), ("number", "<number>")),
+            ),
+            (
+                Language.KOTLIN,
+                b"fun run() { consume('x', 2.0) }\n",
+                ("function_declaration",),
+                (("character_literal", "<string>"), ("float_literal", "<number>")),
+            ),
+            (
+                Language.GO,
+                b"package probe\nfunc run() { consume('x', 2i) }\n",
+                ("function_declaration",),
+                (("rune_literal", "<string>"), ("imaginary_literal", "<number>")),
+            ),
+            (
+                Language.RUST,
+                b"fn run() { consume('x', 2); }\n",
+                ("function_item",),
+                (("char_literal", "<string>"), ("integer_literal", "<number>")),
+            ),
+            (
+                Language.CSHARP,
+                b'class Probe { void run() { consume(@"x", 2.0); } }\n',
+                ("method_declaration",),
+                (("verbatim_string_literal", "<string>"), ("real_literal", "<number>")),
+            ),
+            (
+                Language.C,
+                b"void run() { consume('x', 2); }\n",
+                ("function_definition",),
+                (("char_literal", "<string>"), ("number_literal", "<number>")),
+            ),
+            (
+                Language.CPP,
+                b'void run() { consume(R"(x)", 2); }\n',
+                ("function_definition",),
+                (("raw_string_literal", "<string>"), ("number_literal", "<number>")),
+            ),
+            (
+                Language.LUA,
+                b'function run() consume("x", 2) end\n',
+                ("function_declaration",),
+                (("string", "<string>"), ("number", "<number>")),
+            ),
+        )
+        for language, raw, callable_kinds, expected in cases:
+            with self.subTest(language=language):
+                snapshot, tree, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                literal_events = tuple(
+                    event for event in events if event.kind is BodyEventKind.LITERAL
+                )
+                expected_events = []
+                for node_kind, text in expected:
+                    node = ast_collect(tree.root_node, (node_kind,))[0]
+                    expected_events.append((text, node_span(snapshot, node)))
+
+                self.assertEqual(
+                    tuple((event.text, event.span) for event in literal_events),
+                    tuple(expected_events),
+                )
+
+    def test_kotlin_multiline_and_keyword_literals_are_normalized(self) -> None:
+        raw = b'fun run() { consume("""text""", true, false, null) }\n'
+        snapshot, tree, _, events = tree_body_fixture(
+            self,
+            Language.KOTLIN,
+            raw,
+            ("function_declaration",),
+        )
+        multiline = ast_collect(tree.root_node, ("multiline_string_literal",))[0]
+        expected = {
+            ("<string>", node_span(snapshot, multiline)),
+            ("<bool>", token_span(snapshot, 1, "true")),
+            ("<bool>", token_span(snapshot, 1, "false")),
+            ("<null>", token_span(snapshot, 1, "null")),
+        }
+
+        self.assertEqual(
+            {
+                (event.text, event.span)
+                for event in events
+                if event.kind is BodyEventKind.LITERAL
+            },
+            expected,
+        )
+
+    def test_reference_facts_join_member_and_nested_type_events_exactly(self) -> None:
+        python_raw = b"def run(obj):\n    return obj.member\n"
+        python_source = source(
+            Language.PYTHON,
+            file="member.py",
+            raw=python_raw,
+        )
+        python_callable = ast.parse(python_source.text).body[0]
+        python_owner = symbol_id(
+            python_source,
+            (),
+            SymbolKind.FUNCTION,
+            "run",
+            ("obj",),
+        )
+        python_member_span = token_span(python_source, 2, "member")
+        python_events = ast_body_events(python_source, python_callable)
+        python_ir = FileIR(
+            python_source,
+            references=(
+                reference(
+                    python_owner,
+                    python_member_span,
+                    "member",
+                    "obj",
+                    ReferenceKind.NAME,
+                    context=ReferenceContext.CODE,
+                    confidence=ReferenceConfidence.DEFINITE,
+                ),
+            ),
+            bodies=(
+                BodyIR(
+                    python_owner,
+                    ast_span(python_source, python_callable),
+                    python_events,
+                ),
+            ),
+        )
+
+        assert_body_fact_events(self, python_ir)
+        self.assertIn(
+            (BodyEventKind.MEMBER, python_member_span),
+            {(event.kind, event.span) for event in python_events},
+        )
+        self.assertEqual(len(python_events), len(set(python_events)))
+
+        java_raw = (
+            b"class Probe { void run(Foo<Bar> value, Thing obj) {\n"
+            b"  consume(obj.member);\n"
+            b"} }\n"
+        )
+        java_source, java_tree, java_callable, java_events = tree_body_fixture(
+            self,
+            Language.JAVA,
+            java_raw,
+            ("method_declaration",),
+        )
+        java_owner = symbol_id(
+            java_source,
+            ("Probe",),
+            SymbolKind.METHOD,
+            "run",
+            ("Foo<Bar>", "Thing"),
+        )
+        type_nodes = {
+            node.text.decode(): node
+            for node in ast_collect(java_tree.root_node, ("type_identifier",))
+            if node.text in {b"Foo", b"Bar"}
+        }
+        member_node = next(
+            node
+            for node in ast_collect(java_tree.root_node, ("identifier",))
+            if node.text == b"member"
+        )
+        java_references = tuple(
+            reference(
+                java_owner,
+                node_span(java_source, node),
+                name,
+                None,
+                ReferenceKind.TYPE,
+                context=ReferenceContext.TYPE,
+                confidence=ReferenceConfidence.DEFINITE,
+            )
+            for name, node in sorted(type_nodes.items())
+        ) + (
+            reference(
+                java_owner,
+                node_span(java_source, member_node),
+                "member",
+                "obj",
+                ReferenceKind.NAME,
+                context=ReferenceContext.CODE,
+                confidence=ReferenceConfidence.DEFINITE,
+            ),
+        )
+        java_ir = FileIR(
+            java_source,
+            references=java_references,
+            bodies=(
+                BodyIR(
+                    java_owner,
+                    node_span(java_source, java_callable),
+                    java_events,
+                ),
+            ),
+        )
+
+        assert_body_fact_events(self, java_ir)
+        member_span = node_span(java_source, member_node)
+        java_event_pairs = {(event.kind, event.span) for event in java_events}
+        self.assertIn((BodyEventKind.MEMBER, member_span), java_event_pairs)
+        self.assertEqual(len(java_events), len(set(java_events)))
+
+    def test_tree_sitter_member_shape_matrix_emits_member_and_name(self) -> None:
+        cases = (
+            (
+                Language.KOTLIN,
+                b"fun run(obj: Thing) { consume(obj.member) }\n",
+                ("function_declaration",),
+                ((1, "member"),),
+            ),
+            (
+                Language.LUA,
+                b"function run(obj) consume(obj.member); obj:method() end\n",
+                ("function_declaration",),
+                ((1, "member"), (1, "method")),
+            ),
+            (
+                Language.CSHARP,
+                (
+                    b"class Probe { void run(Box<Item> obj) {\n"
+                    b"  consume(obj.member);\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+                ((2, "member"),),
+            ),
+            (
+                Language.CSHARP,
+                (
+                    b"class Probe { void run(Box<Item> obj) {\n"
+                    b"  obj.Method<Item>();\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+                ((2, "Method"),),
+            ),
+            (
+                Language.CPP,
+                (b"void run(Box<Item> obj) {\n  consume(obj.member);\n}\n"),
+                ("function_definition",),
+                ((2, "member"),),
+            ),
+            (
+                Language.CPP,
+                (b"void run(Box<Item> obj) {\n  obj.template method<Item>();\n}\n"),
+                ("function_definition",),
+                ((2, "method"),),
+            ),
+        )
+        for language, raw, callable_kinds, members in cases:
+            with self.subTest(language=language):
+                snapshot, _, callable_node, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                owner = symbol_id(
+                    snapshot,
+                    (),
+                    SymbolKind.FUNCTION,
+                    "run",
+                )
+                member_spans = tuple(
+                    (name, token_span(snapshot, line, name)) for line, name in members
+                )
+                file_ir = FileIR(
+                    snapshot,
+                    references=tuple(
+                        reference(
+                            owner,
+                            span,
+                            name,
+                            "obj",
+                            ReferenceKind.NAME,
+                            context=ReferenceContext.CODE,
+                            confidence=ReferenceConfidence.DEFINITE,
+                        )
+                        for name, span in member_spans
+                    ),
+                    bodies=(
+                        BodyIR(
+                            owner,
+                            node_span(snapshot, callable_node),
+                            events,
+                        ),
+                    ),
+                )
+
+                assert_body_fact_events(self, file_ir)
+                event_pairs = {(event.kind, event.span) for event in events}
+                for _, span in member_spans:
+                    self.assertIn((BodyEventKind.MEMBER, span), event_pairs)
+                    self.assertIn((BodyEventKind.NAME, span), event_pairs)
+                self.assertEqual(len(events), len(set(events)))
+
+    def test_tree_sitter_type_context_matrix_emits_exact_leaf_spans(self) -> None:
+        cases = (
+            (
+                Language.CSHARP,
+                b"class Probe { void run(Box<Item> value) { visible(value); } }\n",
+                ("method_declaration",),
+                ((1, "Box"), (1, "Item")),
+                (),
+            ),
+            (
+                Language.CSHARP,
+                b"class Probe { void run() { Generic<Item>(); } }\n",
+                ("method_declaration",),
+                ((1, "Item"),),
+                ((1, "Generic"),),
+            ),
+            (
+                Language.CPP,
+                b"void run(Box<Item> value) { visible(value); }\n",
+                ("function_definition",),
+                ((1, "Box"), (1, "Item")),
+                (),
+            ),
+            (
+                Language.KOTLIN,
+                b"fun run(value: Map<Key, Value>) { visible(value) }\n",
+                ("function_declaration",),
+                ((1, "Map"), (1, "Key"), (1, "Value")),
+                (),
+            ),
+            (
+                Language.GO,
+                (
+                    b"package probe\n"
+                    b"func run(values [extent]Element) { visible(values) }\n"
+                ),
+                ("function_declaration",),
+                ((2, "Element"),),
+                ((2, "extent"),),
+            ),
+        )
+        for language, raw, callable_kinds, type_names, value_names in cases:
+            with self.subTest(language=language):
+                snapshot, _, callable_node, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                owner = symbol_id(
+                    snapshot,
+                    (),
+                    SymbolKind.FUNCTION,
+                    "run",
+                )
+                references = tuple(
+                    reference(
+                        owner,
+                        token_span(snapshot, line, name),
+                        name,
+                        None,
+                        ReferenceKind.TYPE,
+                        context=ReferenceContext.TYPE,
+                        confidence=ReferenceConfidence.DEFINITE,
+                    )
+                    for line, name in type_names
+                ) + tuple(
+                    reference(
+                        owner,
+                        token_span(snapshot, line, name),
+                        name,
+                        None,
+                        ReferenceKind.NAME,
+                        context=ReferenceContext.CODE,
+                        confidence=ReferenceConfidence.DEFINITE,
+                    )
+                    for line, name in value_names
+                )
+                file_ir = FileIR(
+                    snapshot,
+                    references=references,
+                    bodies=(
+                        BodyIR(
+                            owner,
+                            node_span(snapshot, callable_node),
+                            events,
+                        ),
+                    ),
+                )
+
+                assert_body_fact_events(self, file_ir)
+                self.assertEqual(len(events), len(set(events)))
+                if b"<" in raw:
+                    self.assertFalse(
+                        any(
+                            event.kind is BodyEventKind.OPERATOR
+                            and event.text in {"<", ">"}
+                            for event in events
+                        )
+                    )
+
+    def test_const_generic_identifiers_remain_name_facts(self) -> None:
+        cases = (
+            (
+                Language.CPP,
+                b"void run(std::array<int, N> values) { visible(values); }\n",
+                ("function_definition",),
+            ),
+            (
+                Language.RUST,
+                b"fn run(values: Array<i32, N>) { visible(values); }\n",
+                ("function_item",),
+            ),
+        )
+        for language, raw, callable_kinds in cases:
+            with self.subTest(language=language):
+                snapshot, _, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                span = token_span(snapshot, 1, "N")
+
+                self.assertIn(
+                    (BodyEventKind.NAME, span),
+                    {(event.kind, event.span) for event in events},
+                )
+
+    def test_nested_type_declarations_are_owner_scoped(self) -> None:
+        cases = (
+            (
+                Language.JAVA,
+                (
+                    b"class Probe { void run() {\n"
+                    b"  class Local { int field = hidden(); }\n"
+                    b"  visible();\n"
+                    b"} }\n"
+                ),
+                ("method_declaration",),
+            ),
+            (
+                Language.TYPESCRIPT,
+                (
+                    b"function run() {\n"
+                    b"  class Local { field = hidden(); }\n"
+                    b"  visible();\n"
+                    b"}\n"
+                ),
+                ("function_declaration",),
+            ),
+        )
+        for language, raw, callable_kinds in cases:
+            with self.subTest(language=language):
+                snapshot, _, _, events = tree_body_fixture(
+                    self,
+                    language,
+                    raw,
+                    callable_kinds,
+                )
+                calls = {
+                    event.text for event in events if event.kind is BodyEventKind.CALL
+                }
+
+                self.assertEqual(calls, {"visible"})
+                self.assertNotIn(
+                    token_span(snapshot, 2, "Local"),
+                    {event.span for event in events},
+                )
 
     def test_tree_sitter_construction_kinds_use_exact_expression_spans(self) -> None:
         cases = (

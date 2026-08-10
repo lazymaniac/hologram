@@ -279,6 +279,7 @@ class _AstBodyEventWalker:
         self.source = source
         self.callable_node = callable_node
         self.events: list[BodyEvent] = []
+        self._events_seen: set[BodyEvent] = set()
 
     def event(
         self,
@@ -288,7 +289,10 @@ class _AstBodyEventWalker:
         *,
         span: SourceSpan | None = None,
     ) -> None:
-        self.events.append(BodyEvent(kind, text, span or ast_span(self.source, node)))
+        event = BodyEvent(kind, text, span or ast_span(self.source, node))
+        if event not in self._events_seen:
+            self._events_seen.add(event)
+            self.events.append(event)
 
     def control(
         self,
@@ -445,12 +449,14 @@ class _AstBodyEventWalker:
             return
         if isinstance(node, ast.Attribute):
             self.visit(node.value)
+            span = self.attribute_span(node)
             self.event(
                 BodyEventKind.MEMBER,
                 node.attr,
                 node,
-                span=self.attribute_span(node),
+                span=span,
             )
+            self.event(BodyEventKind.NAME, node.attr, node, span=span)
             return
         if isinstance(node, ast.Constant):
             self.event(BodyEventKind.LITERAL, _constant_text(node.value), node)
@@ -547,7 +553,7 @@ class _AstBodyEventWalker:
             self.visit_annotation(node.type)
         if node.name:
             span = ast_span(self.source, node)
-            self.events.append(BodyEvent(BodyEventKind.LOCAL, node.name, span))
+            self.event(BodyEventKind.LOCAL, node.name, node, span=span)
         for statement in node.body:
             self.visit(statement)
 
