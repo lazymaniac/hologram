@@ -1,14 +1,14 @@
-import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hologram  # noqa: E402
-from hologram import Symbol, build_digest, render_simple, run_cli  # noqa: E402
+from hologram import Symbol, build_digest, run_cli  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -36,6 +36,15 @@ class StateAndCheckTest(unittest.TestCase):
             run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
             self.assertEqual(hologram._digest_state(out),
                              hologram._state_hash(root))
+
+    def test_generator_change_invalidates_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            with patch.object(hologram, "_generator_fingerprint", return_value=b"one"):
+                before = hologram._state_hash(root)
+            with patch.object(hologram, "_generator_fingerprint", return_value=b"two"):
+                after = hologram._state_hash(root)
+        self.assertNotEqual(before, after)
 
     def test_check_fresh_then_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,7 +79,7 @@ class TestedMarkerTest(unittest.TestCase):
             out = build_digest(root)
         run_line = next(ln for ln in out.splitlines() if "run()" in ln)
         self.assertIn("✓", run_line)                     # named in test file
-        self.assertIn("✓=referenced from tests", out)    # legend
+        self.assertIn("✓=tested", out)
 
     def test_untested_symbol_unmarked(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,14 +106,14 @@ class SizeMarkerTest(unittest.TestCase):
         self.assertNotIn("⋮", small_line)
 
 
-class BehaviorsTest(unittest.TestCase):
-    def test_opt_in_behavior_lines(self):
+class TestIndexTest(unittest.TestCase):
+    def test_test_files_always_listed_without_test_functions(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            plain = build_digest(root)
-            with_b = build_digest(root, behaviors=True)
-        self.assertNotIn("? ", plain.split("legend")[1])
-        self.assertIn("? test_svc: test_run_returns_one", with_b)
+            out = build_digest(root)
+        self.assertIn("? tests", out)
+        self.assertIn("test_svc.py", out)
+        self.assertNotIn("test_run_returns_one", out)
 
 
 class DepsMapTest(unittest.TestCase):
@@ -139,7 +148,7 @@ class EmbedTest(unittest.TestCase):
         self.assertIn("My rules", text)                     # user content kept
         self.assertIn("hologram:start", text)
         self.assertIn("run():int ✓ > _step", text)
-        self.assertIn("whole codebase at a glance", text)
+        self.assertNotIn("whole codebase at a glance", text)
 
     def test_embed_is_idempotent_and_refreshes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,14 +162,20 @@ class EmbedTest(unittest.TestCase):
         self.assertNotIn("run():int", text)
         self.assertTrue(text.startswith("before"))
 
-    def test_degradation_tiers(self):
+    def test_large_digest_is_embedded_exactly_without_degradation(self):
         big = self.DIGEST + "\n".join(
             f"  method{i}(int):int > callee{i},other{i}" for i in range(400))
-        body, tier = hologram._reduce_for_embed(big, max_tokens=2000)
-        self.assertEqual(tier, "types-only")
-        self.assertNotIn("> callee1,", body)                # chains gone
-        self.assertNotIn("method1(int)", body)              # methods gone
-        self.assertIn("Svc(C)", body)                       # shape kept
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "CLAUDE.md"
+            tier = hologram.embed_digest(path, big)
+            embedded = path.read_text()
+        self.assertEqual(tier, "full")
+        self.assertEqual(
+            embedded,
+            f"{hologram._EMBED_START}\n```\n{big.rstrip()}\n```\n"
+            f"{hologram._EMBED_END}\n",
+        )
+        self.assertIn("> callee399,other399", embedded)
 
     def test_cli_build_embed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,6 +186,20 @@ class EmbedTest(unittest.TestCase):
             text = (root / "CLAUDE.md").read_text()
         self.assertIn("hologram:start", text)
         self.assertIn("Svc(C)", text)
+
+    def test_check_and_if_stale_require_exact_embedded_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            out = root / "PROJECT_DIGEST.md"
+            args = ["--root", str(root), "--out", str(out), "--embed", "--quiet"]
+            run_cli(["build", *args])
+            digest_mtime = out.stat().st_mtime_ns
+            claude = root / "CLAUDE.md"
+            claude.write_text(claude.read_text().replace("Svc(C)", "Svc(C) STALE"))
+            self.assertEqual(run_cli(["check", *args]), 1)
+            self.assertEqual(run_cli(["build", "--if-stale", *args]), 0)
+            self.assertEqual(out.stat().st_mtime_ns, digest_mtime)
+            self.assertTrue(hologram._embedded_digest_matches(claude, out.read_text()))
 
 
 class DiffCommandTest(unittest.TestCase):
@@ -184,7 +213,8 @@ class DiffCommandTest(unittest.TestCase):
             (root / "svc.py").write_text(
                 (root / "svc.py").read_text()
                 + "\ndef fresh_fn() -> int:\n    return 9\n")
-            import contextlib, io
+            import contextlib
+            import io
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 code = run_cli(["diff", "HEAD", "--root", str(root), "--quiet"])

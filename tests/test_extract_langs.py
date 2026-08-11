@@ -22,12 +22,14 @@ class PythonExtractTest(unittest.TestCase):
         self.assertEqual(classes, {"UserId", "OrderId", "ItemId"})
         methods = [s for s in syms if s.kind == "method" and s.container == "UserId"]
         self.assertEqual([m.name for m in methods], ["check"])
+        self.assertEqual(next(s for s in syms if s.name == "UserId").fields, ["value"])
 
     def test_function_signature_from_annotations(self):
         syms = extract_file(PYMINI / "app.py", PYMINI)
         fns = {s.name: s for s in syms if s.kind == "fn"}
         self.assertIn("price_order", fns)
         self.assertEqual(fns["price_order"].params, ["OrderId", "list[ItemId]"])
+        self.assertEqual(fns["price_order"].param_names, ["order", "items"])
         self.assertEqual(fns["price_order"].returns, "int")
 
 
@@ -41,12 +43,17 @@ class TypeScriptExtractTest(unittest.TestCase):
         self.assertIn("Quote", by_kind.get("interface", set()))
         self.assertIn("PricingClient", by_kind.get("class", set()))
         self.assertIn("formatCents", by_kind.get("fn", set()))
+        self.assertEqual(next(s for s in syms if s.name == "Quote").fields,
+                         ["orderId", "totalCents"])
+        self.assertEqual(next(s for s in syms if s.name == "PricingClient").fields,
+                         ["baseUrl"])
 
     def test_method_and_returns(self):
         syms = extract_file(TSMINI / "api.ts", TSMINI)
         m = next(s for s in syms if s.name == "fetchQuote")
         self.assertEqual(m.kind, "method")
         self.assertEqual(m.container, "PricingClient")
+        self.assertEqual(m.param_names, ["orderId"])
         self.assertEqual(m.returns, "Promise<Quote>")
 
     def test_exported_symbols_public(self):
@@ -66,6 +73,7 @@ class ArrowFunctionTest(unittest.TestCase):
         self.assertEqual(fn.kind, "fn")
         self.assertEqual(fn.visibility, "pub")
         self.assertEqual(fn.params, ["string"])
+        self.assertEqual(fn.param_names, ["id"])
         self.assertEqual(fn.returns, "Promise<string>")
         self.assertIn("lookup", fn.calls)
 

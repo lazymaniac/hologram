@@ -96,24 +96,24 @@ class TranscriptMetricsTest(unittest.TestCase):
                              "tokens_in": 0, "tokens_out": 0})
 
 
-BEFORE_DIGEST = """# corpus @x 2026-08-08 · 100 LOC · state aaa · regen: x
-· legend: …
+BEFORE_DIGEST = """# hologram · 100 LOC · state aaa
+· C/R/I{fields} E{values} T:target · f(args):Ret > project calls
 src
  math
   MathOps(C)
-   add(Fraction,Fraction):Fraction
-   normalize(List<Fraction>):List<Fraction> > add
+   add(left,right):Fraction
+   normalize(values):List<Fraction> > add
 """
 
 AFTER_REUSED = BEFORE_DIGEST + """\
   Averages(C)
-   weightedAverage(List<Fraction>):Fraction > MathOps.add,normalize
+   weightedAverage(values):Fraction > MathOps.add,normalize
 """
 
 AFTER_DUPLICATED = BEFORE_DIGEST + """\
   Averages(C)
-   normalizeWeights(List<Fraction>):List<Fraction>
-   weightedAverage(List<Fraction>):Fraction > normalizeWeights
+   normalizeWeights(values):List<Fraction>
+   weightedAverage(values):Fraction > normalizeWeights
 """
 
 

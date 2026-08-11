@@ -25,6 +25,7 @@ class GoExtractTest(unittest.TestCase):
         store = next(s for s in self.syms if s.name == "Store")
         self.assertEqual(store.kind, "class")
         self.assertEqual(store.params, ["map[string]Item", "int"])
+        self.assertEqual(store.fields, ["items", "ttl"])
         pricer = next(s for s in self.syms if s.name == "Pricer")
         self.assertEqual(pricer.kind, "interface")
         quote = next(s for s in self.syms if s.name == "Quote")
@@ -34,6 +35,7 @@ class GoExtractTest(unittest.TestCase):
     def test_method_receiver_and_visibility(self):
         get = next(s for s in self.syms if s.name == "Get")
         self.assertEqual(get.container, "Store")
+        self.assertEqual(get.param_names, ["id"])
         self.assertEqual(get.visibility, "pub")
         lookup = next(s for s in self.syms if s.name == "lookup")
         self.assertEqual(lookup.visibility, "priv")
@@ -54,6 +56,7 @@ class RustExtractTest(unittest.TestCase):
         rat = next(s for s in self.syms if s.name == "Rational")
         self.assertEqual(rat.kind, "class")
         self.assertEqual(rat.params, ["i64", "i64"])
+        self.assertEqual(rat.fields, ["num", "den"])
         force = next(s for s in self.syms if s.name == "Force")
         self.assertEqual(force.params, ["Asserted", "Entailed", "Supported"])
         pricer = next(s for s in self.syms if s.name == "Pricer")
@@ -66,6 +69,7 @@ class RustExtractTest(unittest.TestCase):
     def test_impl_methods_and_visibility(self):
         of = next(s for s in self.syms if s.name == "of" and s.container == "Rational")
         self.assertEqual(of.visibility, "pub")
+        self.assertEqual(of.param_names, ["num", "den"])
         self.assertEqual(of.returns, "Rational")
         self.assertIn("Rational", of.calls)          # struct literal = construction
         reduce = next(s for s in self.syms if s.name == "reduce")
@@ -82,15 +86,18 @@ class CSharpExtractTest(unittest.TestCase):
         rec = next(s for s in self.syms if s.name == "OrderId")
         self.assertEqual(rec.kind, "record")
         self.assertEqual(rec.params, ["string"])
+        self.assertEqual(rec.fields, ["Value"])
         status = next(s for s in self.syms if s.name == "Status")
         self.assertEqual(status.params, ["New", "Paid"])
         eng = next(s for s in self.syms if s.name == "PricingEngine")
         self.assertEqual(eng.supers, ["IPricer"])
+        self.assertEqual(eng.fields, ["prices"])
 
     def test_methods_ctor_visibility_calls(self):
         ev = next(s for s in self.syms
                   if s.name == "Evaluate" and s.container == "PricingEngine")
         self.assertEqual(ev.visibility, "pub")
+        self.assertEqual(ev.param_names, ["id"])
         self.assertIn("Compute", ev.calls)
         self.assertIn("Quote", ev.calls)
         comp = next(s for s in self.syms if s.name == "Compute")
@@ -109,6 +116,7 @@ class CExtractTest(unittest.TestCase):
         rat = next(s for s in self.syms if s.name == "Rational")
         self.assertEqual(rat.kind, "class")
         self.assertEqual(rat.params, ["int", "int"])
+        self.assertEqual(rat.fields, ["num", "den"])
         force = next(s for s in self.syms if s.name == "Force")
         self.assertEqual(force.params, ["ASSERTED", "ENTAILED"])
 
@@ -116,6 +124,7 @@ class CExtractTest(unittest.TestCase):
         red = next(s for s in self.syms if s.name == "reduce")
         self.assertEqual(red.visibility, "priv")
         self.assertEqual(red.params, ["Rational*"])
+        self.assertEqual(red.param_names, ["r"])
         add = next(s for s in self.syms if s.name == "rational_add")
         self.assertEqual(add.visibility, "pub")
         self.assertEqual(add.returns, "int")
@@ -128,6 +137,8 @@ class CppExtractTest(unittest.TestCase):
         cls.syms = extract_file(POLY / "sample.cpp", POLY)
 
     def test_class_access_sections(self):
+        engine = next(s for s in self.syms if s.name == "Engine" and s.kind == "class")
+        self.assertEqual(engine.fields, ["prices"])
         ev = next(s for s in self.syms if s.name == "evaluate")
         self.assertEqual(ev.visibility, "pub")
         self.assertEqual(ev.container, "Engine")
@@ -163,6 +174,7 @@ class LuaExtractTest(unittest.TestCase):
         helper = next(s for s in self.syms if s.name == "helper")
         self.assertEqual(helper.visibility, "priv")
         self.assertEqual(helper.params, ["x"])
+        self.assertEqual(helper.param_names, ["x"])
 
 
 @_needs("html")
@@ -208,6 +220,7 @@ class KotlinExtractTest(unittest.TestCase):
         oid = next(s for s in self.syms if s.name == "OrderId")
         self.assertEqual(oid.kind, "record")
         self.assertEqual(oid.params, ["String"])
+        self.assertEqual(oid.fields, ["value"])
         status = next(s for s in self.syms if s.name == "Status")
         self.assertEqual(status.params, ["NEW", "PAID"])
         pricer = next(s for s in self.syms if s.name == "Pricer")
@@ -217,6 +230,7 @@ class KotlinExtractTest(unittest.TestCase):
         eng = next(s for s in self.syms if s.name == "PricingEngine")
         self.assertEqual(eng.supers, ["Pricer"])
         self.assertEqual(eng.params, ["Map<String,Long>"])
+        self.assertEqual(eng.fields, ["prices"])
         quote = next(s for s in self.syms if s.name == "quote"
                      and s.container == "PricingEngine")
         self.assertEqual(quote.visibility, "pub")
