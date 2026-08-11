@@ -21,8 +21,10 @@ class TreeSitterJavaTest(unittest.TestCase):
         t = next(s for s in syms if s.kind == "class")
         self.assertEqual(t.name, "PricingEngine")
         self.assertEqual(t.supers, ["PricePort"])
+        self.assertEqual(t.fields, ["basePrices"])
         ev = next(s for s in syms if s.name == "evaluate")
         self.assertEqual(ev.params, ["OrderId", "List<ItemId>"])
+        self.assertEqual(ev.param_names, ["order", "items"])
         self.assertEqual(ev.returns, "Quote")
         self.assertEqual(ev.raises, ["UnknownItemException"])
         self.assertEqual(ev.container, "PricingEngine")
@@ -31,6 +33,7 @@ class TreeSitterJavaTest(unittest.TestCase):
         syms = self._syms("src/delta/AddOp.java")
         t = next(s for s in syms if s.kind == "record")
         self.assertEqual(t.params, ["String"])
+        self.assertEqual(t.fields, ["nodeId"])
         self.assertEqual(t.supers, ["DeltaOp"])
 
     def test_sealed_permits(self):
@@ -61,6 +64,7 @@ class TreeSitterJavaTest(unittest.TestCase):
         syms = self._syms("src/engine/PricingEngine.java")
         ctor = next(s for s in syms if s.kind == "ctor")
         self.assertEqual(ctor.params, ["Map<ItemId,Long>"])
+        self.assertEqual(ctor.param_names, ["basePrices"])
 
 
 @unittest.skipUnless(hologram.has_parser("java"), "tree-sitter-java not installed")

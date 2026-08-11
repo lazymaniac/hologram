@@ -1,9 +1,9 @@
 # hologram
 
-hologram reads your codebase and writes one small markdown file that describes all of
-it: every type, every signature, every relationship, and who calls what. Give that
-file to an LLM agent and it knows the shape of your project without grepping through
-it first.
+hologram reads your codebase and writes one compact markdown map: public callables,
+type field names, relationships, project-internal calls, private identifiers, and the
+test files/classes that cover the project. Embed it in an agent's context to provide
+the project vocabulary and shape before exploration begins.
 
 It's a single Python file. It installs its own parsers the first time it needs them,
 and git hooks keep the output up to date after every commit. Generation is fully
@@ -11,8 +11,7 @@ deterministic — no LLM involved — so the same code always produces the same 
 and a digest diff always means the code changed.
 
 The name: like a hologram, every fragment of the output carries the shape of the
-whole. For scale: a real 77,000-line Java project with 727 files compresses to about
-20,000 tokens — small enough to hand an agent whole.
+whole. Token cost stays low by choosing compact facts instead of truncating them.
 
 ## What it's for
 
@@ -23,7 +22,8 @@ whole. For scale: a real 77,000-line Java project with 727 files compresses to a
   second one, follows the house conventions, and places code where it belongs.
 - **Code review** — `hologram diff` shows a pull request's API drift on one screen,
   including the near-duplicate helpers that sneak in quietly.
-- **Refactoring** — `×N` fan-in marks show a symbol's blast radius, and the
+- **Refactoring** — `×0` flags functions and classes with no statically observed
+  project references, and the
   `· deps` lines show which modules are coupled, before you start pulling threads.
 - **Debugging** — call chains, private-name lists, and `⋮N` body-size marks point at
   the right file before you open a single one.
@@ -35,58 +35,74 @@ whole. For scale: a real 77,000-line Java project with 727 files compresses to a
 The digest of a small Java fixture:
 
 ```
-# javamini @30ab133 2026-08-08 · 200 LOC · state ca50854aec7c · regen: …/hologram.py build
-· legend: (C)lass (R)ecord (I)nterface (E)num (F)n (T)ype-alias · (R: …)=components · …
+# hologram · 186 LOC · state 817a0445a77f
+· C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb
 · deps .→ids | engine→ids
 src
- App(C)
-  main(String[]) > PricingEngine,PricingEngine.evaluate,OrderId.of,ItemId.of
+ App(C) ×0
+  main(args) ×0 > PricingEngine,evaluate,OrderId.of,ItemId.of
  delta
-  AddOp,RemoveOp(R: String) : DeltaOp
-   weight():int
+  AddOp,RemoveOp(R{nodeId}) : DeltaOp
+   weight():int ×0
+  DeltaOp(I) sealed:AddOp|RemoveOp
+   weight():int ×0
  engine
-  OrderStatus(E: NEW,PAID,SHIPPED)
-  PricingEngine(C: Map<ItemId,Long>) : PricePort
-   evaluate(OrderId,List<ItemId>):Quote !UnknownItem > UnknownItemException,Quote
+  OrderStatus(E{NEW,PAID,SHIPPED})
+   isTerminal():boolean ×0
+  PricePort(I)
+   quoteFor(order):Quote ×0
+   supports(order):boolean ×0
+  PricingEngine(C{basePrices}) : PricePort
+   quoteFor(order):Quote ×0 > evaluate
+   supports(order):boolean ×0
+   evaluate(order,items):Quote !UnknownItem > UnknownItemException,Quote
+  Quote(R{order,totalCents})
+  UnknownItemException(C) : RuntimeException
  ids
-  ItemId,OrderId,UserId(R: String)
-   of(String):⟨X⟩ > ⟨X⟩
+  ItemId,OrderId,UserId(R{value})
+   of(raw):⟨X⟩ > ⟨X⟩
+? tests
+ src/test
+  PricingEngineTest.java{PricingEngineTest,BulkDiscounts}
 ```
 
 Reading it is easier than it looks, and the legend on line 2 teaches the notation to
 any LLM:
 
 - **The tree** mirrors your directory layout, shared path prefixes stated once.
-- **Types** say what they are and what they're made of.
-  `PricingEngine(C: Map<ItemId,Long>) : PricePort` is a class, constructed from that
-  map, implementing `PricePort`. Records list components (`R:`), enums their values
-  (`E:`), type aliases their target (`T:`), sealed interfaces their permitted
-  subtypes.
+- **Types** expose field names rather than redundant field types.
+  `PricingEngine(C{basePrices}) : PricePort` is a class with a `basePrices` field
+  implementing `PricePort`. Records/interfaces use the same braces, enums list
+  values, aliases retain their target, and sealed interfaces retain permitted types.
+- **Functions** show parameter names and return types: `evaluate(order,items):Quote`.
+  Types appear beside names only when overloads would otherwise collide.
 - **Call chains** follow the `>`: what a function calls, in order. Variables resolve
   to their declared types (`PricingEngine.evaluate`, not `engine.evaluate`), standard
   library calls are dropped, and chains are transitively reduced — if `a > b` and
   `b > c`, then `a`'s line doesn't repeat `c`.
-- **Same-shape types group.** `ItemId,OrderId,UserId(R: String)` is a family in one
+- **Same-shape types group.** `ItemId,OrderId,UserId(R{value})` is a family in one
   entry; `⟨X⟩` stands for each member's own name in the methods they share.
-- **Markers**: `✓` = the name appears in the test suite · `⋮120` = the body is 120
-  lines · `×N` = referenced from N other files · `!UnknownItem` = throws
+- **Markers**: `✓` = resolved call from a test · `⋮120` = the body is 120 lines ·
+  `×0` = no statically observed project reference to a function/class/method ·
+  `!UnknownItem` = throws
   (`Exception` suffix implied) · no `:Ret` = returns void · `» index.ts: A,B` =
   barrel re-exports.
-- **Private members** appear as packed name lists: `- rebalance,evict,writeThrough`
-  under a class. Names alone reveal a lot of the internals at a fraction of the cost;
-  `--private` upgrades them to full signatures.
+- **Private members** always appear as names. Repeated prefixes factor losslessly:
+  `_extract_{java,python,typescript}` means those three exact identifiers.
+- **Tests** list every detected test file and its classes. Test functions are omitted
+  because their names cost tokens without improving placement guidance.
 - **`· deps a→b`** = module `a` uses types from module `b`: the import architecture
   without reading imports.
-- **`state`** in the header is a hash of the exact sources the digest was built from —
-  the freshness mechanism described below.
+- **`state`** hashes the exact sources plus the generator, so source or extraction/
+  rendering changes make old maps stale.
 
 ## Languages
 
 | Language | What you get |
 |---|---|
-| Java, C#, TypeScript/JS, TSX/JSX | the full treatment: types, signatures, relations, resolved call chains, constructor deps, privates, type aliases, object-literal APIs, barrel re-exports |
+| Java, C#, TypeScript/JS, TSX/JSX | types with named fields, name-based signatures, relations, resolved calls, privates, aliases, object APIs, re-exports |
 | Python | same, via the standard library's `ast` — zero dependencies |
-| Kotlin | classes, data classes, enums, interfaces, constructor deps, supers, calls |
+| Kotlin | classes, data classes, enums, interfaces, named fields, supers, calls |
 | Go, Rust, C, C++ | types, traits, structs, signatures, calls, receiver bindings |
 | Vue, Svelte | the component plus everything in its `<script>` block |
 | Lua | functions and methods with call chains (params by name — it's untyped) |
@@ -116,8 +132,6 @@ Everything it can do:
 ```bash
 hologram.py build --root .                                 # manual rebuild
 hologram.py build --root . --lang java --out DIGEST.md     # limit languages, pick the filename
-hologram.py build --root . --private                       # full signatures for private members
-hologram.py build --root . --behaviors                     # include test names as behavior specs
 hologram.py build --root . --if-stale                      # rebuild only if the code changed
 hologram.py check --root .                                 # is the digest current? exit 0 yes / 1 no
 hologram.py diff HEAD~3 --root .                           # how did the API change since then?
@@ -149,13 +163,10 @@ hologram.py init --root /path/to/repo --embed
 
 This injects the digest directly into `CLAUDE.md` between managed markers, and
 the git hooks keep the block fresh. Every agent session now *starts* with the
-complete map in its context window — no retrieval decision, no "should I look at
-the file", no attention gamble. That is the point of hologram: the model sees
-the whole system at once, so placement, reuse, and planning decisions are made
-against the full picture rather than whatever grep happened to surface. Repos
-whose digest exceeds the embed budget (`--embed-max-tokens`, default 30k)
-degrade gracefully: call chains drop first, then method lines, keeping the
-system's shape.
+same exact map as `PROJECT_DIGEST.md` in its context window — no alternate compact
+tier and no semantic truncation. Output size is controlled by representation:
+parameter names, field names, resolved project calls, prefix-factored private names,
+and file/class-only test indexing.
 
 **Or keep it on disk** — the digest stays a file the agent queries when it
 chooses to. Weaker (the benchmark below showed agents mostly don't choose to),
@@ -165,11 +176,9 @@ this into `CLAUDE.md` / `AGENTS.md`:
 ```markdown
 ## Project index: PROJECT_DIGEST.md
 
-`PROJECT_DIGEST.md` at the repo root indexes this codebase: every signature,
-type relation, and resolved call chain, one line per symbol. Line 2 is the
-legend. **Query it with grep — never read it linearly.** Unlike grepping
-source, each hit is a complete symbol line (signature, resolved callers,
-markers) with no comment or test noise.
+`PROJECT_DIGEST.md` indexes public signatures, named type fields, resolved project
+calls, private identifiers, and test locations. Line 2 explains the notation.
+Query it with grep when it is not embedded.
 
 The queries and when to run them:
 - **Who calls X** (before changing or removing X):
@@ -178,19 +187,19 @@ The queries and when to run them:
 - **Does something like this already exist** (before writing ANY new helper):
   grep concept synonyms over the inventory, e.g.
   `grep -i "trim\|blank\|strip" PROJECT_DIGEST.md` — then reuse what you find.
-- **Which candidate is canonical**: prefer lines marked `✓` (referenced from
-  tests) and `×N` (used from N files).
+- **Which candidate is canonical**: prefer lines marked `✓` (called by tests).
 - **Where does new code belong**: the tree shows packages, `· deps a→b` shows
-  module coupling, grouped families (`AId,BId(R: UUID)`) are the house
+  module coupling, grouped families (`AId,BId(R{value})`) are the house
   conventions — extend a family, don't invent a parallel one.
 - **Where does behavior live** (debugging): a class's `- name,name` line lists
-  its private internals and `⋮N` marks heavy bodies — open those files first.
+  its private internals and `⋮N` marks heavy bodies; `? tests` gives test files
+  and classes.
 
 Rules:
 - It says what exists, not what works — read the source before wiring anything
   critical. `✓` means a test names the symbol, nothing more.
-- Freshness: rerun the header's regen command with `--if-stale` (instant when
-  fresh), or `check` for exit 0/1.
+- Freshness: run `hologram.py build --if-stale` (instant when fresh), or `check`
+  for exit 0/1.
 ```
 
 ## Does it actually help? An honest take
@@ -205,9 +214,9 @@ real counterweight: "does this already exist?" becomes something the agent answe
 reading, instead of something it only catches by grepping the exact right word. And
 because the digest shows your conventions — all your ID types are one-field records,
 your services take dependencies through constructors — a model tends to extend the
-patterns it sees rather than invent parallel ones. Private-name lists and `⋮` weight
-marks tell it which file to open first when debugging. All of this arrives at around
-20k tokens for a mid-sized codebase, paid only when the agent actually reads the file.
+patterns it sees rather than invent parallel ones. Factored private names, concise
+call lines, and the test index tell it which file to open first without a raw symbol
+dump.
 
 **The caveats.** None of this is enforced. The digest competes for the model's
 attention like everything else in context, and an agent can ignore it and reimplement

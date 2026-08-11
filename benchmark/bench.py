@@ -16,7 +16,6 @@ import shutil
 import statistics
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -153,16 +152,15 @@ def judge_reuse(before: str, after: str, expect_reuse: list[str]) -> dict:
 
 _AGENT_SNIPPET = """## Project index: PROJECT_DIGEST.md
 
-`PROJECT_DIGEST.md` at the repo root indexes this codebase, one line per symbol.
-**Query it with grep — never read it linearly.** Each hit is a complete symbol
-line (signature, resolved callers, markers), with no comment/test noise.
+`PROJECT_DIGEST.md` indexes public signatures, named fields, resolved project calls,
+private identifiers, and test files/classes. Query it with grep when needed.
 
 - Who calls X (before changing X): `grep "> .*X" PROJECT_DIGEST.md` — one line
   per caller, receivers resolved to types; source grep cannot answer this.
 - Does something like X exist (before writing ANY new helper): grep concept
   synonyms over it (`grep -i "trim\\|blank\\|strip" PROJECT_DIGEST.md`), reuse
   what you find.
-- Canonical choice: prefer `✓` (tested) and `×N` (widely used) lines.
+- Canonical choice: prefer `✓` (called by tests) lines.
 - Placement: the tree + `· deps a→b` + grouped families show where code belongs.
 - Debugging: a class's `- name,name` line lists private internals; `⋮N` marks
   heavy bodies. Open those files first.
@@ -268,8 +266,8 @@ def report(rows: list[dict]) -> str:
                     if reuse else 0)
         acc = 100 * sum(1 for r in rs if r["accepted"]) / len(rs)
 
-        def mean(key):
-            return statistics.fmean(r[key] for r in rs)
+        def mean(key, rows=rs):
+            return statistics.fmean(r[key] for r in rows)
 
         dh = statistics.fmean(r.get("digest_hits", 0) for r in rs)
         lines.append(
