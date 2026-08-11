@@ -81,7 +81,6 @@ class LanguageDetectionTest(unittest.TestCase):
         self.assertIs(hologram.ScanStatus, ScanStatus)
         self.assertIs(hologram.scan_project, scan_project)
         self.assertIs(detect_language(Path("main.py")), Language.PYTHON)
-        self.assertEqual(hologram.legacy.detect_language(Path("main.py")), "python")
 
 
 class ScanValueTest(unittest.TestCase):
@@ -755,47 +754,6 @@ class SnapshotFailureTest(unittest.TestCase):
             self.assertFalse(result.complete)
             self.assertFalse(result.sources)
             self.assertNotIn(outside_raw, [source.raw for source in result.sources])
-
-
-class LegacyAdapterTest(unittest.TestCase):
-    def test_scan_files_returns_scanner_source_paths(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "main.py"
-            source.write_text("MAIN = True\n")
-
-            self.assertEqual(
-                [source.resolve()],
-                hologram.legacy.scan_files(root, _config(exclude=())),
-            )
-
-    def test_scan_files_exits_with_scanner_diagnostics_when_incomplete(self) -> None:
-        diagnostic = Diagnostic(
-            "scan-read-error",
-            DiagnosticSeverity.ERROR,
-            "main.py: could not read source",
-        )
-        failed = ScanResult(
-            [
-                ScanEntry(
-                    Path("/repo/main.py"),
-                    "main.py",
-                    Language.PYTHON,
-                    ScanStatus.FAILED,
-                    "read-error",
-                    None,
-                )
-            ],
-            [diagnostic],
-            False,
-        )
-
-        with mock.patch.object(
-            hologram.legacy.scan,
-            "scan_project",
-            return_value=failed,
-        ), self.assertRaisesRegex(SystemExit, "could not read source"):
-            hologram.legacy.scan_files(Path("/repo"), default_config())
 
 
 if __name__ == "__main__":

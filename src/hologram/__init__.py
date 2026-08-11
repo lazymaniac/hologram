@@ -30,12 +30,10 @@ from .model import (
     SourceFile,
     SourceRole,
     SourceSpan,
+    Symbol,
     SymbolId,
     SymbolKind,
     Visibility,
-)
-from .model import (
-    Symbol as CanonicalSymbol,
 )
 from .scan import ScanEntry, ScanResult, ScanStatus, detect_language, scan_project
 from .state import (
@@ -46,25 +44,6 @@ from .state import (
 )
 
 __version__ = "0.2.0"
-
-_LEGACY_COMPAT_NAMES = frozenset(
-    {
-        "Symbol",
-        "_digest_state",
-        "_hook_python",
-        "_reduce_for_embed",
-        "_state_hash",
-        "_tree_lines",
-        "build_digest",
-        "embed_digest",
-        "extract_file",
-        "has_parser",
-        "legacy",
-        "render_simple",
-        "run_cli",
-        "scan_files",
-    }
-)
 
 _RESOLVE_NAMES = frozenset(
     {
@@ -116,7 +95,6 @@ __all__ = [
     "BuildSnapshot",
     "CallKind",
     "CallRef",
-    "CanonicalSymbol",
     "ConfigError",
     "Diagnostic",
     "DiagnosticSeverity",
@@ -149,7 +127,6 @@ __all__ = [
     "Visibility",
     "__version__",
     "analyze_project",
-    "build_digest",
     "build_project",
     "canonical_config_bytes",
     "canonical_type_key",
@@ -157,24 +134,18 @@ __all__ = [
     "decode_render",
     "default_config",
     "detect_language",
-    "embed_digest",
-    "extract_file",
-    "has_parser",
     "load_config",
     "project_render_ir",
     "read_digest_state",
     "render_config",
     "render_project",
-    "render_simple",
     "resolve_project",
-    "run_cli",
-    "scan_files",
     "scan_project",
 ]
 
 
 def __getattr__(name: str):
-    """Load modular APIs lazily and retain the temporary v1 compatibility surface."""
+    """Load modular phase APIs lazily."""
     if name in _PIPELINE_NAMES:
         value = getattr(import_module(".pipeline", __name__), name)
         globals()[name] = value
@@ -191,9 +162,4 @@ def __getattr__(name: str):
         value = getattr(import_module(".render", __name__), name)
         globals()[name] = value
         return value
-    if name not in _LEGACY_COMPAT_NAMES:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    legacy = import_module(".legacy", __name__)
-    value = legacy if name == "legacy" else getattr(legacy, name)
-    globals()[name] = value
-    return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

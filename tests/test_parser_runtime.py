@@ -709,6 +709,7 @@ class ParserRuntimeTest(unittest.TestCase):
     ) -> None:
         code = """
 import sys
+import importlib.util
 for name in tuple(sys.modules):
     if name == 'hologram' or name.startswith('hologram.'):
         del sys.modules[name]
@@ -727,14 +728,15 @@ forbidden = {
     'tree_sitter_html',
 }
 loaded = sorted(forbidden.intersection(sys.modules))
-legacy = sorted(name for name in sys.modules if name == 'hologram.legacy')
 extractors = sorted(
     name for name in sys.modules
     if name.startswith('hologram.parsers.')
     and name.rsplit('.', 1)[-1] not in {'api', 'common', 'treesitter'}
 )
-if loaded or legacy or extractors:
-    raise SystemExit(f'eager imports: {loaded!r} {legacy!r} {extractors!r}')
+if importlib.util.find_spec('hologram.legacy') is not None:
+    raise SystemExit('legacy module still exists')
+if loaded or extractors:
+    raise SystemExit(f'eager imports: {loaded!r} {extractors!r}')
 if parsers.ParserRegistry is not hologram.parsers.ParserRegistry:
     raise SystemExit('canonical parser package mismatch')
 """

@@ -4,7 +4,6 @@ import unittest
 from pathlib import Path
 
 import hologram
-from hologram import legacy as legacy_model
 from hologram import model as canonical_model
 from hologram.model import (
     Binding,
@@ -34,9 +33,8 @@ from hologram.model import (
 
 
 class ModelTests(unittest.TestCase):
-    def test_root_exports_distinguish_legacy_and_canonical_symbols(self) -> None:
-        self.assertIs(legacy_model.Symbol, hologram.Symbol)
-        self.assertIs(canonical_model.Symbol, hologram.CanonicalSymbol)
+    def test_root_exports_the_canonical_symbol(self) -> None:
+        self.assertIs(canonical_model.Symbol, hologram.Symbol)
 
     def test_source_span_rejects_non_normalized_file_paths(self) -> None:
         for file in (".", "./a.py", "a//b.py", "a/./b.py"):

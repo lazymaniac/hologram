@@ -1204,7 +1204,8 @@ class SelfConfigTest(unittest.TestCase):
             "not supported",
             "supported source that cannot be read",
             "v2 CLI orchestration",
-            "temporary legacy library compatibility",
+            "retired v1 library entry points",
+            "have been removed",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, readme)

@@ -2,6 +2,7 @@ import subprocess
 import sys
 import tomllib
 import unittest
+from importlib.util import find_spec
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +11,10 @@ ROOT = Path(__file__).resolve().parents[1]
 class PackageLayoutTest(unittest.TestCase):
     def test_root_monolith_is_removed(self):
         self.assertFalse((ROOT / "hologram.py").exists())
+
+    def test_legacy_module_is_removed(self):
+        self.assertFalse((ROOT / "src" / "hologram" / "legacy.py").exists())
+        self.assertIsNone(find_spec("hologram.legacy"))
 
     def test_import_resolves_to_src_package(self):
         import hologram

@@ -211,8 +211,10 @@ assert hologram.decode_render(text) == render_ir
 ```
 
 The v2 CLI orchestration, atomic writers, hook helpers, and semantic-diff internals
-are not package-root exports. A temporary legacy library compatibility surface,
-including `run_cli`, remains available during migration; it is not the v2 CLI API.
+are not package-root exports. The retired v1 library entry points—including
+`run_cli`, `build_digest`, `render_simple`, and the legacy path-based
+`extract_file`—have been removed. Use `hologram.cli`, the canonical phase APIs
+above, and `hologram.parsers.extract_file` instead.
 
 ## Languages
 

@@ -11,8 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 import hologram
-from hologram import legacy
-from hologram.config import CONFIG_NAME, default_config, render_config
+from hologram.config import default_config
 from hologram.model import (
     Diagnostic,
     DiagnosticSeverity,
@@ -451,129 +450,6 @@ class PipelineTest(unittest.TestCase):
                 ):
                     snapshot = build_project(self.root, self.config)
                 self.assertEqual(snapshot.complete, expected)
-
-
-class LegacyPipelineAdapterTest(unittest.TestCase):
-    def setUp(self) -> None:
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name) / "project"
-        self.root.mkdir()
-        self.config = default_config()
-        self.path = self.root / "main.py"
-        self.path.write_text(
-            "def target():\n    return 1\n\ndef caller():\n    print(target())\n",
-        )
-
-    def test_gather_consumes_one_snapshot_and_only_resolved_calls(self) -> None:
-        snapshot = build_project(self.root, self.config).require_complete()
-        original = snapshot.project.files[0].source
-        self.path.write_text("changed_after_snapshot = True\n")
-        with (
-            mock.patch(
-                "hologram.legacy.build_project", return_value=snapshot
-            ) as builder,
-            mock.patch(
-                "hologram.legacy.scan.scan_project",
-                side_effect=AssertionError("legacy scan"),
-            ),
-            mock.patch(
-                "hologram.legacy.extract_canonical_file",
-                side_effect=AssertionError("legacy extraction"),
-            ),
-            mock.patch.object(
-                Path,
-                "read_text",
-                side_effect=AssertionError("source path reread"),
-            ),
-        ):
-            files, symbols, tokens, state, loc = legacy._gather(
-                self.root,
-                None,
-                self.config,
-            )
-
-        builder.assert_called_once_with(self.root.resolve(), self.config)
-        self.assertEqual(files, [original.path])
-        self.assertIn("target", tokens["main.py"])
-        self.assertNotIn("changed_after_snapshot", tokens["main.py"])
-        self.assertEqual(loc, original.text.count("\n") + 1)
-        self.assertEqual(
-            state,
-            legacy._legacy_state(
-                snapshot.state.value,
-                private_sigs=False,
-                behaviors=False,
-            ),
-        )
-        caller = next(symbol for symbol in symbols if symbol.name == "caller")
-        self.assertEqual(caller.calls, ["target"])
-
-    def test_direct_build_digest_loads_the_root_manifest(self) -> None:
-        ignored = self.root / "ignored.py"
-        ignored.write_text("def should_not_appear():\n    return 2\n")
-        configured = dataclasses.replace(self.config, exclude=("ignored.py",))
-        (self.root / CONFIG_NAME).write_text(
-            render_config(configured),
-            encoding="utf-8",
-        )
-
-        digest = legacy.build_digest(self.root)
-
-        self.assertNotIn("should_not_appear", digest)
-
-    def test_state_and_digest_reuse_supplied_snapshot(self) -> None:
-        snapshot = build_project(self.root, self.config).require_complete()
-        with mock.patch(
-            "hologram.legacy.build_project",
-            side_effect=AssertionError("second snapshot"),
-        ):
-            state = legacy._state_hash(
-                self.root,
-                self.config,
-                snapshot=snapshot,
-            )
-            digest = legacy._build_digest(
-                self.root,
-                "hologram build",
-                None,
-                False,
-                False,
-                self.config,
-                snapshot=snapshot,
-            )
-        self.assertEqual(
-            state,
-            legacy._legacy_state(
-                snapshot.state.value,
-                private_sigs=False,
-                behaviors=False,
-            ),
-        )
-        self.assertIn(f"state={state}", digest.splitlines()[0])
-
-    def test_incomplete_gather_raises_the_shared_exception(self) -> None:
-        broken = self.root / "broken.py"
-        broken.write_text("def broken(:\n")
-        snapshot = build_project(self.root, self.config)
-        self.assertFalse(snapshot.complete)
-        with (
-            mock.patch("hologram.legacy.build_project", return_value=snapshot),
-            self.assertRaises(IncompleteBuildError) as raised,
-        ):
-            legacy._gather(self.root, None, self.config)
-        self.assertIs(raised.exception.snapshot, snapshot)
-
-    def test_legacy_gather_has_no_direct_pipeline_phase_calls(self) -> None:
-        source = inspect.getsource(legacy._gather)
-        for forbidden in (
-            "scan_project",
-            "extract_file",
-            "compute_state",
-            "_missing_parser_langs",
-            "_bootstrap_or_die",
-        ):
-            self.assertNotIn(forbidden, source)
 
 
 if __name__ == "__main__":

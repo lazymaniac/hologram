@@ -13,6 +13,7 @@ from unittest import mock
 import hologram
 from hologram import analysis, pipeline, render
 from hologram.config import ProjectConfig, default_config
+from hologram.parsers.api import DEFAULT_REGISTRY
 from hologram.resolve import ResolutionStatus
 from validation.metrics import (
     Metric,
@@ -313,7 +314,8 @@ class ObservedFactTest(unittest.TestCase):
         )
 
     @unittest.skipUnless(
-        hologram.has_parser("typescript"), "tree-sitter-typescript not installed"
+        DEFAULT_REGISTRY.has_parser(hologram.Language.TYPESCRIPT),
+        "tree-sitter-typescript not installed",
     )
     def test_typescript_signature_facts_are_structurally_canonical(self) -> None:
         raw = """\

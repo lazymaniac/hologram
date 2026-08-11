@@ -21,7 +21,7 @@ from hologram.model import (
     SymbolKind,
     Visibility,
 )
-from hologram.parsers.api import extract_file, extract_project
+from hologram.parsers.api import DEFAULT_REGISTRY, extract_file, extract_project
 from hologram.parsers.common import validate_body_events
 from tests.parser_assertions import assert_body_fact_events
 
@@ -158,7 +158,9 @@ def symbol(result: FileIR, name: str, kind: SymbolKind | None = None):
     return found
 
 
-@unittest.skipUnless(hologram.has_parser("java"), "tree-sitter-java not installed")
+@unittest.skipUnless(
+    DEFAULT_REGISTRY.has_parser(Language.JAVA), "tree-sitter-java not installed"
+)
 class JavaParserTest(unittest.TestCase):
     def test_valid_package_imports_calls_bindings_and_snapshot_are_exact(self) -> None:
         source = snapshot(VALID_IMPORTS, path=Path("/missing/src/App.java"))
@@ -874,7 +876,7 @@ enum Shade {
         )
         self.assertEqual(shade_constructor.visibility, Visibility.PRIVATE)
 
-    def test_java_legacy_calls_keep_v1_projection_without_losing_canonical_facts(
+    def test_java_calls_preserve_composite_and_construction_shapes(
         self,
     ) -> None:
         raw = b"""\
@@ -904,15 +906,7 @@ class Probe {
             ],
         )
 
-        legacy = hologram.extract_file(
-            Path("/repo/src/Probe.java"),
-            Path("/repo"),
-            text=raw.decode(),
-        )
-        legacy_execute = next(item for item in legacy if item.name == "execute")
-        self.assertEqual(legacy_execute.calls, ["run", "service.get", "p.Foo"])
-
-    def test_java_legacy_calls_drop_this_and_super_receivers(self) -> None:
+    def test_java_calls_preserve_this_and_super_receivers(self) -> None:
         raw = b"""\
 class Probe extends Parent {
   void execute() {
@@ -937,18 +931,12 @@ class Probe extends Parent {
             ],
         )
 
-        legacy = hologram.extract_file(
-            Path("/repo/src/Probe.java"),
-            Path("/repo"),
-            text=raw.decode(),
-        )
-        legacy_execute = next(item for item in legacy if item.name == "execute")
-        self.assertEqual(legacy_execute.calls, ["own", "base"])
-
     def test_package_root_no_longer_exposes_private_java_extractor(self) -> None:
         self.assertNotIn("_extract_java", hologram.__dict__)
         with self.assertRaises(AttributeError):
             hologram.__getattr__("_extract_java")
+        with self.assertRaises(AttributeError):
+            hologram.__getattr__("extract_file")
 
 
 if __name__ == "__main__":

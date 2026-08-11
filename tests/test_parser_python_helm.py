@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import tempfile
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
@@ -10,7 +9,6 @@ from typing import cast
 from unittest.mock import patch
 
 import hologram.parsers.python as python_parser
-from hologram import legacy
 from hologram.model import (
     Binding,
     BodyEvent,
@@ -395,7 +393,7 @@ def variadic(a, *rest, **kwargs):
         self.assertEqual(result.diagnostics[0].severity, DiagnosticSeverity.ERROR)
         assert_body_fact_events(self, result)
 
-    def test_pymini_legacy_projection_preserves_the_frozen_v1_surface(self) -> None:
+    def test_pymini_calls_preserve_canonical_source_order(self) -> None:
         canonical = extract_file(
             fixture_snapshot(
                 PYMINI,
@@ -411,17 +409,6 @@ def variadic(a, *rest, **kwargs):
         self.assertEqual(
             [call.name for call in canonical.calls if call.caller == canonical_bulk.id],
             ["ItemId", "range", "price_order", "OrderId"],
-        )
-
-        projected = legacy.extract_file(PYMINI / "test_app.py", PYMINI)
-        legacy_bulk = next(
-            symbol
-            for symbol in projected
-            if symbol.name == "test_bulk_orders_get_discount"
-        )
-        self.assertEqual(
-            legacy_bulk.calls,
-            ["ItemId", "price_order", "range", "OrderId"],
         )
 
     def test_recognized_dynamic_strings_join_name_events_and_keep_literals(
@@ -594,31 +581,6 @@ def outer(items, flag):
             6,
         )
         assert_body_fact_events(self, result)
-
-    def test_legacy_projection_aggregates_nested_python_calls_in_ast_walk_order(
-        self,
-    ) -> None:
-        raw = b"""\
-def outer():
-    def inner():
-        nested_call()
-    class Local:
-        def method(self):
-            class_call()
-    callback = lambda: lambda_call()
-    direct_call()
-"""
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            path = root / "nested.py"
-            path.write_bytes(raw)
-            projected = legacy.extract_file(path, root)
-
-        outer = next(symbol for symbol in projected if symbol.name == "outer")
-        self.assertEqual(
-            outer.calls,
-            ["direct_call", "nested_call", "lambda_call", "class_call"],
-        )
 
     def test_annotation_context_references_are_explicitly_possible(self) -> None:
         result = extract_file(
@@ -1047,14 +1009,6 @@ class HelmParserTest(unittest.TestCase):
         self.assertEqual([call.name for call in result.calls], ["target"])
         assert_body_fact_events(self, result)
 
-    def test_legacy_helm_projection_keeps_zero_body_lines(self) -> None:
-        projected = legacy.extract_file(
-            POLYGLOT / "chart/templates/_helpers.tpl",
-            POLYGLOT,
-        )
-
-        self.assertEqual([symbol.size for symbol in projected], [0, 0])
-
     def test_action_scanner_ignores_comments_and_keeps_quoted_delimiters(
         self,
     ) -> None:
@@ -1277,14 +1231,6 @@ class HelmParserTest(unittest.TestCase):
         for _, call_span in expected_calls:
             self.assertIn((BodyEventKind.CALL, call_span), event_pairs)
         assert_body_fact_events(self, result)
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            path = root / result.source.file
-            path.parent.mkdir(parents=True)
-            path.write_bytes(raw)
-            projected = legacy.extract_file(path, root)
-        self.assertEqual(projected[0].calls, [])
-
     def test_helm_root_values_are_valid_pipeline_operands(self) -> None:
         raw = b"""\
 {{define "rooted"}}
@@ -1506,14 +1452,6 @@ class HelmParserTest(unittest.TestCase):
         self.assertEqual([symbol.name for symbol in result.symbols], ["foó", "plain"])
         self.assertEqual(result.symbols[0].span.start_column, 0)
         self.assertEqual(result.symbols[0].span.end_column, len("foó".encode()))
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            path = root / "chart/values.yaml"
-            path.parent.mkdir()
-            path.write_bytes(raw)
-            projected = legacy.extract_file(path, root)
-        self.assertEqual([symbol.name for symbol in projected], ["foó", "plain"])
-
 
 if __name__ == "__main__":
     unittest.main()

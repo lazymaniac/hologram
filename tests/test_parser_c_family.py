@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import hologram
 from hologram.model import (
     Binding,
     BodyEventKind,
@@ -17,7 +16,7 @@ from hologram.model import (
     SymbolKind,
     Visibility,
 )
-from hologram.parsers.api import extract_file
+from hologram.parsers.api import DEFAULT_REGISTRY, extract_file
 from hologram.parsers.common import validate_body_events
 from tests.parser_assertions import assert_body_fact_events
 
@@ -162,7 +161,9 @@ def symbols(result, name: str, kind: SymbolKind | None = None):
     ]
 
 
-@unittest.skipUnless(hologram.has_parser("c"), "tree-sitter-c not installed")
+@unittest.skipUnless(
+    DEFAULT_REGISTRY.has_parser(Language.C), "tree-sitter-c not installed"
+)
 class CParserTest(unittest.TestCase):
     def test_includes_typedefs_fields_constants_and_snapshot_are_canonical(
         self,
@@ -263,7 +264,9 @@ class CParserTest(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(hologram.has_parser("cpp"), "tree-sitter-cpp not installed")
+@unittest.skipUnless(
+    DEFAULT_REGISTRY.has_parser(Language.CPP), "tree-sitter-cpp not installed"
+)
 class CppParserTest(unittest.TestCase):
     def test_namespace_nested_types_fields_bases_access_and_attributes(self) -> None:
         result = extract_file(snapshot(CPP_SOURCE, Language.CPP, "src/engine.cpp"))

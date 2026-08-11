@@ -5,8 +5,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import hologram
-from hologram.legacy import extract_file as extract_legacy_file
 from hologram.model import (
     Binding,
     BodyEventKind,
@@ -19,7 +17,7 @@ from hologram.model import (
     SymbolKind,
     Visibility,
 )
-from hologram.parsers.api import extract_file
+from hologram.parsers.api import DEFAULT_REGISTRY, extract_file
 from hologram.parsers.common import validate_body_events
 from hologram.scan import detect_language
 from tests.parser_assertions import assert_body_fact_events
@@ -96,7 +94,9 @@ def symbol(result, name: str, kind: SymbolKind | None = None):
     )
 
 
-@unittest.skipUnless(hologram.has_parser("lua"), "tree-sitter-lua not installed")
+@unittest.skipUnless(
+    DEFAULT_REGISTRY.has_parser(Language.LUA), "tree-sitter-lua not installed"
+)
 class LuaParserTest(unittest.TestCase):
     def test_requires_module_constants_and_snapshot_are_canonical(self) -> None:
         source = snapshot(LUA_SOURCE, Language.LUA, "src/pricing.lua")
@@ -583,23 +583,9 @@ return {
         setup = symbol(result, "setup", SymbolKind.METHOD)
         self.assertEqual(setup.id.container_path, ())
 
-    def test_v1_nested_method_container_preserves_the_full_qualifier(self) -> None:
-        raw = """\
-local A = {}
-A.B = {}
-function A.B.run(value)
-    return value
-end
-return A
-"""
-        root = Path("/project")
-        projected = extract_legacy_file(root / "nested.lua", root, text=raw)
-        run = next(item for item in projected if item.name == "run")
-
-        self.assertEqual(run.container, "A.B")
-
-
-@unittest.skipUnless(hologram.has_parser("html"), "tree-sitter-html not installed")
+@unittest.skipUnless(
+    DEFAULT_REGISTRY.has_parser(Language.HTML), "tree-sitter-html not installed"
+)
 class HtmlParserTest(unittest.TestCase):
     def test_ids_and_custom_elements_are_mixed_order_exact_and_bodyless(self) -> None:
         source = snapshot(HTML_SOURCE, Language.HTML, "web/page.html")

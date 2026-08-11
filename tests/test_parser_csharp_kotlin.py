@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import hologram
 from hologram.model import (
     Binding,
     BodyEventKind,
@@ -20,7 +19,7 @@ from hologram.model import (
     SourceSpan,
     SymbolKind,
 )
-from hologram.parsers.api import extract_file, extract_project
+from hologram.parsers.api import DEFAULT_REGISTRY, extract_file, extract_project
 from hologram.parsers.common import validate_body_events
 from hologram.resolve import ResolutionStatus, resolve_project
 from tests.parser_assertions import assert_body_fact_events
@@ -104,7 +103,10 @@ def symbol(result, name: str, kind: SymbolKind | None = None):
     )
 
 
-@unittest.skipUnless(hologram.has_parser("csharp"), "tree-sitter-c-sharp not installed")
+@unittest.skipUnless(
+    DEFAULT_REGISTRY.has_parser(Language.CSHARP),
+    "tree-sitter-c-sharp not installed",
+)
 class CSharpParserTest(unittest.TestCase):
     def test_namespace_alias_imports_types_members_and_snapshot_are_canonical(
         self,
@@ -201,27 +203,6 @@ class CSharpParserTest(unittest.TestCase):
         )
         self.assertEqual(
             {item.id for item in result.symbols}, {item.id for item in shifted.symbols}
-        )
-
-    def test_legacy_projection_filters_new_members_and_strips_this(self) -> None:
-        projected = hologram.extract_file(
-            Path("/repo/src/Outer.cs"),
-            Path("/repo"),
-            text=CSHARP_SOURCE.decode(),
-        )
-        names = {item.name for item in projected}
-        run = next(
-            item
-            for item in projected
-            if item.name == "Run" and item.container == "Outer"
-        )
-
-        self.assertTrue({"Outer", "Inner", "Work"}.issubset(names))
-        self.assertTrue({"Value", "Name", "Limit"}.isdisjoint(names))
-        self.assertEqual(run.calls, ["Quote", "id.Valid", "Help"])
-        self.assertEqual(
-            run.bindings,
-            {"Limit": "int", "id": "OrderId", "x": "Quote"},
         )
 
     def test_all_namespaces_accessors_and_anonymous_facts_have_exact_owners(
@@ -357,17 +338,6 @@ namespace Beta { public class Same {} }
             {item.id for item in shifted.symbols},
         )
 
-        projected = hologram.extract_file(
-            Path("/repo/src/Gaps.cs"),
-            Path("/repo"),
-            text=raw.decode(),
-        )
-        projected_constructor = next(
-            item for item in projected if item.kind == "ctor"
-        )
-        self.assertEqual(projected_constructor.size, 0)
-        self.assertFalse(any(item.name in {"get", "set"} for item in projected))
-
     def test_utf8_exact_end_spans_and_reference_provenance(self) -> None:
         line = "    public Quote Run(OrderId é) => é.Valid();".encode()
         raw = b"namespace Utf;\npublic class C {\n" + line + b"\n}\n"
@@ -486,7 +456,10 @@ namespace Beta { public class Same {} }
         )
 
 
-@unittest.skipUnless(hologram.has_parser("kotlin"), "tree-sitter-kotlin not installed")
+@unittest.skipUnless(
+    DEFAULT_REGISTRY.has_parser(Language.KOTLIN),
+    "tree-sitter-kotlin not installed",
+)
 class KotlinParserTest(unittest.TestCase):
     def test_package_imports_types_components_nested_members_and_constants(
         self,
@@ -618,27 +591,6 @@ class KotlinParserTest(unittest.TestCase):
             {item.id for item in result.symbols}, {item.id for item in shifted.symbols}
         )
 
-    def test_legacy_projection_filters_constructors_and_collapses_receivers(
-        self,
-    ) -> None:
-        projected = hologram.extract_file(
-            Path("/repo/src/Outer.kt"),
-            Path("/repo"),
-            text=KOTLIN_SOURCE.decode(),
-        )
-        names = {item.name for item in projected}
-        run = next(
-            item
-            for item in projected
-            if item.name == "run" and item.container == "Outer"
-        )
-
-        self.assertFalse(any(item.kind == "ctor" for item in projected))
-        self.assertNotIn("Companion", names)
-        self.assertTrue({"Outer", "Inner", "work"}.issubset(names))
-        self.assertEqual(run.calls, ["get", "Engine", "id.valid", "help"])
-        self.assertEqual(run.bindings, {"name": "String", "id": "OrderId"})
-
     def test_type_alias_enum_extensions_and_anonymous_facts_are_canonical(
         self,
     ) -> None:
@@ -750,15 +702,6 @@ fun outer(input: OrderId) {
             len(result.bodies), len({item.owner for item in result.bodies})
         )
         assert_body_fact_events(self, result)
-
-        projected = hologram.extract_file(
-            Path("/repo/src/Gaps.kt"),
-            Path("/repo"),
-            text=raw.decode(),
-        )
-        projected_extensions = [item for item in projected if item.name == "tag"]
-        self.assertEqual([item.params for item in projected_extensions], [[], []])
-        self.assertEqual([item.container for item in projected_extensions], [None, None])
 
     def test_utf8_exact_end_spans_and_reference_provenance(self) -> None:
         line = "fun café(é: OrderId): Quote = é.valid()".encode()
@@ -907,7 +850,7 @@ class CSharpKotlinSyntaxDiagnosticTest(unittest.TestCase):
             ),
         )
         for language, file, raw, error_span, names, callable_name, body_span in cases:
-            if not hologram.has_parser(language.value):
+            if not DEFAULT_REGISTRY.has_parser(language):
                 continue
             with self.subTest(language=language):
                 source = snapshot(raw, language, file)

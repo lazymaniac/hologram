@@ -5,7 +5,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import hologram
 from hologram.model import (
     Binding,
     BodyEventKind,
@@ -21,7 +20,7 @@ from hologram.model import (
     SymbolKind,
     Visibility,
 )
-from hologram.parsers.api import extract_file, extract_project
+from hologram.parsers.api import DEFAULT_REGISTRY, extract_file, extract_project
 from hologram.parsers.common import validate_body_events
 from tests.parser_assertions import assert_body_fact_events
 
@@ -116,7 +115,9 @@ def symbol(result, name: str, kind: SymbolKind | None = None):
     )
 
 
-@unittest.skipUnless(hologram.has_parser("go"), "tree-sitter-go not installed")
+@unittest.skipUnless(
+    DEFAULT_REGISTRY.has_parser(Language.GO), "tree-sitter-go not installed"
+)
 class GoParserTest(unittest.TestCase):
     def test_package_imports_declarations_and_snapshot_are_canonical(self) -> None:
         source = snapshot(GO_SOURCE, Language.GO, "src/app.go")
@@ -234,21 +235,6 @@ class GoParserTest(unittest.TestCase):
         self.assertEqual(
             {item.id for item in result.symbols}, {item.id for item in shifted.symbols}
         )
-
-    def test_legacy_projection_drops_new_composite_calls_and_unknown_locals(
-        self,
-    ) -> None:
-        projected = hologram.extract_file(
-            Path("/repo/src/app.go"),
-            Path("/repo"),
-            text=GO_SOURCE.decode(),
-        )
-        run = next(item for item in projected if item.name == "Run")
-
-        self.assertEqual(run.calls, ["p.New", "id.Valid", "client.Get"])
-        self.assertEqual(run.bindings, {"id": "OrderId", "made": "Store"})
-        self.assertNotIn("Store", run.calls)
-        self.assertNotIn("Quote", run.calls)
 
     def test_direct_struct_fields_multi_value_bindings_and_anonymous_callable_facts(
         self,
@@ -394,7 +380,9 @@ func Run(input int) {
         )
 
 
-@unittest.skipUnless(hologram.has_parser("rust"), "tree-sitter-rust not installed")
+@unittest.skipUnless(
+    DEFAULT_REGISTRY.has_parser(Language.RUST), "tree-sitter-rust not installed"
+)
 class RustParserTest(unittest.TestCase):
     def test_use_trees_types_trait_impl_and_immutable_supers(self) -> None:
         result = extract_file(snapshot(RUST_SOURCE, Language.RUST, "src/lib.rs"))
@@ -480,41 +468,6 @@ class RustParserTest(unittest.TestCase):
             {item.id for item in result.symbols}, {item.id for item in shifted.symbols}
         )
 
-    def test_legacy_projection_restores_self_and_complex_call_shapes(self) -> None:
-        projected = hologram.extract_file(
-            Path("/repo/src/lib.rs"),
-            Path("/repo"),
-            text=RUST_SOURCE.decode(),
-        )
-        trait_quote = next(
-            item
-            for item in projected
-            if item.name == "quote" and item.container == "Pricer"
-        )
-        impl_quote = next(
-            item
-            for item in projected
-            if item.name == "quote" and item.container == "Rational"
-        )
-        of = next(item for item in projected if item.name == "of")
-
-        self.assertEqual(trait_quote.bindings, {"id": "OrderId"})
-        self.assertEqual(
-            impl_quote.bindings,
-            {"id": "OrderId", "self": "Rational"},
-        )
-        self.assertEqual(impl_quote.calls, ["get", "PricingClient.new"])
-        self.assertEqual(
-            of.bindings,
-            {
-                "num": "i64",
-                "den": "i64",
-                "value": "Rational",
-                "self": "Rational",
-            },
-        )
-        self.assertEqual(of.calls, ["Rational"])
-
     def test_use_wildcard_direct_trait_bounds_and_trait_impl_owners_are_exact(
         self,
     ) -> None:
@@ -568,16 +521,6 @@ impl B for S { fn f(&self) { b_call(); } }
         )
         self.assertEqual(
             len(result.bodies), len({item.owner for item in result.bodies})
-        )
-
-        projected = hologram.extract_file(
-            Path("/repo/src/traits.rs"),
-            Path("/repo"),
-            text=raw.decode(),
-        )
-        self.assertEqual(
-            [item.container for item in projected if item.name == "f"],
-            ["A", "B", "S", "S"],
         )
 
     def test_closure_facts_nested_type_utf8_spans_and_provenance(self) -> None:
@@ -691,7 +634,7 @@ class GoRustSyntaxDiagnosticTest(unittest.TestCase):
             ),
         )
         for language, file, raw, error_span, names, callable_name, body_span in cases:
-            if not hologram.has_parser(language.value):
+            if not DEFAULT_REGISTRY.has_parser(language):
                 continue
             with self.subTest(language=language):
                 source = snapshot(raw, language, file)
