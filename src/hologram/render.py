@@ -112,7 +112,6 @@ class RenderFile:
 
 @dataclass(frozen=True, slots=True)
 class RenderIR:
-    schema_version: int
     state: str
     interns: tuple[RenderIntern, ...]
     dependencies: tuple[str, ...]
@@ -318,12 +317,6 @@ def _valid_markers(markers: tuple[str, ...]) -> bool:
 def _validate_render_ir(ir: RenderIR) -> None:
     if not isinstance(ir, RenderIR):
         raise TypeError("ir must be RenderIR")
-    if (
-        isinstance(ir.schema_version, bool)
-        or not isinstance(ir.schema_version, int)
-        or ir.schema_version != 2
-    ):
-        raise ValueError("schema_version must be 2")
     if not isinstance(ir.state, str) or _STATE.fullmatch(ir.state) is None:
         raise ValueError("state must be exactly 64 lowercase hexadecimal digits")
 
@@ -497,7 +490,7 @@ def render_project(ir: RenderIR) -> str:
     _validate_render_ir(ir)
     aliases = {intern.value: intern.alias for intern in ir.interns}
     lines = [
-        f"# hologram:2 state={ir.state} · regen: hologram build",
+        f"# hologram state={ir.state} · regen: hologram build",
     ]
     lines.extend(
         f"· intern {_json(intern.alias)} {_json(intern.value)}" for intern in ir.interns
@@ -598,7 +591,7 @@ def render_project(ir: RenderIR) -> str:
 
 
 _JSON_DECODER = json.JSONDecoder()
-_HEADER = re.compile(r"# hologram:2 state=([0-9a-f]{64}) · regen: hologram build\Z")
+_HEADER = re.compile(r"# hologram state=([0-9a-f]{64}) · regen: hologram build\Z")
 _SYMBOL_LINE = re.compile(r"  :([0-9]+):([0-9]+) (.+)\Z")
 _CHILD_ORDER = {
     key: index
@@ -938,7 +931,6 @@ def _decode_structure(text: str) -> RenderIR:
         )
 
     return RenderIR(
-        2,
         state,
         tuple(interns),
         dependencies,
@@ -1334,7 +1326,7 @@ def project_render_ir(
             )
         )
 
-    expanded = RenderIR(2, state, (), dependencies, tuple(rendered_files))
+    expanded = RenderIR(state, (), dependencies, tuple(rendered_files))
     return replace(expanded, interns=_plan_interns(expanded))
 
 

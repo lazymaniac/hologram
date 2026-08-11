@@ -176,7 +176,7 @@ def _input(
     project = ProjectIR(root, tuple(files), (), True)
     resolution = ResolutionResult((), (), (), ())
     analysis = AnalyzedProject(project, resolution, tuple(analyzed), ())
-    render = RenderIR(2, state, interns, dependencies, tuple(rendered_files))
+    render = RenderIR(state, interns, dependencies, tuple(rendered_files))
     return DiffInput(analysis, render)
 
 

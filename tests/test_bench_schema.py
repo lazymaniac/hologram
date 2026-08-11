@@ -25,7 +25,6 @@ class TieredManifestTest(unittest.TestCase):
         patch = root / "challenge.patch"
         patch.write_bytes(b"diff --git a/a b/a\n")
         return {
-            "schema_version": 2,
             "corpus": {
                 "name": "example",
                 "visibility": "public",
@@ -114,7 +113,6 @@ class TieredManifestTest(unittest.TestCase):
         self.assertEqual(
             tuple(field.name for field in dataclasses.fields(Config)),
             (
-                "schema_version",
                 "corpus",
                 "tasks",
                 "model",
@@ -134,7 +132,6 @@ class TieredManifestTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             config = self._load(root)
-            self.assertEqual(config.schema_version, 2)
             self.assertEqual(config.model, "claude-sonnet-5")
             self.assertEqual(config.claude_code_version, "2.1.224")
             self.assertEqual(config.conditions, ("B", "C"))
@@ -217,7 +214,6 @@ class TieredManifestTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             cases = {
-                "schema_version": (1, True),
                 "model": (
                     "sonnet",
                     "opus",
@@ -255,12 +251,11 @@ class TieredManifestTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_tasks(path, corpus_override=root / "missing", environ={})
 
-    def test_active_task_directory_has_no_pre_tier_manifest(self) -> None:
+    def test_active_task_manifests_use_the_pinned_model(self) -> None:
         active = PROJECT_ROOT / "benchmark" / "tasks"
         manifests = sorted(active.glob("*.json"))
         for manifest in manifests:
             data = json.loads(manifest.read_text(encoding="utf-8"))
-            self.assertEqual(data.get("schema_version"), 2, manifest)
             self.assertEqual(data.get("model"), "claude-sonnet-5", manifest)
 
 

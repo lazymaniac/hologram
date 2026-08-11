@@ -34,8 +34,6 @@ from hologram import (
 )
 from hologram.context import (
     CONTEXT_START,
-    LEGACY_END,
-    LEGACY_START,
     AtomicWriteError,
     render_managed_block,
 )
@@ -52,35 +50,46 @@ class TaskLoaderTest(unittest.TestCase):
         corpus = tmp / "corpus"
         corpus.mkdir()
         p = tmp / "tasks.json"
-        p.write_text(json.dumps({
-            "schema_version": 2,
-            "corpus": {
-                "name": "example",
-                "visibility": "public",
-                "url": "https://example.com/example.git",
-                "revision": "a" * 40,
-                "path_env": "HOLOGRAM_BENCH_EXAMPLE",
-            },
-            "model": "claude-sonnet-5",
-            "claude_code_version": "2.1.224",
-            "max_turns": 40,
-            "conditions": ["B", "C"],
-            "reps": 1,
-            "seed": 20260809,
-            "tasks": [
-                {"id": "weighted-avg", "tier": "simple",
-                 "capability": "implementation", "kind": "reuse",
-                 "visibility": "public",
-                 "prompt": "Add a weighted average.",
-                 "accept_cmd": "grep -rq weightedAverage {ws}",
-                 "expect_reuse": ["normalize", "add"]},
-                {"id": "find-lifecycle", "tier": "complex",
-                 "capability": "orientation", "kind": "navigate",
-                 "visibility": "public",
-                 "prompt": "Where is record lifecycle handled?",
-                 "accept_cmd": "verify-answer {ws} {answer}"},
-            ],
-        }))
+        p.write_text(
+            json.dumps(
+                {
+                    "corpus": {
+                        "name": "example",
+                        "visibility": "public",
+                        "url": "https://example.com/example.git",
+                        "revision": "a" * 40,
+                        "path_env": "HOLOGRAM_BENCH_EXAMPLE",
+                    },
+                    "model": "claude-sonnet-5",
+                    "claude_code_version": "2.1.224",
+                    "max_turns": 40,
+                    "conditions": ["B", "C"],
+                    "reps": 1,
+                    "seed": 20260809,
+                    "tasks": [
+                        {
+                            "id": "weighted-avg",
+                            "tier": "simple",
+                            "capability": "implementation",
+                            "kind": "reuse",
+                            "visibility": "public",
+                            "prompt": "Add a weighted average.",
+                            "accept_cmd": "grep -rq weightedAverage {ws}",
+                            "expect_reuse": ["normalize", "add"],
+                        },
+                        {
+                            "id": "find-lifecycle",
+                            "tier": "complex",
+                            "capability": "orientation",
+                            "kind": "navigate",
+                            "visibility": "public",
+                            "prompt": "Where is record lifecycle handled?",
+                            "accept_cmd": "verify-answer {ws} {answer}",
+                        },
+                    ],
+                }
+            )
+        )
         return p
 
     def test_loads_tasks_and_defaults(self):
@@ -100,51 +109,147 @@ class TaskLoaderTest(unittest.TestCase):
     def test_missing_required_field_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "bad.json"
-            p.write_text(json.dumps({"schema_version": 2}))
+            p.write_text(json.dumps({"tasks": []}))
             with self.assertRaises(ValueError):
                 bench.load_tasks(p, corpus_override=Path(tmp))
 
 
 MODEL = "claude-sonnet-5"
-PASSING_VERIFIER = (
-    "printf '%s\\n' "
-    "'{\"passed\":true,\"score\":1.0,\"diagnostics\":[]}'"
+PASSING_VERIFIER = 'printf \'%s\\n\' \'{"passed":true,"score":1.0,"diagnostics":[]}\''
+TRANSCRIPT = "\n".join(
+    [
+        json.dumps({"type": "system", "subtype": "init", "model": MODEL}),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": "a.java"},
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "thinking..."},
+                        {
+                            "type": "tool_use",
+                            "name": "Grep",
+                            "input": {"pattern": "normalize"},
+                        },
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "grep -rn hasText spring-core/src"},
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "sed -n '1,40p' StringUtils.java"},
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {
+                                "command": "grep -n trimToNull PROJECT_DIGEST.md"
+                            },
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Read",
+                            "input": {"file_path": "/ws/PROJECT_DIGEST.md"},
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "tool_use", "name": "Edit", "input": {}}]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "tool_use", "name": "Write", "input": {}}]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "model": MODEL,
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "Completed the task."}],
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "Completed the task.",
+                "num_turns": 7,
+                "usage": {
+                    "input_tokens": 91000,
+                    "output_tokens": 4200,
+                    "cache_creation_input_tokens": 30000,
+                    "cache_read_input_tokens": 500000,
+                },
+            }
+        ),
+        "not-json-noise",
+    ]
 )
-TRANSCRIPT = "\n".join([
-    json.dumps({"type": "system", "subtype": "init", "model": MODEL}),
-    json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": "Read", "input": {"file_path": "a.java"}}]}}),
-    json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "text", "text": "thinking..."},
-        {"type": "tool_use", "name": "Grep", "input": {"pattern": "normalize"}}]}}),
-    json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": "Bash",
-         "input": {"command": "grep -rn hasText spring-core/src"}}]}}),
-    json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": "Bash",
-         "input": {"command": "sed -n '1,40p' StringUtils.java"}}]}}),
-    json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": "Bash",
-         "input": {"command": "grep -n trimToNull PROJECT_DIGEST.md"}}]}}),
-    json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": "Read",
-         "input": {"file_path": "/ws/PROJECT_DIGEST.md"}}]}}),
-    json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": "Edit", "input": {}}]}}),
-    json.dumps({"type": "assistant", "message": {"content": [
-        {"type": "tool_use", "name": "Write", "input": {}}]}}),
-    json.dumps({"type": "assistant", "message": {
-        "model": MODEL,
-        "stop_reason": "end_turn",
-        "content": [{"type": "text", "text": "Completed the task."}],
-    }}),
-    json.dumps({"type": "result", "subtype": "success", "is_error": False,
-                "result": "Completed the task.", "num_turns": 7,
-                "usage": {"input_tokens": 91000, "output_tokens": 4200,
-                          "cache_creation_input_tokens": 30000,
-                          "cache_read_input_tokens": 500000}}),
-    "not-json-noise",
-])
 
 
 class TranscriptMetricsTest(unittest.TestCase):
@@ -156,9 +261,19 @@ class TranscriptMetricsTest(unittest.TestCase):
         self.assertEqual(
             tuple(field.name for field in dataclasses.fields(TranscriptSummary)),
             (
-                "terminal_status", "terminal_count", "is_error", "stop_reason",
-                "final_answer", "reported_model", "reads", "searches", "edits",
-                "map_hits", "turns", "tokens_in", "tokens_out",
+                "terminal_status",
+                "terminal_count",
+                "is_error",
+                "stop_reason",
+                "final_answer",
+                "reported_model",
+                "reads",
+                "searches",
+                "edits",
+                "map_hits",
+                "turns",
+                "tokens_in",
+                "tokens_out",
             ),
         )
         result = ProcessResult("", "", 0)
@@ -174,10 +289,10 @@ class TranscriptMetricsTest(unittest.TestCase):
         self.assertEqual(summary.stop_reason, "end_turn")
         self.assertEqual(summary.final_answer, "Completed the task.")
         self.assertEqual(summary.reported_model, MODEL)
-        self.assertEqual(summary.reads, 3)      # Read ×2 + bash sed -n
-        self.assertEqual(summary.searches, 3)   # Grep + bash grep ×2
-        self.assertEqual(summary.edits, 2)      # Edit + Write
-        self.assertEqual(summary.map_hits, 2)   # PROJECT_DIGEST grep + Read
+        self.assertEqual(summary.reads, 3)  # Read ×2 + bash sed -n
+        self.assertEqual(summary.searches, 3)  # Grep + bash grep ×2
+        self.assertEqual(summary.edits, 2)  # Edit + Write
+        self.assertEqual(summary.map_hits, 2)  # PROJECT_DIGEST grep + Read
         self.assertEqual(summary.turns, 7)
         self.assertEqual(summary.tokens_in, 91000 + 30000 + 500000)
         self.assertEqual(summary.tokens_out, 4200)
@@ -238,9 +353,7 @@ class TranscriptMetricsTest(unittest.TestCase):
             "permission_error": self._terminal(
                 subtype="permission_error", is_error=True
             ),
-            "error_max_turns": self._terminal(
-                subtype="error_max_turns", is_error=True
-            ),
+            "error_max_turns": self._terminal(subtype="error_max_turns", is_error=True),
             "context_overflow": self._terminal(
                 subtype="context_overflow", is_error=True
             ),
@@ -312,7 +425,6 @@ def _canonical_map(*symbols: RenderSymbol) -> str:
     ordered = tuple(sorted(symbols, key=lambda symbol: symbol.symbol_id.name))
     return render_project(
         RenderIR(
-            2,
             "a" * 64,
             (),
             (),
@@ -387,13 +499,15 @@ class DuplicationDetectorTest(unittest.TestCase):
 def _mini_corpus(tmp: Path) -> Path:
     repo = tmp / "corpus"
     repo.mkdir()
-    (repo / "svc.py").write_text(
-        "def normalize(xs: list) -> list:\n    return xs\n")
+    (repo / "svc.py").write_text("def normalize(xs: list) -> list:\n    return xs\n")
     (repo / "CLAUDE.md").write_text("# Corpus conventions\nUse tabs. Just kidding.\n")
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(["git", "-c", "user.email=b@b", "-c", "user.name=b",
-                    "commit", "-qm", "seed"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=b@b", "-c", "user.name=b", "commit", "-qm", "seed"],
+        cwd=repo,
+        check=True,
+    )
     subprocess.run(
         ["git", "remote", "add", "origin", "https://example.com/example.git"],
         cwd=repo,
@@ -436,7 +550,10 @@ class WorkspaceTest(unittest.TestCase):
             destination = root / "prepared"
             destination.mkdir()
             spec = BenchmarkCorpus(
-                "example", "public", origin.as_uri(), _head(origin),
+                "example",
+                "public",
+                origin.as_uri(),
+                _head(origin),
                 "HOLOGRAM_BENCH_EXAMPLE",
             )
             prepared = prepare_public_corpus(spec, destination)
@@ -444,9 +561,16 @@ class WorkspaceTest(unittest.TestCase):
             self.assertEqual(_head(prepared), spec.revision)
             self.assertEqual(
                 subprocess.run(
-                    ["git", "-C", str(prepared), "status", "--porcelain=v1",
-                     "--untracked-files=all"],
-                    check=True, capture_output=True,
+                    [
+                        "git",
+                        "-C",
+                        str(prepared),
+                        "status",
+                        "--porcelain=v1",
+                        "--untracked-files=all",
+                    ],
+                    check=True,
+                    capture_output=True,
                 ).stdout,
                 b"",
             )
@@ -461,9 +585,18 @@ class WorkspaceTest(unittest.TestCase):
             (origin / ".gitignore").write_text("deps/\n")
             subprocess.run(["git", "add", ".gitignore"], cwd=origin, check=True)
             subprocess.run(
-                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
-                 "commit", "-qm", "ignore dependencies"],
-                cwd=origin, check=True,
+                [
+                    "git",
+                    "-c",
+                    "user.email=b@b",
+                    "-c",
+                    "user.name=b",
+                    "commit",
+                    "-qm",
+                    "ignore dependencies",
+                ],
+                cwd=origin,
+                check=True,
             )
             spec = BenchmarkCorpus(
                 "example",
@@ -507,9 +640,18 @@ class WorkspaceTest(unittest.TestCase):
             (repo / ".gitignore").write_text("deps/\n")
             subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
             subprocess.run(
-                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
-                 "commit", "-qm", "ignore dependencies"],
-                cwd=repo, check=True,
+                [
+                    "git",
+                    "-c",
+                    "user.email=b@b",
+                    "-c",
+                    "user.name=b",
+                    "commit",
+                    "-qm",
+                    "ignore dependencies",
+                ],
+                cwd=repo,
+                check=True,
             )
             deps = repo / "deps"
             deps.mkdir()
@@ -555,9 +697,7 @@ class WorkspaceTest(unittest.TestCase):
                 )
                 (before / "deps/tool.lua").write_text("mutated\n")
                 self.assertEqual((deps / "tool.lua").read_text(), "return 1\n")
-                self.assertEqual(
-                    (after / "deps/tool.lua").read_text(), "return 1\n"
-                )
+                self.assertEqual((after / "deps/tool.lua").read_text(), "return 1\n")
             finally:
                 for workspace in workspaces.values():
                     bench.drop_workspace(repo, workspace)
@@ -569,9 +709,18 @@ class WorkspaceTest(unittest.TestCase):
             (repo / ".gitignore").write_text("deps/\n")
             subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
             subprocess.run(
-                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
-                 "commit", "-qm", "ignore dependencies"],
-                cwd=repo, check=True,
+                [
+                    "git",
+                    "-c",
+                    "user.email=b@b",
+                    "-c",
+                    "user.name=b",
+                    "commit",
+                    "-qm",
+                    "ignore dependencies",
+                ],
+                cwd=repo,
+                check=True,
             )
             deps = repo / "deps"
             deps.mkdir()
@@ -602,9 +751,18 @@ class WorkspaceTest(unittest.TestCase):
             (repo / ".gitignore").write_text("deps/\n")
             subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
             subprocess.run(
-                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
-                 "commit", "-qm", "ignore dependencies"],
-                cwd=repo, check=True,
+                [
+                    "git",
+                    "-c",
+                    "user.email=b@b",
+                    "-c",
+                    "user.name=b",
+                    "commit",
+                    "-qm",
+                    "ignore dependencies",
+                ],
+                cwd=repo,
+                check=True,
             )
             deps = repo / "deps"
             deps.mkdir()
@@ -627,17 +785,30 @@ class WorkspaceTest(unittest.TestCase):
             (repo / ".gitignore").write_text("deps/\n")
             subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
             subprocess.run(
-                ["git", "-c", "user.email=b@b", "-c", "user.name=b",
-                 "commit", "-qm", "ignore dependencies"],
-                cwd=repo, check=True,
+                [
+                    "git",
+                    "-c",
+                    "user.email=b@b",
+                    "-c",
+                    "user.name=b",
+                    "commit",
+                    "-qm",
+                    "ignore dependencies",
+                ],
+                cwd=repo,
+                check=True,
             )
             (repo / "deps").mkdir()
             (repo / "deps/data").write_text("stable\n")
             task = bench.Task(
-                id="asset-mutation", tier="simple",
-                capability="implementation", kind="reuse",
-                visibility="public", prompt="Do not mutate assets.",
-                accept_cmd="test -d {ws}", expect_reuse=("normalize",),
+                id="asset-mutation",
+                tier="simple",
+                capability="implementation",
+                kind="reuse",
+                visibility="public",
+                prompt="Do not mutate assets.",
+                accept_cmd="test -d {ws}",
+                expect_reuse=("normalize",),
             )
 
             def runner(prompt, workspace, model, max_turns, *, config_dir):
@@ -646,8 +817,15 @@ class WorkspaceTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "workspace asset"):
                 bench.run_one(
-                    repo, task, "B", 0, root / "results", MODEL, 40,
-                    runner=runner, workspace_assets=("deps",),
+                    repo,
+                    task,
+                    "B",
+                    0,
+                    root / "results",
+                    MODEL,
+                    40,
+                    runner=runner,
+                    workspace_assets=("deps",),
                 )
 
     def test_active_conditions_have_exact_controlled_configuration(self):
@@ -667,11 +845,7 @@ class WorkspaceTest(unittest.TestCase):
                         bench.drop_workspace(repo, ws)
 
     def test_corpus_manifest_is_preserved_byte_for_byte(self):
-        provided = (
-            b"# Corpus-owned formatting must survive.\n"
-            b"schema_version = 2\n"
-            b'agents = ["claude"]\n'
-        )
+        provided = b'# Corpus-owned formatting must survive.\nagents = ["claude"]\n'
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             repo = _mini_corpus(tmp_path)
@@ -696,7 +870,7 @@ class WorkspaceTest(unittest.TestCase):
                 self.assertEqual((repo / CONFIG_NAME).read_bytes(), provided)
                 self.assertEqual((ws / CONFIG_NAME).read_bytes(), provided)
                 self.assertIn(
-                    b"hologram:v2:start",
+                    b"hologram:start",
                     (ws / "CLAUDE.md").read_bytes(),
                 )
             finally:
@@ -750,8 +924,8 @@ class WorkspaceTest(unittest.TestCase):
             try:
                 context = (ws / "CLAUDE.md").read_bytes()
                 self.assertIn(b"Corpus conventions", context)
-                self.assertIn(b"hologram:v2:start", context)
-                self.assertIn(b"# hologram:2 state=", context)
+                self.assertIn(b"hologram:start", context)
+                self.assertIn(b"# hologram state=", context)
                 self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
                 self.assertTrue((ws / "svc.py").exists())
             finally:
@@ -825,12 +999,9 @@ class WorkspaceTest(unittest.TestCase):
     def test_preexisting_hologram_context_and_map_are_rejected(self):
         artifacts = {
             "claude": ("CLAUDE.md", render_managed_block("old map\n")),
-            "agent": (
-                "AGENTS.md",
-                LEGACY_START + b"\nold map\n" + LEGACY_END + b"\n",
-            ),
+            "agent": ("AGENTS.md", render_managed_block("older map\n")),
             "malformed": ("GEMINI.md", CONTEXT_START + b"\nunterminated\n"),
-            "standalone": ("PROJECT_DIGEST.md", b"# hologram:2 stale\n"),
+            "standalone": ("PROJECT_DIGEST.md", b"# hologram stale\n"),
         }
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -906,10 +1077,14 @@ class WorkspaceTest(unittest.TestCase):
                             check=True,
                         )
 
-                        error = ValueError if target_kind == "regular" else AtomicWriteError
+                        error = (
+                            ValueError if target_kind == "regular" else AtomicWriteError
+                        )
                         with self.assertRaises(error):
                             bench.make_workspace(repo, case / "workspace", condition)
-                        self.assertEqual((repo / CONFIG_NAME).read_bytes(), manifest_bytes)
+                        self.assertEqual(
+                            (repo / CONFIG_NAME).read_bytes(), manifest_bytes
+                        )
                         if target_kind == "symlink":
                             self.assertEqual(
                                 (case / "outside-map.md").read_bytes(),
@@ -952,17 +1127,17 @@ class WorkspaceTest(unittest.TestCase):
                 self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
                 context = (ws / "CLAUDE.md").read_bytes()
                 self.assertNotIn(b"PROJECT_DIGEST", context)
-                self.assertNotIn(b"hologram:v2:start", context)
+                self.assertNotIn(b"hologram:start", context)
                 self.assertFalse((ws / CONFIG_NAME).exists())
             finally:
                 bench.drop_workspace(repo, ws)
 
-    def test_historical_condition_a_is_rejected_before_worktree_mutation(self):
+    def test_unknown_condition_is_rejected_before_worktree_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             with self.assertRaisesRegex(ValueError, "conditions B and C"):
-                bench.make_workspace(repo, Path(tmp) / "wsA", "A")
-            self.assertFalse((Path(tmp) / "wsA").exists())
+                bench.make_workspace(repo, Path(tmp) / "wsX", "X")
+            self.assertFalse((Path(tmp) / "wsX").exists())
 
     def test_workspace_is_isolated(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -980,12 +1155,15 @@ class WorkspaceTest(unittest.TestCase):
             ws = bench.make_workspace(repo, Path(tmp) / "wsC", "C")
             try:
                 text = (ws / "CLAUDE.md").read_text()
-                self.assertIn("Corpus conventions", text)      # corpus part kept
-                self.assertIn("hologram:v2:start", text)
-                diff = subprocess.run(["git", "-C", str(ws), "diff", "--stat"],
-                                      capture_output=True, text=True,
-                                      check=False).stdout
-                self.assertEqual(diff, "")   # setup committed -> clean slate
+                self.assertIn("Corpus conventions", text)  # corpus part kept
+                self.assertIn("hologram:start", text)
+                diff = subprocess.run(
+                    ["git", "-C", str(ws), "diff", "--stat"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                ).stdout
+                self.assertEqual(diff, "")  # setup committed -> clean slate
             finally:
                 bench.drop_workspace(repo, ws)
 
@@ -1018,9 +1196,7 @@ class ScheduleTest(unittest.TestCase):
 
     def test_schedule_is_permutation_stable_paired_and_alternating(self):
         tasks = self._tasks()
-        first = schedule_runs(
-            tasks, conditions=("B", "C"), reps=1, seed=20260809
-        )
+        first = schedule_runs(tasks, conditions=("B", "C"), reps=1, seed=20260809)
         second = schedule_runs(
             tuple(reversed(tasks)),
             conditions=("C", "B"),
@@ -1046,9 +1222,10 @@ class ScheduleTest(unittest.TestCase):
 
     def test_schedule_rejects_asymmetry_duplicates_and_invalid_reps(self):
         tasks = self._tasks()
-        for conditions, reps in ((('B',), 1), (("B", "B"), 1), (("B", "C"), 0)):
-            with self.subTest(conditions=conditions, reps=reps), self.assertRaises(
-                ValueError
+        for conditions, reps in ((("B",), 1), (("B", "B"), 1), (("B", "C"), 0)):
+            with (
+                self.subTest(conditions=conditions, reps=reps),
+                self.assertRaises(ValueError),
             ):
                 schedule_runs(tasks, conditions=conditions, reps=reps, seed=1)
         with self.assertRaises(ValueError):
@@ -1065,75 +1242,111 @@ class RunOneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             task = bench.Task(
-                id="avg", tier="simple", capability="implementation",
-                kind="reuse", visibility="public",
+                id="avg",
+                tier="simple",
+                capability="implementation",
+                kind="reuse",
+                visibility="public",
                 prompt="Add average() that reuses normalize.",
                 accept_cmd=f"grep -q average {{ws}}/svc.py && {PASSING_VERIFIER}",
-                expect_reuse=("normalize",))
+                expect_reuse=("normalize",),
+            )
 
             def fake_runner(
                 prompt: str, ws: Path, model: str, max_turns: int, *, config_dir: Path
             ) -> ProcessResult:
                 # the "agent" appends a function that calls normalize
                 (ws / "svc.py").write_text(
-                    (ws / "svc.py").read_text()
-                    + "\ndef average(xs: list) -> float:\n"
-                      "    return sum(normalize(xs)) / len(xs)\n")
+                    (ws / "svc.py").read_text() + "\ndef average(xs: list) -> float:\n"
+                    "    return sum(normalize(xs)) / len(xs)\n"
+                )
                 return ProcessResult(TRANSCRIPT, "", 0)
 
-            row = bench.run_one(repo, task, "C", rep=0,
-                                results_dir=Path(tmp) / "results",
-                                model=MODEL, max_turns=40,
-                                runner=fake_runner)
+            row = bench.run_one(
+                repo,
+                task,
+                "C",
+                rep=0,
+                results_dir=Path(tmp) / "results",
+                model=MODEL,
+                max_turns=40,
+                runner=fake_runner,
+            )
         self.assertEqual(row["task"], "avg")
         self.assertEqual(row["condition"], "C")
         self.assertTrue(row["accepted"])
         self.assertEqual(row["reused"], ["normalize"])
         self.assertEqual(row["duplicated"], [])
-        self.assertEqual(row["reads"], 3)   # Read ×2 + bash `sed -n` (see TRANSCRIPT)
+        self.assertEqual(row["reads"], 3)  # Read ×2 + bash `sed -n` (see TRANSCRIPT)
         self.assertEqual(row["tokens_in"], 621000)
 
     def test_new_file_counts_as_change_for_acceptance(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             task = bench.Task(
-                id="newfile", tier="simple", capability="implementation",
-                kind="reuse", visibility="public",
+                id="newfile",
+                tier="simple",
+                capability="implementation",
+                kind="reuse",
+                visibility="public",
                 prompt="Add a helper in a new module.",
                 accept_cmd=(
                     "git -C {ws} diff --stat | grep -q . && " + PASSING_VERIFIER
                 ),
-                expect_reuse=("normalize",))
+                expect_reuse=("normalize",),
+            )
 
             def fake_runner(prompt, ws, model, max_turns, *, config_dir):
                 (ws / "helper.py").write_text("def helper() -> int:\n    return 1\n")
                 return ProcessResult(TRANSCRIPT, "", 0)
 
-            row = bench.run_one(repo, task, "B", rep=0,
-                                results_dir=Path(tmp) / "results",
-                                model=MODEL, max_turns=40, runner=fake_runner)
-        self.assertTrue(row["accepted"])   # untracked new file must count
+            row = bench.run_one(
+                repo,
+                task,
+                "B",
+                rep=0,
+                results_dir=Path(tmp) / "results",
+                model=MODEL,
+                max_turns=40,
+                runner=fake_runner,
+            )
+        self.assertTrue(row["accepted"])  # untracked new file must count
 
     def test_transcript_saved(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             task = bench.Task(
-                id="noop", tier="simple", capability="orientation",
-                kind="navigate", visibility="public", prompt="look around",
+                id="noop",
+                tier="simple",
+                capability="orientation",
+                kind="navigate",
+                visibility="public",
+                prompt="look around",
                 accept_cmd=f"test -d {{ws}} && {PASSING_VERIFIER}",
             )
             results = Path(tmp) / "results"
-            bench.run_one(repo, task, "B", rep=1, results_dir=results,
-                          model=MODEL, max_turns=40,
-                          runner=lambda *a, **k: ProcessResult(TRANSCRIPT, "", 0))
+            bench.run_one(
+                repo,
+                task,
+                "B",
+                rep=1,
+                results_dir=results,
+                model=MODEL,
+                max_turns=40,
+                runner=lambda *a, **k: ProcessResult(TRANSCRIPT, "", 0),
+            )
             self.assertTrue((results / "noop-B-1.jsonl").exists())
 
     def test_verifier_passing_max_turn_partial_edit_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             task = bench.Task(
-                id="partial", tier="simple", capability="implementation",
-                kind="reuse", visibility="public", prompt="Add partial().",
+                id="partial",
+                tier="simple",
+                capability="implementation",
+                kind="reuse",
+                visibility="public",
+                prompt="Add partial().",
                 accept_cmd=f"grep -q partial {{ws}}/svc.py && {PASSING_VERIFIER}",
                 expect_reuse=("normalize",),
             )
@@ -1145,8 +1358,7 @@ class RunOneTest(unittest.TestCase):
 
             def fake_runner(prompt, ws, model, max_turns, *, config_dir):
                 (ws / "svc.py").write_text(
-                    (ws / "svc.py").read_text()
-                    + "\ndef partial() -> None:\n    pass\n"
+                    (ws / "svc.py").read_text() + "\ndef partial() -> None:\n    pass\n"
                 )
                 return ProcessResult(transcript, "", 0)
 
@@ -1169,8 +1381,12 @@ class RunOneTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             task = bench.Task(
-                id="answer", tier="simple", capability="orientation",
-                kind="navigate", visibility="public", prompt="Answer.",
+                id="answer",
+                tier="simple",
+                capability="orientation",
+                kind="navigate",
+                visibility="public",
+                prompt="Answer.",
                 accept_cmd=(
                     "grep -q 'Completed the task' {answer} && test -d {ws} && "
                     + PASSING_VERIFIER
@@ -1256,7 +1472,9 @@ class RunnerIsolationTest(unittest.TestCase):
                     {"BENCH_CREDENTIAL_SENTINEL": "inherited"},
                     clear=False,
                 ),
-                mock.patch.object(bench.subprocess, "run", return_value=completed) as run,
+                mock.patch.object(
+                    bench.subprocess, "run", return_value=completed
+                ) as run,
             ):
                 result = bench.claude_runner(
                     "Do the task",
@@ -1274,9 +1492,7 @@ class RunnerIsolationTest(unittest.TestCase):
             child_env = run.call_args.kwargs["env"]
             self.assertEqual(child_env["BENCH_CREDENTIAL_SENTINEL"], "inherited")
             self.assertEqual(child_env["CLAUDE_CONFIG_DIR"], str(config.resolve()))
-            self.assertEqual(
-                child_env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1"
-            )
+            self.assertEqual(child_env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1")
             self.assertNotIn("CLAUDE_CONFIG_DIR", os.environ)
             self.assertEqual(tuple(config.iterdir()), ())
 
@@ -1312,8 +1528,12 @@ class RunnerIsolationTest(unittest.TestCase):
             repo = _mini_corpus(root)
             results = root / "results"
             task = bench.Task(
-                id="isolated", tier="simple", capability="implementation",
-                kind="reuse", visibility="public", prompt="Inspect isolation.",
+                id="isolated",
+                tier="simple",
+                capability="implementation",
+                kind="reuse",
+                visibility="public",
+                prompt="Inspect isolation.",
                 accept_cmd=f"test -d {{ws}} && {PASSING_VERIFIER}",
                 expect_reuse=("normalize",),
             )
@@ -1355,8 +1575,13 @@ class RunnerIsolationTest(unittest.TestCase):
             ):
                 bench.main(
                     [
-                        "run", str(taskfile), "--corpus", str(repo),
-                        "--results", str(results), "--dry-run",
+                        "run",
+                        str(taskfile),
+                        "--corpus",
+                        str(repo),
+                        "--results",
+                        str(results),
+                        "--dry-run",
                     ]
                 )
             run.assert_not_called()
@@ -1368,8 +1593,14 @@ class RunnerIsolationTest(unittest.TestCase):
             ):
                 bench.main(
                     [
-                        "run", str(taskfile), "--corpus", str(repo),
-                        "--results", str(results), "--conditions", "B",
+                        "run",
+                        str(taskfile),
+                        "--corpus",
+                        str(repo),
+                        "--results",
+                        str(results),
+                        "--conditions",
+                        "B",
                         "--dry-run",
                     ]
                 )
@@ -1388,32 +1619,55 @@ class RunnerIsolationTest(unittest.TestCase):
             ):
                 bench.main(
                     [
-                        "run", str(taskfile), "--corpus", str(repo),
-                        "--results", str(root / "results"),
+                        "run",
+                        str(taskfile),
+                        "--corpus",
+                        str(repo),
+                        "--results",
+                        str(root / "results"),
                     ]
                 )
             run.assert_not_called()
 
 
 class ReportTest(unittest.TestCase):
-    def test_aggregates_by_condition(self):
+    def test_rejects_rows_without_partition_metadata(self):
         rows = [
-            {"task": "t1", "kind": "reuse", "condition": "A", "rep": 0,
-             "accepted": True, "reused": ["normalize"], "duplicated": [],
-             "new_lines": 1, "reads": 3, "searches": 2, "edits": 2,
-             "turns": 9, "tokens_in": 100, "tokens_out": 10},
-            {"task": "t1", "kind": "reuse", "condition": "B", "rep": 0,
-             "accepted": True, "reused": [], "duplicated": ["normalize2"],
-             "new_lines": 2, "reads": 9, "searches": 8, "edits": 2,
-             "turns": 15, "tokens_in": 300, "tokens_out": 30},
+            {
+                "task": "t1",
+                "kind": "reuse",
+                "condition": "X",
+                "rep": 0,
+                "accepted": True,
+                "reused": ["normalize"],
+                "duplicated": [],
+                "new_lines": 1,
+                "reads": 3,
+                "searches": 2,
+                "edits": 2,
+                "turns": 9,
+                "tokens_in": 100,
+                "tokens_out": 10,
+            },
+            {
+                "task": "t1",
+                "kind": "reuse",
+                "condition": "B",
+                "rep": 0,
+                "accepted": True,
+                "reused": [],
+                "duplicated": ["normalize2"],
+                "new_lines": 2,
+                "reads": 9,
+                "searches": 8,
+                "edits": 2,
+                "turns": 15,
+                "tokens_in": 300,
+                "tokens_out": 30,
+            },
         ]
-        md = bench.report(rows)
-        self.assertIn("| A |", md)
-        self.assertIn("| B |", md)
-        self.assertIn("legacy / unclassified", md)
-        self.assertIn("unique tasks", md)
-        self.assertNotIn("normalize", md)
-        self.assertNotIn("digest hits", md)
+        with self.assertRaisesRegex(ValueError, "partition metadata"):
+            bench.report(rows)
 
     def test_empty_rows(self):
         self.assertIn("no runs", bench.report([]))
@@ -1423,7 +1677,6 @@ def _write_tiered_taskfile(path: Path, repo: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": 2,
                 "corpus": {
                     "name": "example",
                     "visibility": "public",
@@ -1526,7 +1779,7 @@ class CliTest(unittest.TestCase):
                     ]
                 )
 
-    def test_active_condition_defaults_are_b_and_c_and_a_is_rejected(self):
+    def test_active_condition_defaults_are_b_and_c_and_unknown_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             taskfile = Path(tmp) / "tasks.json"
@@ -1570,7 +1823,7 @@ class CliTest(unittest.TestCase):
                         "--results",
                         str(results),
                         "--conditions",
-                        "A",
+                        "X",
                         "--dry-run",
                     ]
                 )
@@ -1582,15 +1835,25 @@ class CliTest(unittest.TestCase):
             taskfile = Path(tmp) / "tasks.json"
             _write_tiered_taskfile(taskfile, repo)
             results = Path(tmp) / "results"
-            code = bench.main(["run", str(taskfile),
-                               "--corpus", str(repo),
-                               "--results", str(results),
-                               "--reps", "1",
-                               "--only", "noop-simple",
-                               "--dry-run"])
+            code = bench.main(
+                [
+                    "run",
+                    str(taskfile),
+                    "--corpus",
+                    str(repo),
+                    "--results",
+                    str(results),
+                    "--reps",
+                    "1",
+                    "--only",
+                    "noop-simple",
+                    "--dry-run",
+                ]
+            )
             self.assertEqual(code, 0)
-            rows = [json.loads(l) for l in
-                    (results / "runs.jsonl").read_text().splitlines()]
+            rows = [
+                json.loads(l) for l in (results / "runs.jsonl").read_text().splitlines()
+            ]
             self.assertEqual(len(rows), 2)
             self.assertEqual({row["condition"] for row in rows}, {"B", "C"})
 
@@ -1599,7 +1862,7 @@ class CliTest(unittest.TestCase):
             self.assertTrue((results / "report.md").exists())
 
 
-class V2ConsumerMigrationTest(unittest.TestCase):
+class ConsumerContractTest(unittest.TestCase):
     def test_benchmark_reads_symbols_through_decoder(self) -> None:
         verdict = bench.judge_reuse(BEFORE_DIGEST, AFTER_REUSED, ["normalize"])
 
@@ -1609,38 +1872,26 @@ class V2ConsumerMigrationTest(unittest.TestCase):
             ["weightedAverage"],
         )
 
-    def test_condition_c_uses_managed_claude_block_without_legacy_flags(
-        self,
-    ) -> None:
+    def test_condition_c_uses_managed_claude_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             ws = bench.make_workspace(repo, Path(tmp) / "wsC", "C")
             try:
                 context = (ws / "CLAUDE.md").read_bytes()
-                self.assertIn(b"hologram:v2:start", context)
-                self.assertNotIn(b"--embed", context)
+                self.assertIn(b"hologram:start", context)
                 self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
             finally:
                 bench.drop_workspace(repo, ws)
 
-    def test_benchmark_readme_labels_a_historical_and_b_c_current(self) -> None:
+    def test_benchmark_readme_documents_current_b_c_contract(self) -> None:
         readme = (
             Path(__file__).resolve().parents[1] / "benchmark" / "README.md"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("Historical condition A", readme)
-        self.assertIn("current conditions B and C", readme)
-        self.assertIn("managed canonical v2 block", readme)
-        for caveat in (
-            "legacy, exploratory, and pre-tier",
-            "`sonnet` is a mutable model alias",
-            "reuse acceptance commands often verify only that a change occurred",
-            "navigation correctness is not automated (`true`)",
-            "40-turn ceiling is not outcome-gated",
-            "n=1 per cell",
-        ):
-            with self.subTest(caveat=caveat):
-                self.assertIn(caveat, readme)
+        self.assertIn("conditions B and C", readme)
+        self.assertIn("managed canonical block", readme)
+        self.assertIn("terminates successfully", readme)
+        self.assertIn("verifier passes", readme)
 
 
 if __name__ == "__main__":

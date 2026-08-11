@@ -215,10 +215,8 @@ def load_rubrics(path: Path) -> dict[str, dict[str, object]]:
     root = _exact_object(
         _json_object(raw, "verifier rubrics"),
         "verifier rubrics",
-        frozenset({"schema_version", "tasks"}),
+        frozenset({"tasks"}),
     )
-    if type(root["schema_version"]) is not int or root["schema_version"] != 1:
-        raise ValueError("verifier rubric schema_version must equal 1")
     if type(root["tasks"]) is not dict or not root["tasks"]:
         raise ValueError("verifier rubrics tasks must be a nonempty object")
 
@@ -350,10 +348,8 @@ def verify_navigation_answer(
         data = _exact_object(
             _read_answer(answer),
             "final answer",
-            frozenset({"schema_version", "task", "claims", "evidence"}),
+            frozenset({"task", "claims", "evidence"}),
         )
-        if type(data["schema_version"]) is not int or data["schema_version"] != 1:
-            raise ValueError("final answer schema_version must equal 1")
         if data["task"] != task_name:
             raise ValueError(f"final answer task must equal {task_name!r}")
         expected_claims = cast(dict[str, object], task_rubric["claims"])

@@ -9,7 +9,7 @@ _SEARCH_TOOLS = frozenset({"Grep", "Glob"})
 _EDIT_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
 _BASH_SEARCH = re.compile(r"\b(grep|rg|find|fd|ag)\b")
 _BASH_READ = re.compile(r"\b(cat|head|tail|sed -n|less|more)\b")
-_MAP_EVIDENCE = re.compile(r"PROJECT_DIGEST\.md|hologram:v2:(?:start|end)")
+_MAP_EVIDENCE = re.compile(r"PROJECT_DIGEST\.md|hologram:(?:start|end)")
 
 
 @dataclass(frozen=True)

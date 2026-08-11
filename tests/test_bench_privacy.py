@@ -98,7 +98,6 @@ def _manifest_data(
     )
     answer_command = command + " {answer}"
     return {
-        "schema_version": 2,
         "corpus": {
             "name": "private-sentinel",
             "visibility": visibility,
@@ -263,7 +262,9 @@ class PrivateReportingTest(unittest.TestCase):
         )
         for rows in cases:
             with self.subTest(rows=rows):
-                with self.assertRaisesRegex(ValueError, r"\b[12] invalid row") as caught:
+                with self.assertRaisesRegex(
+                    ValueError, r"\b[12] invalid row"
+                ) as caught:
                     private_report(rows)
                 self.assertNotIn(bad, str(caught.exception))
 
@@ -289,8 +290,9 @@ class PrivatePathBoundaryTest(unittest.TestCase):
                 outside.resolve(),
             )
             for selected in (worktree, target, link, root):
-                with self.subTest(selected=selected), self.assertRaisesRegex(
-                    ValueError, "outside"
+                with (
+                    self.subTest(selected=selected),
+                    self.assertRaisesRegex(ValueError, "outside"),
                 ):
                     require_outside_worktree(
                         selected, worktree=worktree, label="private input"
@@ -325,9 +327,11 @@ class PrivatePathBoundaryTest(unittest.TestCase):
                     ("results", manifest, corpus, worktree / "results"),
                 ]
                 for label, taskfile, selected_corpus, results in cases:
-                    with self.subTest(label=label), self.assertRaisesRegex(
-                        ValueError, "outside"
-                    ), mock.patch.object(bench, "run_one") as run:
+                    with (
+                        self.subTest(label=label),
+                        self.assertRaisesRegex(ValueError, "outside"),
+                        mock.patch.object(bench, "run_one") as run,
+                    ):
                         bench.main(
                             [
                                 "run",
@@ -341,8 +345,9 @@ class PrivatePathBoundaryTest(unittest.TestCase):
                         )
                     run.assert_not_called()
 
-                with self.subTest(label="default results"), self.assertRaisesRegex(
-                    ValueError, "explicit external --results"
+                with (
+                    self.subTest(label="default results"),
+                    self.assertRaisesRegex(ValueError, "explicit external --results"),
                 ):
                     bench.main(
                         [
@@ -508,28 +513,6 @@ class PrivateDryRunMatrixTest(unittest.TestCase):
                     {"orientation", "implementation", "planning", "audit"},
                 )
             self.assertEqual(sum(counts), 16)
-
-
-class ArchivePrivacyTest(unittest.TestCase):
-    def test_legacy_archive_is_ignored_and_has_no_tracked_entries(self) -> None:
-        ignored = subprocess.run(
-            ["git", "check-ignore", "-q", "benchmark/archive"],
-            cwd=PROJECT_ROOT,
-            check=False,
-        )
-        tracked = subprocess.run(
-            ["git", "ls-files", "-z", "--", "benchmark/archive"],
-            cwd=PROJECT_ROOT,
-            check=True,
-            capture_output=True,
-        )
-        self.assertEqual(ignored.returncode, 0)
-        self.assertEqual(
-            tracked.stdout,
-            b"",
-            f"legacy benchmark archive has {tracked.stdout.count(bytes([0]))} "
-            "tracked entries",
-        )
 
 
 if __name__ == "__main__":

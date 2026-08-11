@@ -1,5 +1,4 @@
 {
-  "schema_version": 2,
   "corpus": {
     "name": "codecompanion",
     "visibility": "public",
@@ -18,7 +17,7 @@
       "capability": "orientation",
       "kind": "navigate",
       "visibility": "public",
-      "prompt": "Trace the complete bounded CodeCompanionFileEdited lifecycle. Identify the shared event helper, every production emitter, both production consumers, their installation point, payload differences, and what deletion does not trigger. Do not edit files. Your final answer must be one JSON object with exactly schema_version (1), task (file-edited-lifecycle), claims, and evidence. Claims must use exactly these keys: event_helper, producers, consumers, installation, payloads, deletion_consequence. Each claim is an object with exactly a nonblank explanation and one or more evidence IDs. Evidence is an array of objects with exactly id, repository-relative POSIX path, one-based line, and an exact anchor present on that line. Include no prose outside the JSON object.",
+      "prompt": "Trace the complete bounded CodeCompanionFileEdited lifecycle. Identify the shared event helper, every production emitter, both production consumers, their installation point, payload differences, and what deletion does not trigger. Do not edit files. Your final answer must be one JSON object with exactly task (file-edited-lifecycle), claims, and evidence. Claims must use exactly these keys: event_helper, producers, consumers, installation, payloads, deletion_consequence. Each claim is an object with exactly a nonblank explanation and one or more evidence IDs. Evidence is an array of objects with exactly id, repository-relative POSIX path, one-based line, and an exact anchor present on that line. Include no prose outside the JSON object.",
       "accept_cmd": ".venv/bin/python -m benchmark.verifiers.codecompanion file-edited-lifecycle {ws} {answer}",
       "expect_reuse": []
     },
@@ -40,7 +39,7 @@
       "capability": "planning",
       "kind": "navigate",
       "visibility": "public",
-      "prompt": "Produce a decision-complete implementation plan for a built-in move_file tool. Reuse the repository's existing rename, cwd-containment, approval, tool/group registration, and edited-file tracking mechanisms. Specify exact touchpoints, operation order, boundary cases, focused Mini.Test coverage, and native validation commands. Do not edit files and do not propose parallel replacement abstractions. Your final answer must be one JSON object with exactly schema_version (1), task (move-file-plan), claims, and evidence. Claims must use exactly these keys: touchpoints, rename_reuse, containment_reuse, approval_reuse, registration_reuse, tracking_reuse, operation_order, boundary_cases, tests, commands. Each claim is an object with exactly a nonblank explanation and one or more evidence IDs. Evidence is an array of objects with exactly id, repository-relative POSIX path, one-based line, and an exact anchor present on that line. Include no prose outside the JSON object.",
+      "prompt": "Produce a decision-complete implementation plan for a built-in move_file tool. Reuse the repository's existing rename, cwd-containment, approval, tool/group registration, and edited-file tracking mechanisms. Specify exact touchpoints, operation order, boundary cases, focused Mini.Test coverage, and native validation commands. Do not edit files and do not propose parallel replacement abstractions. Your final answer must be one JSON object with exactly task (move-file-plan), claims, and evidence. Claims must use exactly these keys: touchpoints, rename_reuse, containment_reuse, approval_reuse, registration_reuse, tracking_reuse, operation_order, boundary_cases, tests, commands. Each claim is an object with exactly a nonblank explanation and one or more evidence IDs. Evidence is an array of objects with exactly id, repository-relative POSIX path, one-based line, and an exact anchor present on that line. Include no prose outside the JSON object.",
       "accept_cmd": ".venv/bin/python -m benchmark.verifiers.codecompanion move-file-plan {ws} {answer}",
       "expect_reuse": []
     },
@@ -50,7 +49,7 @@
       "capability": "audit",
       "kind": "navigate",
       "visibility": "public",
-      "prompt": "Audit the challenged benchmark_audit module. Identify the exact active clone and its canonical replacement, the true unused private function, the exported zero-internal-reference surface whose status remains uncertain, and the reachable configuration/string decoy that must not be called unused. Do not edit files. Your final answer must be one JSON object with exactly schema_version (1), task (duplicate-unused-audit), claims, and evidence. Claims must use exactly these keys: active_clone, canonical_replacement, strong_zero, uncertain_surface, reachable_decoy. Each claim is an object with exactly a nonblank explanation and one or more evidence IDs. Evidence is an array of objects with exactly id, repository-relative POSIX path, one-based line, and an exact anchor present on that line. Include no prose outside the JSON object.",
+      "prompt": "Audit the challenged benchmark_audit module. Identify the exact active clone and its canonical replacement, the true unused private function, the exported zero-internal-reference surface whose status remains uncertain, and the reachable configuration/string decoy that must not be called unused. Do not edit files. Your final answer must be one JSON object with exactly task (duplicate-unused-audit), claims, and evidence. Claims must use exactly these keys: active_clone, canonical_replacement, strong_zero, uncertain_surface, reachable_decoy. Each claim is an object with exactly a nonblank explanation and one or more evidence IDs. Evidence is an array of objects with exactly id, repository-relative POSIX path, one-based line, and an exact anchor present on that line. Include no prose outside the JSON object.",
       "accept_cmd": ".venv/bin/python -m benchmark.verifiers.codecompanion duplicate-unused-audit {ws} {answer}",
       "expect_reuse": [],
       "challenge": {

@@ -170,7 +170,10 @@ class MatchedPairTest(unittest.TestCase):
                 right = _row("task", "C")
                 del left[field]
                 self.assertEqual(matched_pairs((left, right)), ())
-        self.assertEqual(matched_pairs((_row("task", "A"), _row("task", "C"))), ())
+        renamed = _row("task", "B")
+        renamed["task_id"] = renamed.pop("task")
+        self.assertEqual(matched_pairs((renamed, _row("task", "C"))), ())
+        self.assertEqual(matched_pairs((_row("task", "X"), _row("task", "C"))), ())
         malformed = _row("task", "B")
         malformed["rep"] = True
         self.assertEqual(matched_pairs((malformed, _row("task", "C"))), ())
@@ -333,19 +336,6 @@ class PublicReportTest(unittest.TestCase):
                 model="model-one",
                 version="2.0.0",
             ),
-            {
-                "task": "legacy-task",
-                "kind": "navigate",
-                "condition": "A",
-                "rep": 0,
-                "completed": True,
-                "accepted": True,
-                "reads": 77,
-                "searches": 78,
-                "turns": 79,
-                "tokens_in": 80,
-                "tokens_out": 81,
-            },
         ]
         return rows
 
@@ -360,9 +350,6 @@ class PublicReportTest(unittest.TestCase):
         self.assertEqual(
             headings,
             (
-                "## legacy / unclassified",
-                "### Tier unclassified",
-                "#### Capability unclassified",
                 "## model-one / 1.0.0",
                 "### Tier complex",
                 "#### Capability audit",
@@ -380,7 +367,6 @@ class PublicReportTest(unittest.TestCase):
         )
         self.assertIn("unique tasks", rendered)
         self.assertIn("runs", rendered)
-        self.assertIn("| A | 1 | 1 |", rendered)
 
     def test_navigation_efficiency_uses_only_accepted_matched_pairs(self) -> None:
         rendered = public_report(self._rows())
@@ -464,16 +450,15 @@ class PublicReportTest(unittest.TestCase):
         for permutation in (reversed(rows), rows[::2] + rows[1::2]):
             self.assertEqual(public_report(tuple(permutation)), expected)
 
-    def test_partially_populated_historical_rows_are_wholly_legacy(self) -> None:
-        old = {
-            "task": "old",
-            "condition": "A",
+    def test_rows_missing_partition_metadata_are_rejected(self) -> None:
+        incomplete = {
+            "task": "incomplete",
+            "condition": "B",
             "model": "mutable-alias",
             "accepted": True,
         }
-        rendered = public_report((old,))
-        self.assertIn("## legacy / unclassified", rendered)
-        self.assertNotIn("mutable-alias", rendered)
+        with self.assertRaisesRegex(ValueError, "partition metadata"):
+            public_report((incomplete,))
 
 
 class ReportDispatchTest(unittest.TestCase):
@@ -528,28 +513,19 @@ class ReportDispatchTest(unittest.TestCase):
 
 
 class BenchmarkDocumentationTest(unittest.TestCase):
-    def test_current_runbook_and_historical_evidence_are_explicitly_qualified(
-        self,
-    ) -> None:
+    def test_runbooks_document_the_current_contract(self) -> None:
         paths = (
             PROJECT_ROOT / "README.md",
             PROJECT_ROOT / "benchmark" / "README.md",
-            PROJECT_ROOT / "benchmark" / "results-spring-2026-08-08.md",
         )
         documents = {
             path: path.read_text(encoding="utf-8").casefold() for path in paths
         }
         combined = "\n".join(documents.values())
-        for path, text in documents.items():
-            with self.subTest(path=path.name):
-                self.assertIn("legacy", text)
-                self.assertIn("pre-tier", text)
-
         for phrase in (
-            "navigation acceptance was not automated",
-            "mutable model alias",
-            "no paid sessions are run by the implementation suite",
+            "no paid sessions",
             "external private results",
+            "managed canonical block",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, combined)

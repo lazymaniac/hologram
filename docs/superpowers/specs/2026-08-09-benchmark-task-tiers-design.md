@@ -163,8 +163,8 @@ duplication evidence, reads, searches, edits, turns, and map hits.
 Reports partition by model/version, then by tier, capability, and condition.
 Efficiency means use accepted matched pairs only. Failed runs never enter
 efficiency or duplication denominators. Reports show both unique task and run
-counts and never mix simple and complex means. Legacy rows without the new
-schema are explicitly unclassified rather than silently treated as simple.
+counts and never mix simple and complex means. Rows missing required partition
+metadata are rejected rather than silently treated as simple.
 
 ## Privacy and Reproducibility
 
@@ -202,6 +202,6 @@ schema are explicitly unclassified rather than silently treated as simple.
 - Adding more than two difficulty tiers or a numeric complexity score.
 - Token/cost budgets or statistical-significance claims.
 - Publishing private task-level results.
-- Implementing Hologram v2 extraction or marker behavior itself; this work only
+- Implementing Hologram extraction or marker behavior itself; this work only
   supplies the tiered task suite and trustworthy harness semantics needed to
   evaluate it.

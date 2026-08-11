@@ -200,7 +200,6 @@ def _synthetic_navigation_workspace(
         source_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _commit(repo)
     answer_data: dict[str, object] = {
-        "schema_version": 1,
         "task": task,
         "claims": answer_claims,
         "evidence": evidence,
@@ -253,7 +252,6 @@ def _answer_for_workspace(workspace: Path, task: str, destination: Path) -> Path
     destination.write_text(
         json.dumps(
             {
-                "schema_version": 1,
                 "task": task,
                 "claims": answer_claims,
                 "evidence": evidence,

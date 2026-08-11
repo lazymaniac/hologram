@@ -6,8 +6,6 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import TypeVar
 
-IR_SCHEMA_VERSION = 2
-
 _T = TypeVar("_T")
 
 
@@ -143,10 +141,7 @@ class SourceSpan:
             raise ValueError("source span end line must not precede start line")
         if self.start_column < 0 or self.end_column < 0:
             raise ValueError("source span columns must be nonnegative")
-        if (
-            self.start_line == self.end_line
-            and self.end_column < self.start_column
-        ):
+        if self.start_line == self.end_line and self.end_column < self.start_column:
             raise ValueError("same-line source span end must not precede start")
 
 
@@ -332,8 +327,6 @@ class FileIR:
     references: tuple[ReferenceRef, ...] = ()
     bodies: tuple[BodyIR, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
-    extractor_version: str = ""
-    parser_version: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbols", _own_tuple(self.symbols, "symbols"))

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.metadata
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -115,25 +114,6 @@ def load_parser(
 
 
 _load_parser = load_parser
-
-
-def grammar_version(language: Language) -> str:
-    metadata = GRAMMAR_METADATA.get(language)
-    if metadata is None:
-        return "missing"
-    try:
-        runtime = importlib.metadata.version("tree-sitter")
-        grammar = importlib.metadata.version(metadata.distribution)
-    except importlib.metadata.PackageNotFoundError:
-        return "missing"
-    return f"{runtime}/{grammar}"
-
-
-def parser_versions() -> Mapping[str, str]:
-    values = {
-        language.value: grammar_version(language) for language in GRAMMAR_METADATA
-    }
-    return MappingProxyType(dict(sorted(values.items())))
 
 
 def ast_text(node: object | None) -> str:
@@ -299,19 +279,19 @@ _CALLABLE_KINDS_BY_LANGUAGE: Mapping[Language, frozenset[str]] = MappingProxyTyp
         Language.HELM: frozenset(),
     }
 )
-_ANONYMOUS_CALLABLE_KINDS_BY_LANGUAGE: Mapping[
-    Language, frozenset[str]
-] = MappingProxyType(
-    {
-        Language.KOTLIN: frozenset({"anonymous_function", "lambda_literal"}),
-        Language.GO: frozenset({"func_literal"}),
-        Language.RUST: frozenset({"async_block", "closure_expression"}),
-        Language.CSHARP: frozenset(
-            {"anonymous_method_expression", "lambda_expression"}
-        ),
-        Language.CPP: frozenset({"lambda_expression"}),
-        Language.LUA: frozenset({"function_definition"}),
-    }
+_ANONYMOUS_CALLABLE_KINDS_BY_LANGUAGE: Mapping[Language, frozenset[str]] = (
+    MappingProxyType(
+        {
+            Language.KOTLIN: frozenset({"anonymous_function", "lambda_literal"}),
+            Language.GO: frozenset({"func_literal"}),
+            Language.RUST: frozenset({"async_block", "closure_expression"}),
+            Language.CSHARP: frozenset(
+                {"anonymous_method_expression", "lambda_expression"}
+            ),
+            Language.CPP: frozenset({"lambda_expression"}),
+            Language.LUA: frozenset({"function_definition"}),
+        }
+    )
 )
 _TYPESCRIPT_DECLARATION_BOUNDARIES = frozenset(
     {
@@ -1827,7 +1807,10 @@ def owned_nodes(
 ) -> tuple[Any, ...]:
     """Return parameter/body nodes owned by one named or module declaration."""
     context = _resolve_ownership(ownership, owned_boundaries, include_anonymous)
-    roots = (*_parameter_parts(source, callable_node), *_body_parts(source, callable_node))
+    roots = (
+        *_parameter_parts(source, callable_node),
+        *_body_parts(source, callable_node),
+    )
     found: list[Any] = []
     root_keys = frozenset(_node_key(root) for root in roots)
     for root in roots:
@@ -1888,11 +1871,9 @@ __all__ = [
     "ast_text",
     "body_events",
     "body_lines",
-    "grammar_version",
     "load_parser",
     "node_span",
     "owned_nodes",
     "ownership_context",
-    "parser_versions",
     "tree_sitter_body_events",
 ]

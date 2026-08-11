@@ -15,7 +15,6 @@ import hologram.config as config_module
 from hologram.config import (
     ALLOWED_AGENTS,
     CONFIG_NAME,
-    CONFIG_SCHEMA_VERSION,
     ConfigError,
     ProjectConfig,
     canonical_config_bytes,
@@ -25,8 +24,7 @@ from hologram.config import (
 )
 from hologram.model import Language
 
-VALID = """schema_version = 2
-agents = ["claude", "codex", "gemini"]
+VALID = """agents = ["claude", "codex", "gemini"]
 languages = ["java", "python", "typescript"]
 include = ["src/**", "tests/**"]
 exclude = ["**/generated/**"]
@@ -56,7 +54,6 @@ class ConfigTest(unittest.TestCase):
 
             config = load_config(root)
 
-        self.assertEqual(config.schema_version, 2)
         self.assertEqual(config.agents, ("claude", "codex", "gemini"))
         self.assertEqual(
             config.languages,
@@ -80,7 +77,7 @@ class ConfigTest(unittest.TestCase):
     def test_minimal_present_manifest_uses_present_file_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self._write(root, 'schema_version = 2\nagents = ["claude"]\n')
+            self._write(root, 'agents = ["claude"]\n')
 
             config = load_config(root)
 
@@ -90,25 +87,19 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(config.exclude)
         self.assertIsNone(config.output)
 
-    def test_rejects_unknown_key_and_missing_schema_version(self):
-        cases = [
-            ('schema_version = 2\nextra = true\n', "extra"),
-            ('agents = ["claude"]\n', "schema_version"),
-        ]
-        for text, field in cases:
-            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
-                self._assert_error(Path(tmp), text, field)
+    def test_rejects_unknown_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._assert_error(Path(tmp), "extra = true\n", "extra")
 
     def test_rejects_invalid_required_values_and_paths(self):
         cases = [
-            ('schema_version = 1\n', "schema_version"),
-            ('schema_version = 2\nhot_threshold = true\n', "hot_threshold"),
-            ('schema_version = 2\nhot_threshold = 0\n', "hot_threshold"),
-            ('schema_version = 2\nlanguages = ["brainfuck"]\n', "languages"),
-            ('schema_version = 2\nagents = ["cursor"]\n', "agents"),
-            ('schema_version = 2\noutput = "../escape.md"\n', "output"),
-            ('schema_version = 2\noutput = "CLAUDE.md"\n', "output"),
-            ('schema_version = 2\ninclude = ["/absolute/**"]\n', "include"),
+            ("hot_threshold = true\n", "hot_threshold"),
+            ("hot_threshold = 0\n", "hot_threshold"),
+            ('languages = ["brainfuck"]\n', "languages"),
+            ('agents = ["cursor"]\n', "agents"),
+            ('output = "../escape.md"\n', "output"),
+            ('output = "CLAUDE.md"\n', "output"),
+            ('include = ["/absolute/**"]\n', "include"),
         ]
         for text, field in cases:
             with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
@@ -119,7 +110,7 @@ class ConfigTest(unittest.TestCase):
             root = Path(tmp)
             self._write(
                 root,
-                'schema_version = 2\nagents = []\noutput = "digest.md"\n',
+                'agents = []\noutput = "digest.md"\n',
             )
             config = load_config(root)
             self.assertEqual(config.agents, ())
@@ -128,7 +119,7 @@ class ConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self._assert_error(
                 Path(tmp),
-                "schema_version = 2\nagents = []\n",
+                "agents = []\n",
                 "agents",
             )
 
@@ -146,13 +137,11 @@ class ConfigTest(unittest.TestCase):
         self.assertFalse(rendered.endswith("\n\n"))
 
     def test_canonical_bytes_ignore_agent_and_language_order(self):
-        first = """schema_version = 2
-agents = ["gemini", "claude", "codex"]
+        first = """agents = ["gemini", "claude", "codex"]
 languages = ["typescript", "java", "python"]
 output = "digest.md"
 """
-        second = """schema_version = 2
-agents = ["codex", "gemini", "claude"]
+        second = """agents = ["codex", "gemini", "claude"]
 languages = ["python", "typescript", "java"]
 output = "digest.md"
 """
@@ -164,7 +153,9 @@ output = "digest.md"
             two = load_config(root, second_path)
 
         self.assertEqual(canonical_config_bytes(one), canonical_config_bytes(two))
-        self.assertEqual(canonical_config_bytes(one), render_config(one).encode("utf-8"))
+        self.assertEqual(
+            canonical_config_bytes(one), render_config(one).encode("utf-8")
+        )
 
     def test_rejects_duplicate_sequence_values(self):
         cases = [
@@ -177,27 +168,29 @@ output = "digest.md"
             with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
                 self._assert_error(
                     Path(tmp),
-                    f"schema_version = 2\n{assignment}\n",
+                    f"{assignment}\n",
                     field,
                 )
 
     def test_rejects_malformed_toml_and_wrong_field_types(self):
         cases = [
-            ("schema_version = [2\n", "TOML"),
-            ('schema_version = "2"\n', "schema_version"),
-            ('schema_version = 2\nagents = "claude"\n', "agents"),
-            ('schema_version = 2\nagents = [1]\n', "agents"),
-            ('schema_version = 2\nlanguages = "python"\n', "languages"),
-            ('schema_version = 2\nlanguages = [1]\n', "languages"),
-            ('schema_version = 2\ninclude = "src/**"\n', "include"),
-            ('schema_version = 2\ninclude = [1]\n', "include"),
-            ('schema_version = 2\nexclude = "dist/**"\n', "exclude"),
-            ('schema_version = 2\nexclude = [1]\n', "exclude"),
-            ('schema_version = 2\nhot_threshold = 1.5\n', "hot_threshold"),
-            ('schema_version = 2\noutput = 3\n', "output"),
+            ("agents = [\n", "TOML"),
+            ('agents = "claude"\n', "agents"),
+            ("agents = [1]\n", "agents"),
+            ('languages = "python"\n', "languages"),
+            ("languages = [1]\n", "languages"),
+            ('include = "src/**"\n', "include"),
+            ("include = [1]\n", "include"),
+            ('exclude = "dist/**"\n', "exclude"),
+            ("exclude = [1]\n", "exclude"),
+            ("hot_threshold = 1.5\n", "hot_threshold"),
+            ("output = 3\n", "output"),
         ]
         for text, field in cases:
-            with self.subTest(field=field, text=text), tempfile.TemporaryDirectory() as tmp:
+            with (
+                self.subTest(field=field, text=text),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 self._assert_error(Path(tmp), text, field)
 
     def test_wraps_toml_integer_conversion_value_error(self):
@@ -205,7 +198,7 @@ output = "digest.md"
             root = Path(tmp)
             path = self._write(
                 root,
-                "schema_version = " + ("9" * 5001) + "\n",
+                "hot_threshold = " + ("9" * 5001) + "\n",
             )
 
             with self.assertRaises(ConfigError) as caught:
@@ -216,7 +209,7 @@ output = "digest.md"
 
     def test_rejects_empty_include_and_non_normalized_patterns(self):
         cases = [
-            ('include = []', "include"),
+            ("include = []", "include"),
             ('include = [""]', "include"),
             ('include = ["src\\\\**"]', "include"),
             ('include = ["src/../tests/**"]', "include"),
@@ -228,17 +221,20 @@ output = "digest.md"
             ('exclude = ["D:generated/**"]', "exclude"),
         ]
         for assignment, field in cases:
-            with self.subTest(assignment=assignment), tempfile.TemporaryDirectory() as tmp:
+            with (
+                self.subTest(assignment=assignment),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 self._assert_error(
                     Path(tmp),
-                    f"schema_version = 2\n{assignment}\n",
+                    f"{assignment}\n",
                     field,
                 )
 
     def test_allows_explicit_empty_exclude(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            self._write(root, "schema_version = 2\nexclude = []\n")
+            self._write(root, "exclude = []\n")
             self.assertEqual(load_config(root).exclude, ())
 
     def test_rejects_reserved_or_invalid_outputs(self):
@@ -259,7 +255,7 @@ output = "digest.md"
         ]
         for output in invalid:
             with self.subTest(output=output), tempfile.TemporaryDirectory() as tmp:
-                text = f"schema_version = 2\noutput = {json.dumps(output)}\n"
+                text = f"output = {json.dumps(output)}\n"
                 self._assert_error(Path(tmp), text, "output")
 
     def test_preserves_case_for_nonreserved_output(self):
@@ -267,7 +263,7 @@ output = "digest.md"
             root = Path(tmp)
             self._write(
                 root,
-                'schema_version = 2\noutput = "Reports/ProjectDigest.md"\n',
+                'output = "Reports/ProjectDigest.md"\n',
             )
             self.assertEqual(
                 load_config(root).output,
@@ -305,7 +301,10 @@ output = "digest.md"
 
     def test_atomic_default_manifest_creation_loses_file_and_symlink_races(self):
         for raced_kind in ("file", "symlink"):
-            with self.subTest(raced_kind=raced_kind), tempfile.TemporaryDirectory() as tmp:
+            with (
+                self.subTest(raced_kind=raced_kind),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 root = Path(tmp)
                 manifest = root / CONFIG_NAME
                 target = root / "target.toml"
@@ -359,11 +358,14 @@ output = "digest.md"
                     return real_write(fd, bytes(data[:5]))
                 raise OSError("injected write failure")
 
-            with mock.patch.object(
-                config_module.os,
-                "write",
-                side_effect=failing_write,
-            ), self.assertRaisesRegex(OSError, "injected write failure"):
+            with (
+                mock.patch.object(
+                    config_module.os,
+                    "write",
+                    side_effect=failing_write,
+                ),
+                self.assertRaisesRegex(OSError, "injected write failure"),
+            ):
                 config_module.create_default_manifest(root)
 
             self.assertEqual(
@@ -456,7 +458,6 @@ output = "digest.md"
         include = ["src/**"]
         exclude = ["dist/**"]
         config = ProjectConfig(
-            schema_version=2,
             agents=agents,
             languages=languages,
             include=include,
@@ -477,7 +478,6 @@ output = "digest.md"
 
     def test_project_config_rejects_ambiguous_sequence_containers(self):
         base = {
-            "schema_version": 2,
             "agents": ("claude",),
             "languages": (Language.PYTHON,),
             "include": ("src/**",),
@@ -502,7 +502,6 @@ output = "digest.md"
 
     def test_render_escapes_toml_strings_deterministically(self):
         config = ProjectConfig(
-            schema_version=2,
             agents=("claude",),
             languages=(Language.PYTHON,),
             include=('src/"quoted"/\x7f/😀/**',),
@@ -533,7 +532,6 @@ output = "digest.md"
             "**/vendor/**",
         )
         expected = ProjectConfig(
-            2,
             ("claude", "codex", "gemini"),
             (),
             ("**/*",),
@@ -542,13 +540,11 @@ output = "digest.md"
             "PROJECT_DIGEST.md",
         )
         self.assertEqual(CONFIG_NAME, ".hologram.toml")
-        self.assertEqual(CONFIG_SCHEMA_VERSION, 2)
         self.assertEqual(ALLOWED_AGENTS, frozenset({"claude", "codex", "gemini"}))
         self.assertEqual(default_config(), expected)
-        self.assertEqual(dataclasses.fields(ProjectConfig)[0].name, "schema_version")
+        self.assertEqual(dataclasses.fields(ProjectConfig)[0].name, "agents")
         for name in (
             "CONFIG_NAME",
-            "CONFIG_SCHEMA_VERSION",
             "ConfigError",
             "ProjectConfig",
             "load_config",

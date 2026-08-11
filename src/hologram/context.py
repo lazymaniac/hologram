@@ -8,13 +8,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 
-CONTEXT_START = b"<!-- hologram:v2:start -->"
-CONTEXT_END = b"<!-- hologram:v2:end -->"
-LEGACY_START = (
-    b"<!-- hologram:start \xe2\x80\x94 generated, do not edit; "
-    b"refreshed by git hooks -->"
-)
-LEGACY_END = b"<!-- hologram:end -->"
+CONTEXT_START = b"<!-- hologram:start -->"
+CONTEXT_END = b"<!-- hologram:end -->"
 
 AGENT_PATHS = {
     "claude": Path("CLAUDE.md"),
@@ -72,7 +67,7 @@ class PlannedWrite:
         _validated_mode(self.mode)
 
 
-_MARKERS = (CONTEXT_START, CONTEXT_END, LEGACY_START, LEGACY_END)
+_MARKERS = (CONTEXT_START, CONTEXT_END)
 
 
 def _require_bytes(value: object, name: str) -> bytes:
@@ -229,52 +224,26 @@ def _marker_lines(value: bytes) -> dict[bytes, list[tuple[int, int]]]:
 
 def _managed_range(
     value: bytes,
-) -> tuple[ContextStatus, str | None, int | None, int | None]:
+) -> tuple[ContextStatus, int | None, int | None]:
     found = _marker_lines(value)
-    canonical_starts = found[CONTEXT_START]
-    canonical_ends = found[CONTEXT_END]
-    legacy_starts = found[LEGACY_START]
-    legacy_ends = found[LEGACY_END]
+    starts = found[CONTEXT_START]
+    ends = found[CONTEXT_END]
     marker_count = sum(len(positions) for positions in found.values())
     if marker_count == 0:
-        return ContextStatus.MISSING, None, None, None
+        return ContextStatus.MISSING, None, None
 
-    if (
-        len(canonical_starts) == 1
-        and len(canonical_ends) == 1
-        and not legacy_starts
-        and not legacy_ends
-    ):
-        start = canonical_starts[0][0]
-        end = canonical_ends[0][1]
-        if start < canonical_ends[0][0]:
-            return ContextStatus.STALE, "canonical", start, end
-        return ContextStatus.MALFORMED, None, None, None
-
-    if (
-        len(legacy_starts) == 1
-        and len(legacy_ends) == 1
-        and not canonical_starts
-        and not canonical_ends
-    ):
-        start = legacy_starts[0][0]
-        end = legacy_ends[0][1]
-        if start < legacy_ends[0][0]:
-            return ContextStatus.STALE, "legacy", start, end
-        return ContextStatus.MALFORMED, None, None, None
-
-    return ContextStatus.MALFORMED, None, None, None
+    if len(starts) == 1 and len(ends) == 1:
+        start = starts[0][0]
+        end = ends[0][1]
+        if start < ends[0][0]:
+            return ContextStatus.STALE, start, end
+    return ContextStatus.MALFORMED, None, None
 
 
 def _validated_expected(expected: object) -> bytes:
     block = _require_bytes(expected, "expected")
-    status, kind, start, end = _managed_range(block)
-    if (
-        status is not ContextStatus.STALE
-        or kind != "canonical"
-        or start != 0
-        or end != len(block)
-    ):
+    status, start, end = _managed_range(block)
+    if status is not ContextStatus.STALE or start != 0 or end != len(block):
         raise ManagedBlockError("expected must be exactly one canonical managed block")
     return block
 
@@ -301,14 +270,12 @@ def render_managed_block(rendered_map: str) -> bytes:
 def inspect_managed_block(existing: bytes, expected: bytes) -> ContextStatus:
     authored = _require_bytes(existing, "existing")
     candidate = _require_bytes(expected, "expected")
-    status, kind, start, end = _managed_range(authored)
+    status, start, end = _managed_range(authored)
     if status is ContextStatus.MALFORMED:
         return status
     block = _validated_expected(candidate)
     if status is ContextStatus.MISSING:
         return status
-    if kind == "legacy":
-        return ContextStatus.STALE
     if start is None or end is None:
         raise AssertionError("valid managed pair is missing its byte range")
     return ContextStatus.FRESH if authored[start:end] == block else ContextStatus.STALE
@@ -317,16 +284,16 @@ def inspect_managed_block(existing: bytes, expected: bytes) -> ContextStatus:
 def replace_managed_block(existing: bytes, expected: bytes) -> bytes:
     authored = _require_bytes(existing, "existing")
     candidate = _require_bytes(expected, "expected")
-    status, kind, start, end = _managed_range(authored)
+    status, start, end = _managed_range(authored)
     if status is ContextStatus.MALFORMED:
         raise ManagedBlockError("existing context has malformed managed markers")
     block = _validated_expected(candidate)
     if status is ContextStatus.MISSING:
         separator = b"" if not authored or authored.endswith((b"\n", b"\r")) else b"\n"
         return authored + separator + block
-    if start is None or end is None or kind is None:
+    if start is None or end is None:
         raise AssertionError("valid managed pair is missing its byte range")
-    if kind == "canonical" and authored[start:end] == block:
+    if authored[start:end] == block:
         return existing
     return authored[:start] + block + authored[end:]
 
@@ -548,8 +515,6 @@ __all__ = [
     "AGENT_PATHS",
     "CONTEXT_END",
     "CONTEXT_START",
-    "LEGACY_END",
-    "LEGACY_START",
     "AtomicWriteError",
     "ContextStatus",
     "ManagedBlockError",

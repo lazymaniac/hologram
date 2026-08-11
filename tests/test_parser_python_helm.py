@@ -1231,6 +1231,7 @@ class HelmParserTest(unittest.TestCase):
         for _, call_span in expected_calls:
             self.assertIn((BodyEventKind.CALL, call_span), event_pairs)
         assert_body_fact_events(self, result)
+
     def test_helm_root_values_are_valid_pipeline_operands(self) -> None:
         raw = b"""\
 {{define "rooted"}}
@@ -1452,6 +1453,7 @@ class HelmParserTest(unittest.TestCase):
         self.assertEqual([symbol.name for symbol in result.symbols], ["foó", "plain"])
         self.assertEqual(result.symbols[0].span.start_column, 0)
         self.assertEqual(result.symbols[0].span.end_column, len("foó".encode()))
+
 
 if __name__ == "__main__":
     unittest.main()

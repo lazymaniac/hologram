@@ -2,7 +2,6 @@ import dataclasses
 import hashlib
 import tempfile
 import unittest
-from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 from unittest import mock
@@ -22,7 +21,6 @@ from hologram import (
     detect_language,
 )
 from hologram.state import (
-    STATE_FORMAT_VERSION,
     StateResult,
     compute_state,
     read_digest_state,
@@ -102,10 +100,6 @@ class StateTest(unittest.TestCase):
         *,
         raw: bytes = b"x = 1\n",
         output: str | None | object = _UNSET,
-        extractor_version: str = "2",
-        parser_version: str = "stdlib-ast-3.11",
-        extractor_versions: Mapping[str, str] | None = None,
-        parser_versions: Mapping[str, str] | None = None,
         extra_unsupported: tuple[str, bytes] | None = None,
         extra_excluded: tuple[str, bytes] | None = None,
     ) -> StateResult:
@@ -139,66 +133,33 @@ class StateTest(unittest.TestCase):
                     )
                 )
             scan_result = ScanResult(tuple(entries), (), True)
-        return compute_state(
-            self.root,
-            config,
-            scan_result,
-            extractor_versions=(
-                extractor_versions
-                if extractor_versions is not None
-                else {"python": extractor_version}
-            ),
-            parser_versions=(
-                parser_versions
-                if parser_versions is not None
-                else {"python": parser_version}
-            ),
-        )
+        return compute_state(self.root, config, scan_result)
 
     def state(self, **overrides: object) -> str:
         return self.compute(**overrides).value
 
-    def test_state_format_and_framing_are_stable(self) -> None:
-        self.assertEqual(STATE_FORMAT_VERSION, "hologram-state-v3")
+    def test_state_digest_and_framing_are_stable(self) -> None:
         self.assertEqual(
             self.state(),
-            "c01c54545272bf6719742975c85d69300e19ab86b323a2cea3a8f8c78471517b",
+            "f930c5f4a522e835268f1fe0e39d91e7779d2060bc202142d783482d773f0db9",
         )
 
     def test_state_api_is_exported_from_package(self) -> None:
         self.assertIs(hologram.StateResult, StateResult)
         self.assertIs(hologram.compute_state, compute_state)
         self.assertIs(hologram.read_digest_state, read_digest_state)
-        self.assertEqual(hologram.STATE_FORMAT_VERSION, STATE_FORMAT_VERSION)
 
     def test_state_uses_snapshot_after_disk_changes(self) -> None:
         scan = self.scan_with_source("svc.py", b"before\n")
-        first = compute_state(
-            self.root,
-            self.config,
-            scan,
-            extractor_versions={"python": "2"},
-            parser_versions={"python": "stdlib-ast-3.11"},
-        )
+        first = compute_state(self.root, self.config, scan)
         (self.root / "svc.py").write_bytes(b"after\n")
-        second = compute_state(
-            self.root,
-            self.config,
-            scan,
-            extractor_versions={"python": "2"},
-            parser_versions={"python": "stdlib-ast-3.11"},
-        )
+        second = compute_state(self.root, self.config, scan)
         self.assertEqual(first.value, second.value)
 
     def test_state_changes_for_every_semantic_input(self) -> None:
         baseline = self.state()
         self.assertNotEqual(baseline, self.state(raw=b"changed\n"))
         self.assertNotEqual(baseline, self.state(output="OTHER.md"))
-        self.assertNotEqual(baseline, self.state(extractor_version="3"))
-        self.assertNotEqual(
-            baseline,
-            self.state(parser_version="stdlib-ast-3.12"),
-        )
 
     def test_entry_order_does_not_change_state(self) -> None:
         left = self.compute(scan_result=self.scan("a.py", "b.py"))
@@ -227,115 +188,16 @@ class StateTest(unittest.TestCase):
         self.assertEqual(baseline, changed)
 
     def test_excluded_supported_source_does_not_change_state(self) -> None:
-        baseline = self.state(
-            extra_excluded=("generated/Model.java", b"first\n")
-        )
-        changed_bytes = self.state(
-            extra_excluded=("generated/Model.java", b"second\n")
-        )
-        changed_path = self.state(
-            extra_excluded=("generated/Renamed.java", b"first\n")
-        )
+        baseline = self.state(extra_excluded=("generated/Model.java", b"first\n"))
+        changed_bytes = self.state(extra_excluded=("generated/Model.java", b"second\n"))
+        changed_path = self.state(extra_excluded=("generated/Renamed.java", b"first\n"))
         self.assertEqual(baseline, changed_bytes)
         self.assertEqual(baseline, changed_path)
 
     def test_moving_an_indexed_source_behind_exclusion_changes_state(self) -> None:
-        indexed = self.compute(
-            scan_result=self.scan("main.py", "generated/model.py")
-        )
-        excluded = self.compute(
-            extra_excluded=("generated/model.py", b"x = 1\n")
-        )
+        indexed = self.compute(scan_result=self.scan("main.py", "generated/model.py"))
+        excluded = self.compute(extra_excluded=("generated/model.py", b"x = 1\n"))
         self.assertNotEqual(indexed.value, excluded.value)
-
-    def test_only_active_language_versions_are_hashed(self) -> None:
-        baseline = self.state(
-            extractor_versions={"python": "2", "java": "one"},
-            parser_versions={"python": "3.11", "java": "one"},
-        )
-        irrelevant = self.state(
-            extractor_versions={"python": "2", "java": "two"},
-            parser_versions={"python": "3.11", "java": "two"},
-        )
-        active_extractor = self.state(
-            extractor_versions={"python": "3", "java": "one"},
-            parser_versions={"python": "3.11", "java": "one"},
-        )
-        active_parser = self.state(
-            extractor_versions={"python": "2", "java": "one"},
-            parser_versions={"python": "3.12", "java": "one"},
-        )
-        self.assertEqual(baseline, irrelevant)
-        self.assertNotEqual(baseline, active_extractor)
-        self.assertNotEqual(baseline, active_parser)
-
-    def test_active_tool_versions_are_required_nonempty_strings(self) -> None:
-        scan_result = self.scan_with_source("main.py", b"x = 1\n")
-        cases = (
-            ("extractor_versions", {}, ValueError, "missing active language 'python'"),
-            ("parser_versions", {}, ValueError, "missing active language 'python'"),
-            (
-                "extractor_versions",
-                {"python": 1},
-                TypeError,
-                "version for active language 'python' must be a string",
-            ),
-            (
-                "parser_versions",
-                {"python": 1},
-                TypeError,
-                "version for active language 'python' must be a string",
-            ),
-            (
-                "extractor_versions",
-                {"python": ""},
-                ValueError,
-                "version for active language 'python' must not be empty",
-            ),
-            (
-                "parser_versions",
-                {"python": ""},
-                ValueError,
-                "version for active language 'python' must not be empty",
-            ),
-        )
-        for field, invalid, error_type, message in cases:
-            with self.subTest(field=field, invalid=invalid):
-                versions: dict[str, object] = {
-                    "extractor_versions": {"python": "2"},
-                    "parser_versions": {"python": "stdlib-ast-3.11"},
-                }
-                versions[field] = invalid
-                with self.assertRaisesRegex(error_type, message):
-                    compute_state(
-                        self.root,
-                        self.config,
-                        scan_result,
-                        extractor_versions=cast(
-                            Mapping[str, str],
-                            versions["extractor_versions"],
-                        ),
-                        parser_versions=cast(
-                            Mapping[str, str],
-                            versions["parser_versions"],
-                        ),
-                    )
-
-    def test_invalid_inactive_tool_versions_are_ignored(self) -> None:
-        scan_result = self.scan_with_source("main.py", b"x = 1\n")
-        baseline = self.compute(scan_result=scan_result)
-        with_invalid_extras = self.compute(
-            scan_result=scan_result,
-            extractor_versions=cast(
-                Mapping[str, str],
-                {"python": "2", "java": ""},
-            ),
-            parser_versions=cast(
-                Mapping[str, str],
-                {"python": "stdlib-ast-3.11", "java": 1},
-            ),
-        )
-        self.assertEqual(baseline.value, with_invalid_extras.value)
 
     def test_failed_language_entry_status_and_reason_change_state(self) -> None:
         snapshot = self.source("bad.py", b"x = 1\n")
@@ -473,33 +335,6 @@ class StateTest(unittest.TestCase):
         self.assertNotEqual(walk_failure, excluded)
         self.assertEqual(empty, excluded)
 
-    def test_language_none_failure_does_not_activate_tool_versions(self) -> None:
-        failure = ScanResult(
-            (
-                ScanEntry(
-                    self.root / "blocked/private",
-                    "blocked/private",
-                    None,
-                    ScanStatus.FAILED,
-                    "walk-error",
-                    None,
-                ),
-            ),
-            (),
-            False,
-        )
-        first = self.compute(
-            scan_result=failure,
-            extractor_versions={"java": "one"},
-            parser_versions={"java": "one"},
-        )
-        second = self.compute(
-            scan_result=failure,
-            extractor_versions={"java": "two"},
-            parser_versions={"java": "two"},
-        )
-        self.assertEqual(first.value, second.value)
-
     def test_entry_language_assignment_is_hashed_per_path(self) -> None:
         def entry(file: str, language: Language) -> ScanEntry:
             raw = b"same source\n"
@@ -536,17 +371,8 @@ class StateTest(unittest.TestCase):
             (),
             True,
         )
-        versions = {"java": "legacy", "python": "legacy"}
-        first = self.compute(
-            scan_result=left,
-            extractor_versions=versions,
-            parser_versions=versions,
-        )
-        second = self.compute(
-            scan_result=right,
-            extractor_versions=versions,
-            parser_versions=versions,
-        )
+        first = self.compute(scan_result=left)
+        second = self.compute(scan_result=right)
         self.assertNotEqual(first.value, second.value)
 
     def test_source_role_is_hashed(self) -> None:
@@ -589,13 +415,9 @@ class StateTest(unittest.TestCase):
     def test_indexed_helm_source_bytes_change_state(self) -> None:
         first = self.compute(
             scan_result=self.scan_with_source("chart/templates/app.yaml", b"one\n"),
-            extractor_versions={"helm": "2"},
-            parser_versions={"helm": "builtin"},
         )
         second = self.compute(
             scan_result=self.scan_with_source("chart/templates/app.yaml", b"two\n"),
-            extractor_versions={"helm": "2"},
-            parser_versions={"helm": "builtin"},
         )
         self.assertNotEqual(first.value, second.value)
 
@@ -617,22 +439,8 @@ class StateTest(unittest.TestCase):
             (),
             True,
         )
-        versions = {"python": "2"}
-        parser_versions = {"python": "stdlib-ast-3.11"}
-        first = compute_state(
-            self.root,
-            self.config,
-            left,
-            extractor_versions=versions,
-            parser_versions=parser_versions,
-        )
-        second = compute_state(
-            other_root,
-            self.config,
-            right,
-            extractor_versions=versions,
-            parser_versions=parser_versions,
-        )
+        first = compute_state(self.root, self.config, left)
+        second = compute_state(other_root, self.config, right)
         self.assertEqual(first.value, second.value)
 
     def test_compute_state_never_reads_or_resolves_paths(self) -> None:

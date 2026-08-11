@@ -45,7 +45,6 @@ from .diff import (
 from .hooks import (
     UnsupportedHookError,
     preflight_precommit,
-    remove_legacy_post_hook_lines,
     render_precommit_command,
 )
 from .pipeline import BuildSnapshot, IncompleteBuildError
@@ -389,12 +388,7 @@ def _run_init(
 
     planned_hooks: tuple[PlannedWrite, ...] = ()
     if command is not None:
-        planned_hooks = merge_planned_writes(
-            (
-                preflight_precommit(resolved, command),
-                *remove_legacy_post_hook_lines(resolved),
-            )
-        )
+        planned_hooks = (preflight_precommit(resolved, command),)
 
     changed = list(commit_writes(planned_root))
     if planned_hooks:
@@ -512,7 +506,7 @@ def command_init(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the strict Hologram v2 lifecycle command parser."""
+    """Build the strict Hologram lifecycle command parser."""
 
     common = _CommandParser(add_help=False, allow_abbrev=False)
     common.add_argument(
@@ -525,7 +519,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=Path(CONFIG_NAME),
-        help=f"schema-2 configuration path (default: {CONFIG_NAME})",
+        help=f"configuration path (default: {CONFIG_NAME})",
     )
     common.add_argument(
         "--quiet",
@@ -535,7 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = _CommandParser(
         prog="hologram",
-        description="Build and deliver canonical Hologram v2 project maps.",
+        description="Build and deliver canonical Hologram project maps.",
         allow_abbrev=False,
     )
     commands = parser.add_subparsers(
@@ -559,7 +553,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--no-hook",
         action="store_true",
-        help="do not install or migrate Git hooks",
+        help="do not install a Git hook",
     )
 
     commands.add_parser(
@@ -585,7 +579,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse and dispatch one Hologram v2 lifecycle command."""
+    """Parse and dispatch one Hologram lifecycle command."""
 
     try:
         arguments = build_parser().parse_args(argv)

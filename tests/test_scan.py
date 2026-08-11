@@ -99,9 +99,7 @@ class ScanValueTest(unittest.TestCase):
                 None,
             )
         )
-        diagnostics.append(
-            Diagnostic("later", DiagnosticSeverity.ERROR, "later")
-        )
+        diagnostics.append(Diagnostic("later", DiagnosticSeverity.ERROR, "later"))
 
         self.assertEqual(result.entries, ())
         self.assertEqual(result.diagnostics, ())
@@ -185,8 +183,10 @@ class GitDiscoveryTest(unittest.TestCase):
 
             self.assertEqual(1, len(result.entries))
             entry = result.entries[0]
-            self.assertEqual(("missing.py", ScanStatus.FAILED, "missing"),
-                             (entry.file, entry.status, entry.reason))
+            self.assertEqual(
+                ("missing.py", ScanStatus.FAILED, "missing"),
+                (entry.file, entry.status, entry.reason),
+            )
             self.assertIsNone(entry.source)
             self.assertEqual(["scan-missing"], [d.code for d in result.diagnostics])
             self.assertFalse(result.complete)
@@ -200,7 +200,10 @@ class GitDiscoveryTest(unittest.TestCase):
             subprocess.TimeoutExpired(["git", "ls-files"], 60),
         )
         for failure in failures:
-            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as tmp:
+            with (
+                self.subTest(failure=type(failure).__name__),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 root = Path(tmp)
                 (root / "fallback.py").write_text("FALLBACK = True\n")
 
@@ -245,7 +248,10 @@ class GitDiscoveryTest(unittest.TestCase):
             ),
         )
         for probe_result in cases:
-            with self.subTest(probe=type(probe_result).__name__), tempfile.TemporaryDirectory() as tmp:
+            with (
+                self.subTest(probe=type(probe_result).__name__),
+                tempfile.TemporaryDirectory() as tmp,
+            ):
                 root = Path(tmp)
                 (root / "fallback.py").write_text("FALLBACK = True\n")
 
@@ -253,16 +259,20 @@ class GitDiscoveryTest(unittest.TestCase):
                     side_effect = probe_result
                 else:
                     side_effect = None
-                with mock.patch(
-                    "hologram.scan.subprocess.run",
-                    side_effect=side_effect,
-                    return_value=(
-                        None if isinstance(probe_result, BaseException)
-                        else probe_result
+                with (
+                    mock.patch(
+                        "hologram.scan.subprocess.run",
+                        side_effect=side_effect,
+                        return_value=(
+                            None
+                            if isinstance(probe_result, BaseException)
+                            else probe_result
+                        ),
                     ),
-                ), mock.patch(
-                    "hologram.scan.os.walk",
-                    side_effect=AssertionError("indeterminate probe must not walk"),
+                    mock.patch(
+                        "hologram.scan.os.walk",
+                        side_effect=AssertionError("indeterminate probe must not walk"),
+                    ),
                 ):
                     result = scan_project(root, _config(exclude=()))
 
@@ -293,7 +303,9 @@ class GitDiscoveryTest(unittest.TestCase):
                 result = scan_project(root, _config(exclude=()))
 
             run.assert_called_once()
-            self.assertEqual(["fallback.py"], [source.file for source in result.sources])
+            self.assertEqual(
+                ["fallback.py"], [source.file for source in result.sources]
+            )
             self.assertTrue(result.complete)
 
     def test_false_worktree_probe_uses_filesystem_fallback(self) -> None:
@@ -314,7 +326,9 @@ class GitDiscoveryTest(unittest.TestCase):
                 result = scan_project(root, _config(exclude=()))
 
             run.assert_called_once()
-            self.assertEqual(["fallback.py"], [source.file for source in result.sources])
+            self.assertEqual(
+                ["fallback.py"], [source.file for source in result.sources]
+            )
             self.assertTrue(result.complete)
 
 
@@ -370,7 +384,9 @@ class FilesystemDiscoveryTest(unittest.TestCase):
                 ["src/direct.py", "src/nested/deep.py"],
                 [source.file for source in result.sources],
             )
-            root_entry = next(entry for entry in result.entries if entry.file == "root.py")
+            root_entry = next(
+                entry for entry in result.entries if entry.file == "root.py"
+            )
             self.assertEqual(ScanStatus.EXCLUDED, root_entry.status)
             self.assertEqual("include-miss", root_entry.reason)
 
@@ -411,10 +427,13 @@ class FilesystemDiscoveryTest(unittest.TestCase):
             result = scan_project(root, _config(exclude=()))
 
             entry = result.entries[0]
-            self.assertEqual((ScanStatus.FAILED, "outside-root"),
-                             (entry.status, entry.reason))
+            self.assertEqual(
+                (ScanStatus.FAILED, "outside-root"), (entry.status, entry.reason)
+            )
             self.assertIsNone(entry.source)
-            self.assertEqual(["scan-outside-root"], [d.code for d in result.diagnostics])
+            self.assertEqual(
+                ["scan-outside-root"], [d.code for d in result.diagnostics]
+            )
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "requires os.mkfifo")
     def test_non_regular_path_fails_without_reading(self) -> None:
@@ -426,8 +445,9 @@ class FilesystemDiscoveryTest(unittest.TestCase):
             result = scan_project(root, _config(exclude=()))
 
             entry = result.entries[0]
-            self.assertEqual((ScanStatus.FAILED, "non-regular"),
-                             (entry.status, entry.reason))
+            self.assertEqual(
+                (ScanStatus.FAILED, "non-regular"), (entry.status, entry.reason)
+            )
             self.assertIsNone(entry.source)
             self.assertEqual(["scan-non-regular"], [d.code for d in result.diagnostics])
 
@@ -467,17 +487,24 @@ class FilesystemDiscoveryTest(unittest.TestCase):
                 onerror(PermissionError(errno.EACCES, "denied", root / "a-blocked"))
                 yield str(root), [], ["main.py"]
 
-            with mock.patch(
-                "hologram.scan.subprocess.run",
-                return_value=not_git,
-            ), mock.patch("hologram.scan.os.walk", side_effect=walk):
+            with (
+                mock.patch(
+                    "hologram.scan.subprocess.run",
+                    return_value=not_git,
+                ),
+                mock.patch("hologram.scan.os.walk", side_effect=walk),
+            ):
                 result = scan_project(root, _config(exclude=()))
 
             failed = [
                 entry for entry in result.entries if entry.status is ScanStatus.FAILED
             ]
-            self.assertEqual(["a-blocked", "z-blocked"], [entry.file for entry in failed])
-            self.assertEqual(["walk-error", "walk-error"], [entry.reason for entry in failed])
+            self.assertEqual(
+                ["a-blocked", "z-blocked"], [entry.file for entry in failed]
+            )
+            self.assertEqual(
+                ["walk-error", "walk-error"], [entry.reason for entry in failed]
+            )
             self.assertEqual(
                 ["scan-walk-error", "scan-walk-error"],
                 [diagnostic.code for diagnostic in result.diagnostics],
@@ -501,20 +528,29 @@ class ClassificationTest(unittest.TestCase):
             entries = {entry.file: entry for entry in result.entries}
             self.assertEqual(
                 (Language.PYTHON, ScanStatus.INDEXED, None),
-                (entries["main.py"].language, entries["main.py"].status,
-                 entries["main.py"].reason),
+                (
+                    entries["main.py"].language,
+                    entries["main.py"].status,
+                    entries["main.py"].reason,
+                ),
             )
             self.assertIsNotNone(entries["main.py"].source)
             self.assertEqual(
                 (Language.PYTHON, ScanStatus.EXCLUDED, "exclude-pattern"),
-                (entries["excluded.py"].language, entries["excluded.py"].status,
-                 entries["excluded.py"].reason),
+                (
+                    entries["excluded.py"].language,
+                    entries["excluded.py"].status,
+                    entries["excluded.py"].reason,
+                ),
             )
             self.assertIsNone(entries["excluded.py"].source)
             self.assertEqual(
                 (None, ScanStatus.EXCLUDED, "unsupported-language"),
-                (entries["notes.txt"].language, entries["notes.txt"].status,
-                 entries["notes.txt"].reason),
+                (
+                    entries["notes.txt"].language,
+                    entries["notes.txt"].status,
+                    entries["notes.txt"].reason,
+                ),
             )
             self.assertIsNone(entries["notes.txt"].source)
             self.assertEqual((), result.diagnostics)
@@ -625,8 +661,9 @@ class SnapshotFailureTest(unittest.TestCase):
             result = scan_project(root, _config(exclude=()))
 
             entry = result.entries[0]
-            self.assertEqual((ScanStatus.FAILED, "invalid-utf8"),
-                             (entry.status, entry.reason))
+            self.assertEqual(
+                (ScanStatus.FAILED, "invalid-utf8"), (entry.status, entry.reason)
+            )
             self.assertIsNotNone(entry.source)
             assert entry.source is not None
             self.assertEqual(raw, entry.source.raw)
@@ -659,8 +696,9 @@ class SnapshotFailureTest(unittest.TestCase):
                 result = scan_project(root, _config(exclude=()))
 
             entry = result.entries[0]
-            self.assertEqual((ScanStatus.FAILED, "read-error"),
-                             (entry.status, entry.reason))
+            self.assertEqual(
+                (ScanStatus.FAILED, "read-error"), (entry.status, entry.reason)
+            )
             self.assertIsNone(entry.source)
             self.assertEqual(
                 [("scan-read-error", DiagnosticSeverity.ERROR, None)],
@@ -730,9 +768,7 @@ class SnapshotFailureTest(unittest.TestCase):
             ) -> int:
                 nonlocal swapped
                 absolute_boundary = dir_fd is None and Path(candidate) == root
-                component_boundary = (
-                    dir_fd is not None and candidate == ancestor.name
-                )
+                component_boundary = dir_fd is not None and candidate == ancestor.name
                 if not swapped and (absolute_boundary or component_boundary):
                     ancestor.rename(moved_ancestor)
                     ancestor.symlink_to(outside_ancestor, target_is_directory=True)

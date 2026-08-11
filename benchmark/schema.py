@@ -67,7 +67,6 @@ class Task:
 
 @dataclass(frozen=True)
 class Config:
-    schema_version: int
     corpus: BenchmarkCorpus
     tasks: tuple[Task, ...]
     model: str
@@ -322,7 +321,9 @@ def task_asset_paths(task: Task, *, manifest: Path) -> tuple[Path, ...]:
         words = shlex.split(task.accept_cmd)
     except ValueError as error:  # pragma: no cover - load_tasks already validates
         raise ValueError("task accept_cmd is not valid shell syntax") from error
-    if task.visibility == "private" and any(word in {"-c", "--command"} for word in words):
+    if task.visibility == "private" and any(
+        word in {"-c", "--command"} for word in words
+    ):
         raise ValueError("private verifier commands must not hide assets in shell code")
     assets: list[Path] = []
     module_argument = False
@@ -410,7 +411,6 @@ def load_tasks(
         "manifest",
         required=frozenset(
             {
-                "schema_version",
                 "corpus",
                 "tasks",
                 "model",
@@ -422,8 +422,6 @@ def load_tasks(
             }
         ),
     )
-    if type(root["schema_version"]) is not int or root["schema_version"] != 2:
-        raise ValueError("schema_version must equal 2")
     corpus = _corpus(root["corpus"])
     raw_tasks = root["tasks"]
     if type(raw_tasks) is not list or not raw_tasks:
@@ -457,7 +455,6 @@ def load_tasks(
         environ=environ,
     )
     return Config(
-        2,
         corpus,
         tasks,
         _MODEL,

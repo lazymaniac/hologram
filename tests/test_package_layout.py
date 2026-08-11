@@ -2,20 +2,12 @@ import subprocess
 import sys
 import tomllib
 import unittest
-from importlib.util import find_spec
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class PackageLayoutTest(unittest.TestCase):
-    def test_root_monolith_is_removed(self):
-        self.assertFalse((ROOT / "hologram.py").exists())
-
-    def test_legacy_module_is_removed(self):
-        self.assertFalse((ROOT / "src" / "hologram" / "legacy.py").exists())
-        self.assertIsNone(find_spec("hologram.legacy"))
-
     def test_import_resolves_to_src_package(self):
         import hologram
 
@@ -36,7 +28,7 @@ class PackageLayoutTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("usage: hologram", result.stdout)
 
-    def test_console_script_source_targets_v2_cli(self):
+    def test_console_script_source_targets_cli(self):
         with (ROOT / "pyproject.toml").open("rb") as stream:
             project = tomllib.load(stream)["project"]
 

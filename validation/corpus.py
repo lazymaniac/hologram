@@ -323,7 +323,7 @@ def build_census(
     registry: CorpusRegistry,
     roots: Mapping[str, Path],
 ) -> tuple[CensusRecord, ...]:
-    """Scan the configured roots with the v2 foundation's candidate policy."""
+    """Scan the configured roots with Hologram's candidate policy."""
 
     expected_names = {spec.name for spec in registry.corpora}
     missing = sorted(expected_names - frozenset(roots))

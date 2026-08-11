@@ -8,7 +8,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -33,12 +33,10 @@ from hologram.model import (
     SymbolKind,
     Visibility,
 )
-from hologram.parsers import api as api_runtime
 from hologram.parsers import common as common_runtime
 from hologram.parsers import treesitter as treesitter_runtime
 from hologram.parsers._treesitter_common import walk_all, walk_owned
 from hologram.parsers.api import (
-    EXTRACTOR_VERSIONS,
     ParserRegistry,
     extract_file,
     extract_project,
@@ -453,18 +451,14 @@ class ParserRuntimeTest(unittest.TestCase):
                 "foreign-file-owner",
                 FileIR(
                     snapshot,
-                    symbols=(
-                        dataclasses.replace(symbol, id=foreign_file_owner),
-                    ),
+                    symbols=(dataclasses.replace(symbol, id=foreign_file_owner),),
                 ),
             ),
             (
                 "foreign-language-owner",
                 FileIR(
                     snapshot,
-                    symbols=(
-                        dataclasses.replace(symbol, id=foreign_language_owner),
-                    ),
+                    symbols=(dataclasses.replace(symbol, id=foreign_language_owner),),
                 ),
             ),
             (
@@ -709,7 +703,6 @@ class ParserRuntimeTest(unittest.TestCase):
     ) -> None:
         code = """
 import sys
-import importlib.util
 for name in tuple(sys.modules):
     if name == 'hologram' or name.startswith('hologram.'):
         del sys.modules[name]
@@ -733,8 +726,6 @@ extractors = sorted(
     if name.startswith('hologram.parsers.')
     and name.rsplit('.', 1)[-1] not in {'api', 'common', 'treesitter'}
 )
-if importlib.util.find_spec('hologram.legacy') is not None:
-    raise SystemExit('legacy module still exists')
 if loaded or extractors:
     raise SystemExit(f'eager imports: {loaded!r} {extractors!r}')
 if parsers.ParserRegistry is not hologram.parsers.ParserRegistry:
@@ -765,7 +756,7 @@ if parsers.ParserRegistry is not hologram.parsers.ParserRegistry:
         )
         if Language.GO.value not in available:
             self.skipTest("tree-sitter-go not installed")
-        code = r'''
+        code = r"""
 import hashlib
 from pathlib import Path
 
@@ -802,7 +793,7 @@ for language, file, prefix, call, suffix in cases:
 if "go" not in completed:
     raise SystemExit("Go stress case did not run")
 print(",".join(completed))
-'''
+"""
         result = subprocess.run(
             [sys.executable, "-c", code],
             cwd=ROOT,
@@ -952,13 +943,10 @@ print(",".join(completed))
             return None
 
         registry = ParserRegistry(module_loader=load)
-        with patch.object(
-            api_runtime, "grammar_version", return_value="runtime/grammar"
-        ):
-            first, second = self.run_discovery_pair(
-                lambda: registry.parser_for(Language.JAVA),
-                gate,
-            )
+        first, second = self.run_discovery_pair(
+            lambda: registry.parser_for(Language.JAVA),
+            gate,
+        )
 
         self.assertEqual(gate.calls, 1)
         self.assertEqual(runtime_calls, 1)
@@ -1052,12 +1040,7 @@ print(",".join(completed))
             return None
 
         registry = ParserRegistry(module_loader=load)
-        with (
-            patch.object(
-                api_runtime, "grammar_version", return_value="runtime/grammar"
-            ),
-            ThreadPoolExecutor(max_workers=2) as executor,
-        ):
+        with ThreadPoolExecutor(max_workers=2) as executor:
             futures = (
                 executor.submit(registry.parser_for, Language.JAVA),
                 executor.submit(registry.parser_for, Language.GO),
@@ -1065,68 +1048,6 @@ print(",".join(completed))
             results = tuple(future.result(timeout=5) for future in futures)
 
         self.assertTrue(all(result is not None for result in results))
-
-    def test_parser_version_failure_is_atomically_fail_closed(self) -> None:
-        capsule = object()
-        version_entered = threading.Event()
-        version_release = threading.Event()
-        version_calls = 0
-
-        def load(name: str) -> object | None:
-            modules = {
-                "tree_sitter_java": SimpleNamespace(language=lambda: capsule),
-                "tree_sitter": SimpleNamespace(
-                    Language=_FakeLanguage,
-                    Parser=_FakeParser,
-                ),
-            }
-            return modules.get(name)
-
-        def broken_version(language: Language) -> str:
-            nonlocal version_calls
-            version_calls += 1
-            version_entered.set()
-            if not version_release.wait(5):
-                raise AssertionError("version gate timed out")
-            raise RuntimeError("metadata discovery broke")
-
-        registry = ParserRegistry(module_loader=load)
-
-        def discover() -> object:
-            try:
-                return registry.parser_for(Language.JAVA)
-            except RuntimeError as error:  # captured to expose partial publication
-                return error
-
-        second_done = threading.Event()
-
-        def second_discover() -> object:
-            try:
-                return discover()
-            finally:
-                second_done.set()
-
-        with (
-            patch.object(api_runtime, "grammar_version", side_effect=broken_version),
-            ThreadPoolExecutor(max_workers=2) as executor,
-        ):
-            first_future = executor.submit(discover)
-            self.assertTrue(version_entered.wait(5))
-            second_future = executor.submit(second_discover)
-            published_early = second_done.wait(0.2)
-            version_release.set()
-            results = (
-                first_future.result(timeout=5),
-                second_future.result(timeout=5),
-            )
-
-        self.assertFalse(published_early)
-        self.assertEqual(results, (None, None))
-        self.assertEqual(version_calls, 1)
-        error = registry._parser_error(Language.JAVA)
-        self.assertIsInstance(error, RuntimeError)
-        self.assertEqual(registry.versions()["java"], "missing")
-        self.assertIsNone(registry.parser_for(Language.JAVA))
 
     def test_builtin_parsers_do_not_load_modules(self) -> None:
         calls: list[str] = []
@@ -1137,35 +1058,6 @@ print(",".join(completed))
         self.assertIsNone(registry.parser_for(Language.PYTHON))
         self.assertIsNone(registry.parser_for(Language.HELM))
         self.assertEqual(calls, [])
-
-    def test_versions_are_complete_sorted_fresh_immutable_and_nonloading(self) -> None:
-        calls: list[str] = []
-        registry = ParserRegistry(module_loader=lambda name: calls.append(name))
-
-        first = registry.versions()
-        second = registry.versions()
-
-        expected_keys = sorted(language.value for language in Language)
-        self.assertEqual(list(first), expected_keys)
-        self.assertEqual(list(second), expected_keys)
-        self.assertIsInstance(first, MappingProxyType)
-        self.assertIsNot(first, second)
-        self.assertEqual(first, second)
-        self.assertEqual(
-            first["python"],
-            f"stdlib-ast-{sys.version_info.major}.{sys.version_info.minor}",
-        )
-        self.assertEqual(first["helm"], "builtin")
-        self.assertRegex(first["java"], r"^(missing|[^/]+/[^/]+)$")
-        self.assertEqual(calls, [])
-        with self.assertRaises(TypeError):
-            first["python"] = "changed"  # type: ignore[index]
-
-    def test_extractor_version_mapping_is_complete_and_immutable(self) -> None:
-        self.assertEqual(set(EXTRACTOR_VERSIONS), set(Language))
-        self.assertEqual(set(EXTRACTOR_VERSIONS.values()), {"2"})
-        with self.assertRaises(TypeError):
-            EXTRACTOR_VERSIONS[Language.PYTHON] = "3"  # type: ignore[index]
 
 
 class ParserHelperTest(unittest.TestCase):
@@ -1199,10 +1091,7 @@ class ParserHelperTest(unittest.TestCase):
             ["boundary", "left", "left_leaf", "right", "right_leaf"],
         )
         self.assertEqual(
-            [
-                node.type
-                for node in walk_owned(root, {"boundary"}, include_root=False)
-            ],
+            [node.type for node in walk_owned(root, {"boundary"}, include_root=False)],
             ["left", "left_leaf", "right", "right_leaf"],
         )
 

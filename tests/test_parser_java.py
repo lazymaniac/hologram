@@ -242,7 +242,7 @@ class JavaParserTest(unittest.TestCase):
             [(None, "Handler"), ("OrderId", "of"), ("engine", "evaluate")],
         )
 
-    def test_fixture_declarations_preserve_v1_shape_and_add_fields(self) -> None:
+    def test_fixture_declarations_include_types_bindings_and_fields(self) -> None:
         pricing = extract_file(fixture_snapshot("src/engine/PricingEngine.java"))
         pricing_type = symbol(pricing, "PricingEngine", SymbolKind.CLASS)
         evaluate = symbol(pricing, "evaluate", SymbolKind.METHOD)

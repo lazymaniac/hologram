@@ -290,7 +290,6 @@ class RenderProjectionTest(unittest.TestCase):
                 "symbols",
             ),
             RenderIR: (
-                "schema_version",
                 "state",
                 "interns",
                 "dependencies",
@@ -355,7 +354,6 @@ class RenderProjectionTest(unittest.TestCase):
         dependencies = ["app→core"]
         files = [rendered_file]
         ir = RenderIR(
-            2,
             STATE,
             interns,  # type: ignore[arg-type]
             dependencies,  # type: ignore[arg-type]
@@ -372,7 +370,7 @@ class RenderProjectionTest(unittest.TestCase):
         self.assertEqual(ir.dependencies, ("app→core",))
         self.assertEqual(ir.files, (rendered_file,))
         with self.assertRaises(TypeError):
-            RenderIR(2, STATE, (), "app→core", ())  # type: ignore[arg-type]
+            RenderIR(STATE, (), "app→core", ())  # type: ignore[arg-type]
 
     def test_projection_preserves_file_ownership_raw_symbol_facts_and_empty_files(
         self,
@@ -404,7 +402,7 @@ class RenderProjectionTest(unittest.TestCase):
             (_item(other), _item(rich)),
         )
         ir = project_render_ir(analyzed, state=STATE, hot_threshold=2)
-        self.assertEqual((ir.schema_version, ir.state, ir.interns), (2, STATE, ()))
+        self.assertEqual((ir.state, ir.interns), (STATE, ()))
         self.assertEqual(
             tuple(file.path for file in ir.files),
             ("src/a.py", "src/b.py", "src/z_empty.py"),
@@ -1314,7 +1312,6 @@ def _all_fields_render_ir() -> RenderIR:
         "()",
     )
     return RenderIR(
-        2,
         STATE,
         (),
         ("app→core", "pkg→α"),
@@ -1464,7 +1461,6 @@ def _small_render_ir(*, two_symbols: bool = False) -> RenderIR:
         )
         symbols.append(_direct_symbol(second_id, line=2, signature="b()"))
     return RenderIR(
-        2,
         STATE,
         (),
         (),
@@ -1487,7 +1483,7 @@ class RenderRoundTripTest(unittest.TestCase):
     ) -> None:
         ir = _all_fields_render_ir()
         expected = (
-            f"# hologram:2 state={STATE} · regen: hologram build\n"
+            f"# hologram state={STATE} · regen: hologram build\n"
             '· deps ["app→core","pkg→α"]\n'
             '@ "gen/generated.py" "python" "generated" null\n'
             '@ "src/index.ts" "typescript" "production" null\n'
@@ -1575,7 +1571,7 @@ class RenderRoundTripTest(unittest.TestCase):
                     ),
                 )
             )
-        text = render_project(RenderIR(2, STATE, (), (), tuple(files)))
+        text = render_project(RenderIR(STATE, (), (), tuple(files)))
         self.assertIn('@ "src/ids/ItemId.java"', text)
         self.assertIn('@ "src/ids/OrderId.java"', text)
         self.assertEqual(text.count('"of(String):'), 2)
@@ -1709,7 +1705,6 @@ class RenderRoundTripTest(unittest.TestCase):
             behaviors=(value,),
         )
         ir = RenderIR(
-            2,
             STATE,
             (RenderIntern("&run", value),),
             (value,),
@@ -1755,7 +1750,6 @@ class RenderRoundTripTest(unittest.TestCase):
         production = next(file for file in ir.files if file.symbols)
         symbol = production.symbols[0]
         invalid = (
-            replace(ir, schema_version=1),
             replace(ir, state="A" * 64),
             replace(ir, dependencies=tuple(reversed(ir.dependencies))),
             replace(ir, dependencies=("app→core", "app→core")),
@@ -1878,7 +1872,7 @@ class RenderRoundTripTest(unittest.TestCase):
     def test_decoder_rejects_header_whitespace_and_json_variants(self) -> None:
         text = render_project(_all_fields_render_ir())
         mutations = {
-            "schema": text.replace("# hologram:2", "# hologram:1", 1),
+            "header": text.replace("# hologram", "# hologram map", 1),
             "state": text.replace(f"state={STATE}", f"state={'A' * 64}", 1),
             "regen": text.replace("hologram build", "hologram check", 1),
             "crlf": text.replace("\n", "\r\n"),
@@ -1906,7 +1900,6 @@ class RenderRoundTripTest(unittest.TestCase):
 
     def test_decoder_rejects_file_and_symbol_structure_mutations(self) -> None:
         empty = RenderIR(
-            2,
             STATE,
             (),
             (),
@@ -1958,17 +1951,16 @@ class RenderRoundTripTest(unittest.TestCase):
         short_text = render_project(short_ir)
         aliased_short = short_text.replace(_json_token("x/y"), '"&y"')
         aliased_short = aliased_short.replace(
-            f"# hologram:2 state={STATE} · regen: hologram build\n",
-            f"# hologram:2 state={STATE} · regen: hologram build\n"
-            '· intern "&y" "x/y"\n',
+            f"# hologram state={STATE} · regen: hologram build\n",
+            f'# hologram state={STATE} · regen: hologram build\n· intern "&y" "x/y"\n',
             1,
         )
         under_three_text = render_project(
             _projected_repeated_values((value,), occurrences=2)
         ).replace(_json_token(value), '"&run"')
         under_three_text = under_three_text.replace(
-            f"# hologram:2 state={STATE} · regen: hologram build\n",
-            f"# hologram:2 state={STATE} · regen: hologram build\n{declaration}",
+            f"# hologram state={STATE} · regen: hologram build\n",
+            f"# hologram state={STATE} · regen: hologram build\n{declaration}",
             1,
         )
 

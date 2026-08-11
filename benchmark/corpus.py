@@ -249,7 +249,7 @@ def _copy_assets(corpus: Path, workspace: Path, assets: Sequence[str]) -> None:
 
 
 def workspace_asset_sha256(root: Path, assets: Sequence[str]) -> str:
-    digest = hashlib.sha256(b"hologram-workspace-assets-v1\0")
+    digest = hashlib.sha256(b"hologram-workspace-assets\0")
     for relative in sorted(assets, key=os.fsencode):
         asset = _asset_path(root, relative)
         if not asset.exists() or asset.is_symlink():
@@ -290,7 +290,7 @@ def workspace_asset_sha256(root: Path, assets: Sequence[str]) -> str:
 def _challenge_tree_sha256(workspace: Path) -> str:
     tree = _git_text(workspace, "write-tree")
     return hashlib.sha256(
-        b"hologram-challenged-tree-v1\0" + tree.encode("ascii")
+        b"hologram-challenged-tree\0" + tree.encode("ascii")
     ).hexdigest()
 
 
@@ -319,14 +319,8 @@ def _declared_corpus_output(workspace: Path) -> Path | None:
         data = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
-    schema = data.get("schema_version")
     output = data.get("output")
-    if (
-        isinstance(schema, bool)
-        or not isinstance(schema, int)
-        or schema != 2
-        or not isinstance(output, str)
-    ):
+    if not isinstance(output, str):
         return None
     relative = PurePosixPath(output)
     if (

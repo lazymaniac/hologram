@@ -8,10 +8,9 @@ from pathlib import Path
 
 from .context import PlannedWrite, preflight_atomic_write, read_target_bytes
 
-HOOK_START = b"# hologram:v2:start"
-HOOK_END = b"# hologram:v2:end"
+HOOK_START = b"# hologram:start"
+HOOK_END = b"# hologram:end"
 
-_HOOK_NAMES = ("post-commit", "post-merge", "post-checkout")
 _SHELLS = frozenset({"sh", "bash", "zsh"})
 
 
@@ -78,14 +77,14 @@ def render_precommit_command(
     command = (
         f"{shlex.quote(os.fspath(selected_python))} -B -m "
         f"{shlex.quote(selected_module)} check "
-        '--root "$hologram_v2_root" '
-        f'--config "$hologram_v2_root/{relative_text}" '
+        '--root "$hologram_root" '
+        f'--config "$hologram_root/{relative_text}" '
         "--quiet || exit $?\n"
     ).encode()
     return (
         HOOK_START
         + b"\n"
-        + b"hologram_v2_root=$(git rev-parse --show-toplevel) || exit $?\n"
+        + b"hologram_root=$(git rev-parse --show-toplevel) || exit $?\n"
         + command
         + HOOK_END
         + b"\n"
@@ -289,89 +288,10 @@ def preflight_precommit(repo: Path, command: bytes) -> PlannedWrite:
     return preflight_atomic_write(hook, updated, root=hooks, mode=mode)
 
 
-def _legacy_options_match(options: list[str], repo: Path) -> bool:
-    if len(options) < 3 or options[0] != "--root":
-        return False
-    root = Path(options[1])
-    if not root.is_absolute() or root.resolve(strict=False) != repo.resolve(
-        strict=False
-    ):
-        return False
-    tail = options[2:]
-    languages: list[str] = []
-    while tail[:1] == ["--lang"]:
-        if len(tail) < 2 or not tail[1] or tail[1].startswith("-"):
-            return False
-        languages.append(tail[1])
-        tail = tail[2:]
-    if languages != sorted(set(languages)):
-        return False
-    if tail[:1] == ["--embed"]:
-        tail = tail[1:]
-    return tail == ["--quiet"]
-
-
-def _legacy_script() -> Path | None:
-    source = Path(__file__).resolve()
-    source_directory = source.parent.parent
-    if source_directory.name != "src":
-        return None
-    return source_directory.parent / "hologram.py"
-
-
-def _is_legacy_line(line: bytes, repo: Path) -> bool:
-    try:
-        text = line.decode("utf-8").removesuffix("\n").removesuffix("\r")
-    except UnicodeDecodeError:
-        return False
-    if text != text.strip() or not text.endswith(" || true"):
-        return False
-    try:
-        arguments = shlex.split(text.removesuffix(" || true"))
-    except ValueError:
-        return False
-    if arguments[1:4] == ["-m", "hologram", "build"]:
-        return _legacy_options_match(arguments[4:], repo)
-    legacy_script = _legacy_script()
-    return bool(
-        legacy_script is not None
-        and len(arguments) >= 3
-        and Path(arguments[1]).is_absolute()
-        and Path(arguments[1]).resolve(strict=False)
-        == legacy_script.resolve(strict=False)
-        and arguments[2] == "build"
-        and _legacy_options_match(arguments[3:], repo)
-    )
-
-
-def remove_legacy_post_hook_lines(repo: Path) -> tuple[PlannedWrite, ...]:
-    """Plan exact legacy generated-line removal, preserving all authored bytes."""
-
-    selected = _require_path(repo, "repo").resolve(strict=False)
-    hooks = _hook_directory(selected)
-    plans: list[PlannedWrite] = []
-    for name in _HOOK_NAMES:
-        hook = hooks / name
-        existing = read_target_bytes(hook, root=hooks)
-        if existing is None:
-            continue
-        kept = tuple(
-            existing[start:end]
-            for start, end, _ in _physical_lines(existing)
-            if not _is_legacy_line(existing[start:end], selected)
-        )
-        updated = b"".join(kept)
-        if updated == existing:
-            continue
-        plans.append(preflight_atomic_write(hook, updated, root=hooks))
-    return tuple(plans)
-
-
 __all__ = [
     "HOOK_END",
     "HOOK_START",
     "UnsupportedHookError",
     "preflight_precommit",
-    "remove_legacy_post_hook_lines",
     "render_precommit_command",
 ]

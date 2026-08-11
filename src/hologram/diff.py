@@ -251,9 +251,6 @@ def _project_symbols(files: Sequence[FileIR]) -> dict[SymbolId, Symbol]:
 def _validate_input(value: DiffInput, field: str) -> _InputIndexes:
     if not isinstance(value, DiffInput):
         raise TypeError(f"{field} must be DiffInput")
-    if value.render_ir.schema_version != 2:
-        raise ValueError(f"{field} render schema must be exactly 2")
-
     project_files: dict[str, FileIR] = {}
     for project_file in value.analyzed.project.files:
         path = project_file.source.file

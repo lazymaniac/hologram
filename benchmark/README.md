@@ -1,18 +1,16 @@
 # Hologram benchmark
 
 > [!IMPORTANT]
-> The current benchmark is the pinned, tiered B/C matrix described below. The
-> Spring report is legacy, exploratory, pre-tier evidence and is not comparable
-> with a current v2 report. No paid sessions are run by the implementation suite.
+> The benchmark is the pinned, tiered B/C matrix described below. No paid sessions
+> are run by the implementation suite.
 
 The current conditions B and C compare two fresh, provenance-matched workspaces
 for every task:
 
 - condition B is the control and contains no Hologram map or managed context;
-- condition C has the complete map in a managed canonical v2 block in
+- condition C has the complete map in a managed canonical block in
   `CLAUDE.md` from turn zero.
 
-Historical condition A used the retired on-disk legacy digest and is now rejected.
 Every B/C pair uses the same challenged Git tree and copied workspace assets. Each
 Claude invocation runs in an isolated configuration directory. A run is accepted
 only when the Claude process terminates successfully and the task-specific answer
@@ -126,8 +124,7 @@ identity and partition results by model/version, tier, and capability. Acceptanc
 turns, reads, and searches are computed only from matched rows. Navigation means
 use accepted, completed pairs. Implementation reuse and duplication likewise use
 only accepted, completed pairs and preserve empty cells as dashes rather than
-silently pooling them. Legacy or incomplete historical rows appear only under
-`legacy / unclassified`.
+silently pooling them. Rows missing the required partition metadata are rejected.
 
 Private reports deliberately omit those partitions and show B/C totals only. Never
 combine public and private rows in one report.
@@ -152,7 +149,7 @@ export HOLOGRAM_VALIDATION_JDB=/absolute/external/jdb-agentic-debugger
   --facts validation/gold/facts \
   --exclusions validation/gold/exclusions \
   --runs 3 \
-  --output /tmp/hologram-v2-static-validation.json
+  --output /tmp/hologram-static-validation.json
 ```
 
 The frozen inventory is 748 census files, a 103-file reviewed sample split
@@ -176,19 +173,3 @@ Frozen minimums are:
 | approximate precision / recall | 100% / 80% |
 
 Gold and thresholds are reviewed inputs, not knobs to change when a run fails.
-
-## Legacy evidence
-
-[`results-spring-2026-08-08.md`](results-spring-2026-08-08.md) preserves numerical
-observations from a legacy, exploratory, and pre-tier experiment only, with n=1 per cell.
-In that protocol, `sonnet` is a mutable model alias.
-Its reuse acceptance commands often verify only that a change occurred.
-Its navigation correctness is not automated (`true`).
-Its 40-turn ceiling is not outcome-gated. In other words, navigation acceptance was
-not automated. It cannot validate the current hardened harness or be compared
-numerically with a future v2 report.
-
-The obsolete active Spring task manifest was removed because it predates the
-terminal-success and answer-verifier contract. Ignored local legacy archives stay
-outside Git and must not be inspected, summarized, copied, or cited in tracked
-documentation.

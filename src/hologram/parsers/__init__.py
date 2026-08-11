@@ -2,7 +2,6 @@ from hologram.model import Symbol
 
 from .api import (
     DEFAULT_REGISTRY,
-    EXTRACTOR_VERSIONS,
     ParserProvider,
     ParserRegistry,
     extract_file,
@@ -11,7 +10,6 @@ from .api import (
 
 __all__ = [
     "DEFAULT_REGISTRY",
-    "EXTRACTOR_VERSIONS",
     "ParserProvider",
     "ParserRegistry",
     "Symbol",

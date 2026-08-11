@@ -11,15 +11,6 @@ from hologram.config import canonical_config_bytes, default_config
 from hologram.model import Language
 
 ROOT = Path(__file__).resolve().parents[1]
-REMOVED_FLAGS = (
-    "--embed",
-    "--embed-max-tokens",
-    "--out",
-    "--lang",
-    "--private",
-    "--behaviors",
-    "--if-stale",
-)
 
 
 def _invoke(*args: str) -> subprocess.CompletedProcess[str]:
@@ -33,14 +24,12 @@ def _invoke(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 class ModuleCliSmokeTest(unittest.TestCase):
-    def test_top_level_help_lists_exact_v2_commands(self) -> None:
+    def test_top_level_help_lists_exact_commands(self) -> None:
         result = _invoke("--help")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("usage: hologram", result.stdout)
         self.assertIn("{init,build,check,diff}", result.stdout)
-        for flag in REMOVED_FLAGS:
-            self.assertNotIn(flag, result.stdout)
         self.assertEqual(result.stderr, "")
 
     def test_each_command_help_exposes_only_its_owned_options(self) -> None:
@@ -57,20 +46,14 @@ class ModuleCliSmokeTest(unittest.TestCase):
                 self.assertIn(f"usage: hologram {command}", result.stdout)
                 for option in options:
                     self.assertIn(option, result.stdout)
-                for flag in REMOVED_FLAGS:
-                    self.assertNotIn(flag, result.stdout)
                 self.assertEqual(result.stderr, "")
 
-    def test_no_command_and_every_removed_flag_exit_two_without_traceback(self) -> None:
+    def test_missing_command_and_unknown_option_exit_two_without_traceback(
+        self,
+    ) -> None:
         cases = (
             (),
-            ("build", "--embed"),
-            ("build", "--embed-max-tokens", "1"),
-            ("build", "--out", "map.md"),
-            ("build", "--lang", "python"),
-            ("build", "--private"),
-            ("build", "--behaviors"),
-            ("build", "--if-stale"),
+            ("build", "--unknown"),
         )
         for args in cases:
             with self.subTest(args=args):
@@ -80,7 +63,7 @@ class ModuleCliSmokeTest(unittest.TestCase):
                 self.assertNotIn("usage:", result.stderr)
                 self.assertNotIn("Traceback", result.stderr)
 
-    def test_real_schema_two_build_check_and_incomplete_exit_boundary(self) -> None:
+    def test_real_build_check_and_incomplete_exit_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "project"
             root.mkdir()

@@ -181,11 +181,7 @@ def _text(row: Mapping[str, object], key: str) -> str | None:
 
 
 def _task_id(row: Mapping[str, object]) -> str | None:
-    old = _text(row, "task")
-    new = _text(row, "task_id")
-    if old is not None and new is not None and old != new:
-        return None
-    return new or old
+    return _text(row, "task")
 
 
 def _pair_key(row: Mapping[str, object]) -> _PairKey | None:
@@ -287,7 +283,7 @@ def _partition(row: Mapping[str, object]) -> _Partition:
     tier = _text(row, "tier")
     capability = _text(row, "capability")
     if None in {model, version, tier, capability}:
-        return "legacy", "unclassified", "unclassified", "unclassified"
+        raise ValueError("public report row is missing partition metadata")
     assert model is not None
     assert version is not None
     assert tier is not None
@@ -295,10 +291,8 @@ def _partition(row: Mapping[str, object]) -> _Partition:
     return model, version, tier, capability
 
 
-def _partition_key(partition: _Partition) -> tuple[int, str, str, str, str]:
-    model, version, tier, capability = partition
-    legacy = int(not (model == "legacy" and version == "unclassified"))
-    return legacy, model, version, tier, capability
+def _partition_key(partition: _Partition) -> _Partition:
+    return partition
 
 
 def _ratio(numerator: int, denominator: int) -> str:

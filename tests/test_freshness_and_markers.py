@@ -5,7 +5,6 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
-from importlib.util import find_spec
 from pathlib import Path
 
 import hologram
@@ -141,8 +140,8 @@ class CanonicalDeliveryFreshnessTest(unittest.TestCase):
             self.assertEqual(command_build(root, config_path, quiet=True), 0)
             delivered = context_path.read_bytes()
             self.assertTrue(delivered.startswith(authored))
-            self.assertIn(b"hologram:v2:start", delivered)
-            self.assertIn(b"# hologram:2 state=", delivered)
+            self.assertIn(b"hologram:start", delivered)
+            self.assertIn(b"# hologram state=", delivered)
             self.assertFalse((root / "PROJECT_DIGEST.md").exists())
             self.assertEqual(command_check(root, config_path, quiet=True), 0)
 
@@ -153,18 +152,8 @@ class CanonicalDeliveryFreshnessTest(unittest.TestCase):
 
 
 class PhasePublicApiTest(unittest.TestCase):
-    def test_package_version_and_canonical_surface_are_public(self):
-        self.assertEqual(hologram.__version__, "0.2.0")
-        self.assertIn("__version__", hologram.__all__)
-        self.assertIsNone(find_spec("hologram.legacy"))
+    def test_cli_internals_are_not_package_root_exports(self):
         for name in (
-            "legacy",
-            "build_digest",
-            "embed_digest",
-            "extract_file",
-            "render_simple",
-            "run_cli",
-            "scan_files",
             "main",
             "EXIT_OK",
             "EXIT_STALE",
@@ -201,10 +190,8 @@ expected = {
 }
 assert expected <= set(hologram.__all__)
 assert "RenderDecodeError" not in hologram.__all__
-assert "legacy" not in hologram.__all__
 assert "hologram.analysis" not in sys.modules
 assert "hologram.render" not in sys.modules
-assert "hologram.legacy" not in sys.modules
 
 from hologram import AnalyzedProject, analyze_project
 
@@ -212,7 +199,6 @@ analysis = sys.modules["hologram.analysis"]
 assert AnalyzedProject is analysis.AnalyzedProject
 assert analyze_project is analysis.analyze_project
 assert "hologram.render" not in sys.modules
-assert "hologram.legacy" not in sys.modules
 
 from hologram import RenderIR, decode_render, project_render_ir, render_project
 
@@ -224,7 +210,6 @@ assert render_project is render.render_project
 phase_public = set(analysis.__all__) | set(render.__all__)
 assert set(hologram.__all__) & phase_public == expected
 assert "hologram.analysis" in sys.modules
-assert "hologram.legacy" not in sys.modules
 """
         render_first = """
 import sys
@@ -232,7 +217,6 @@ import hologram
 
 assert "hologram.analysis" not in sys.modules
 assert "hologram.render" not in sys.modules
-assert "hologram.legacy" not in sys.modules
 
 from hologram import RenderIR, decode_render, project_render_ir, render_project
 
@@ -242,7 +226,6 @@ assert decode_render is render.decode_render
 assert project_render_ir is render.project_render_ir
 assert render_project is render.render_project
 assert "hologram.analysis" in sys.modules
-assert "hologram.legacy" not in sys.modules
 """
         for name, child_script in (
             ("analysis-first", script),

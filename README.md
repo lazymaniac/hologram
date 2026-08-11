@@ -5,7 +5,7 @@ records files, symbols, signatures, relationships, resolved project calls,
 dependencies, tests, reachability evidence, and conservative duplicate candidates.
 It is generated entirely from source analysis; no LLM is involved.
 
-Canonical v2 maps are complete inventories. Hologram does not rank, omit, budget,
+Canonical maps are complete inventories. Hologram does not rank, omit, budget,
 degrade, or truncate the map to fit a context window.
 
 ## Install
@@ -38,11 +38,10 @@ safely managed.
 
 ## Configuration
 
-Hologram reads schema-2 TOML. Unknown keys and invalid values are errors. This is the
+Hologram reads strict TOML. Unknown keys and invalid values are errors. This is the
 canonical default configuration:
 
 ```toml
-schema_version = 2
 agents = ["claude", "codex", "gemini"]
 languages = []
 include = ["**/*"]
@@ -53,7 +52,6 @@ output = "PROJECT_DIGEST.md"
 
 The keys are:
 
-- `schema_version`: exactly `2`.
 - `agents`: any unique subset of `claude`, `codex`, and `gemini`.
 - `languages`: supported language names; an empty list auto-detects languages.
 - `include` and `exclude`: root-relative POSIX glob patterns.
@@ -102,7 +100,7 @@ remain visible on stderr.
 
 ## Managed delivery and freshness
 
-Agent maps live between full-line `hologram:v2:start` and `hologram:v2:end`
+Agent maps live between full-line `hologram:start` and `hologram:end`
 markers. Authored bytes outside the managed pair are preserved exactly, including
 CRLF and bytes that are not valid UTF-8. A fresh build is idempotent and does not
 replace a target, so its inode, mode, and modification time remain unchanged.
@@ -138,7 +136,7 @@ The renderer emits explicit file leaves and source positions. A small fragment l
 like this:
 
 ```text
-# hologram:2 state=0000000000000000000000000000000000000000000000000000000000000000 · regen: hologram build
+# hologram state=0000000000000000000000000000000000000000000000000000000000000000 · regen: hologram build
 · deps ["app→core"]
 @ "src/core.py" "python" "production" "core"
   :4:0 [[],"fn","public_surface","(int)"] "pub"
@@ -176,23 +174,10 @@ Static evidence cannot prove semantic deadness or authorize deletion. Read the
 source, runtime registration, framework conventions, and tests before removing or
 consolidating anything.
 
-## Migration from v1
-
-The schema and CLI are intentionally breaking. Exact old managed context marker
-pairs are migrated to canonical v2 blocks, and `init` removes only exact generated
-Hologram post-commit, post-merge, and post-checkout command lines. Authored text,
-near-matches, and unrelated hooks are preserved.
-
-The removed flags `--embed`, `--embed-max-tokens`, `--out`, `--lang`, `--private`,
-`--behaviors`, and `--if-stale` are not supported and have no aliases. Put language,
-agent, and standalone-output choices in `.hologram.toml`; canonical delivery always
-includes full symbol, body-size, and behavior evidence.
-
 ## Library API
 
-`hologram.__version__` reports the package version. The six lazy canonical phase
-exports are `AnalyzedProject`, `analyze_project`, `RenderIR`, `project_render_ir`,
-`render_project`, and `decode_render`:
+The six lazy canonical phase exports are `AnalyzedProject`, `analyze_project`,
+`RenderIR`, `project_render_ir`, `render_project`, and `decode_render`:
 
 ```python
 snapshot = hologram.build_project(root, config).require_complete()
@@ -210,11 +195,9 @@ text = hologram.render_project(render_ir)
 assert hologram.decode_render(text) == render_ir
 ```
 
-The v2 CLI orchestration, atomic writers, hook helpers, and semantic-diff internals
-are not package-root exports. The retired v1 library entry points—including
-`run_cli`, `build_digest`, `render_simple`, and the legacy path-based
-`extract_file`—have been removed. Use `hologram.cli`, the canonical phase APIs
-above, and `hologram.parsers.extract_file` instead.
+CLI orchestration, atomic writers, hook helpers, and semantic-diff internals are not
+package-root exports. Use `hologram.cli`, the canonical phase APIs above, and
+`hologram.parsers.extract_file` for their respective layers.
 
 ## Languages
 
@@ -228,7 +211,7 @@ unavailable, makes the build incomplete rather than silently shrinking the map.
 
 The current public benchmark is the frozen
 [`codecompanion.json`](benchmark/tasks/codecompanion.json) matrix: condition B has
-no Hologram context, while condition C receives the managed canonical v2 map from
+no Hologram context, while condition C receives the managed canonical map from
 turn zero. It pins `claude-sonnet-5`, Claude Code `2.1.224`, a 40-turn limit, one
 repetition, one seed, four task capabilities, and exact answer verifiers. Acceptance
 requires both terminal success and verifier success; navigation answers are
@@ -238,12 +221,6 @@ assets, and external private results stay outside this repository and private
 reports expose condition totals only. No paid sessions are run by the implementation
 suite.
 
-Historical condition A measured a legacy on-disk pull model. Its Spring figures are
-legacy, exploratory, pre-tier evidence with n=1 per cell. That experiment used
-`sonnet`, a mutable model alias, pooled task metrics, change-only reuse checks, and
-did not gate turn-limit errors; navigation acceptance was not automated. Its token,
-navigation, reuse, and duplication figures are historical observations only and
-cannot be compared with future v2 reports or used to validate the hardened harness.
 See the [current runbook](benchmark/README.md) for preparation, zero-cost dry runs,
 static thresholds, privacy boundaries, and manual paid-run instructions.
 

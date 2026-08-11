@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
-import sys
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from itertools import pairwise
@@ -20,21 +19,15 @@ from hologram.model import (
     SourceFile,
 )
 
-from .treesitter import grammar_version, load_parser
+from .treesitter import load_parser
 
 
 class ParserProvider(Protocol):
     def has_parser(self, language: Language) -> bool: ...
     def parser_for(self, language: Language) -> object | None: ...
-    def versions(self) -> Mapping[str, str]: ...
 
 
 Extractor = Callable[[SourceFile, object | None], FileIR]
-EXTRACTOR_VERSIONS: Mapping[Language, str] = MappingProxyType(
-    {language: "2" for language in Language}
-)
-
-
 _EXTRACTOR_MODULES: Mapping[Language, str] = MappingProxyType(
     {
         Language.JAVA: "hologram.parsers.java",
@@ -86,7 +79,6 @@ class _ParserState:
     available: bool
     parser: object | None
     error: Exception | None
-    version: str
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -124,13 +116,8 @@ class ParserRegistry:
         )
         self._locks = {language: RLock() for language in Language}
         self._parser_states: dict[Language, _ParserState] = {
-            Language.PYTHON: _ParserState(
-                True,
-                None,
-                None,
-                f"stdlib-ast-{sys.version_info.major}.{sys.version_info.minor}",
-            ),
-            Language.HELM: _ParserState(True, None, None, "builtin"),
+            Language.PYTHON: _ParserState(True, None, None),
+            Language.HELM: _ParserState(True, None, None),
         }
         self._extractor_states: dict[Language, _ExtractorState] = {}
 
@@ -156,25 +143,14 @@ class ParserRegistry:
                         lambda: self._parser_state_for(Language.TSX).parser,
                     )
                 state = (
-                    _ParserState(True, parser, None, grammar_version(language))
+                    _ParserState(True, parser, None)
                     if parser is not None
-                    else _ParserState(False, None, None, "missing")
+                    else _ParserState(False, None, None)
                 )
             except Exception as error:  # noqa: BLE001 - cached discovery boundary
-                state = _ParserState(False, None, error, "missing")
+                state = _ParserState(False, None, error)
             self._parser_states[language] = state
             return state
-
-    def versions(self) -> Mapping[str, str]:
-        versions = {
-            language.value: self._reported_version(language) for language in Language
-        }
-        return MappingProxyType(dict(sorted(versions.items())))
-
-    def _reported_version(self, language: Language) -> str:
-        with self._locks[language]:
-            state = self._parser_states.get(language)
-            return state.version if state is not None else grammar_version(language)
 
     def _extractor_for(self, language: Language) -> Extractor | None:
         return self._extractor_state_for(language).extractor
@@ -208,26 +184,14 @@ class ParserRegistry:
 DEFAULT_REGISTRY = ParserRegistry()
 
 
-def _parser_version(registry: ParserProvider, language: Language) -> str | None:
-    try:
-        if isinstance(registry, ParserRegistry):
-            return registry._reported_version(language)
-        return registry.versions().get(language.value)
-    except Exception:  # noqa: BLE001 - diagnostics must not be masked by metadata
-        return None
-
-
 def _error_file(
     source: SourceFile,
-    registry: ParserProvider,
     code: str,
     message: str,
 ) -> FileIR:
     return FileIR(
         source,
         diagnostics=(Diagnostic(code, DiagnosticSeverity.ERROR, message),),
-        extractor_version=EXTRACTOR_VERSIONS[source.language],
-        parser_version=_parser_version(registry, source.language),
     )
 
 
@@ -236,8 +200,7 @@ def _validate_owner(source: SourceFile, owner: object, field: str) -> None:
     language = getattr(owner, "language", None)
     if file != source.file:
         raise ValueError(
-            f"{field}.file {file!r} does not match SourceFile.file "
-            f"{source.file!r}"
+            f"{field}.file {file!r} does not match SourceFile.file {source.file!r}"
         )
     if language is not source.language:
         raise ValueError(
@@ -250,8 +213,7 @@ def _validate_span(source: SourceFile, span: object, field: str) -> None:
     file = getattr(span, "file", None)
     if file != source.file:
         raise ValueError(
-            f"{field}.file {file!r} does not match SourceFile.file "
-            f"{source.file!r}"
+            f"{field}.file {file!r} does not match SourceFile.file {source.file!r}"
         )
 
 
@@ -329,7 +291,6 @@ def extract_file(
         except Exception as error:  # noqa: BLE001 - provider discovery boundary
             return _error_file(
                 source,
-                registry,
                 "parser-crash",
                 f"{source.file}: {language.value} parser discovery crashed: "
                 f"{type(error).__name__}: {error}",
@@ -338,7 +299,6 @@ def extract_file(
     if parser_error is not None:
         return _error_file(
             source,
-            registry,
             "parser-crash",
             f"{source.file}: {language.value} parser discovery crashed: "
             f"{type(parser_error).__name__}: {parser_error}",
@@ -346,7 +306,6 @@ def extract_file(
     if not has_parser:
         return _error_file(
             source,
-            registry,
             "missing-parser",
             f"{source.file}: parser is unavailable for {language.value}",
         )
@@ -360,7 +319,6 @@ def extract_file(
         except Exception as error:  # noqa: BLE001 - extractor discovery boundary
             return _error_file(
                 source,
-                registry,
                 "extractor-crash",
                 f"{source.file}: {language.value} extractor discovery crashed: "
                 f"{type(error).__name__}: {error}",
@@ -369,7 +327,6 @@ def extract_file(
     if extractor_error is not None:
         return _error_file(
             source,
-            registry,
             "extractor-crash",
             f"{source.file}: {language.value} extractor discovery crashed: "
             f"{type(extractor_error).__name__}: {extractor_error}",
@@ -377,7 +334,6 @@ def extract_file(
     if extractor is None:
         return _error_file(
             source,
-            registry,
             "missing-extractor",
             f"{source.file}: extractor is unavailable for {language.value}",
         )
@@ -388,16 +344,10 @@ def extract_file(
                 f"extractor returned {type(result).__name__}, expected FileIR"
             )
         _validate_file_ir(source, result)
-        result = dataclasses.replace(
-            result,
-            source=source,
-            extractor_version=EXTRACTOR_VERSIONS[language],
-            parser_version=_parser_version(registry, language),
-        )
+        result = dataclasses.replace(result, source=source)
     except Exception as error:  # noqa: BLE001 - extractor failures are diagnostics
         return _error_file(
             source,
-            registry,
             "extractor-crash",
             f"{source.file}: {language.value} extractor crashed: "
             f"{type(error).__name__}: {error}",
@@ -427,7 +377,6 @@ def extract_project(
 
 __all__ = [
     "DEFAULT_REGISTRY",
-    "EXTRACTOR_VERSIONS",
     "Extractor",
     "ParserProvider",
     "ParserRegistry",

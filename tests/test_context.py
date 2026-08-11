@@ -16,8 +16,6 @@ from hologram.context import (
     AGENT_PATHS,
     CONTEXT_END,
     CONTEXT_START,
-    LEGACY_END,
-    LEGACY_START,
     AtomicWriteError,
     ContextStatus,
     ManagedBlockError,
@@ -34,60 +32,18 @@ from hologram.context import (
 )
 
 
-def _legacy_block(
-    payload: bytes = b"legacy map\n",
-    *,
-    line_ending: bytes = b"\n",
-) -> bytes:
-    return LEGACY_START + line_ending + payload + LEGACY_END + line_ending
-
-
 def _malformed_contexts() -> dict[str, bytes]:
-    canonical = CONTEXT_START + b"\nmap\n" + CONTEXT_END + b"\n"
-    legacy = _legacy_block()
+    managed = CONTEXT_START + b"\nmap\n" + CONTEXT_END + b"\n"
     return {
-        "canonical-start-only": CONTEXT_START + b"\n",
-        "canonical-end-only": CONTEXT_END + b"\n",
-        "legacy-start-only": LEGACY_START + b"\n",
-        "legacy-end-only": LEGACY_END + b"\n",
-        "canonical-reversed": CONTEXT_END + b"\n" + CONTEXT_START + b"\n",
-        "legacy-reversed": LEGACY_END + b"\n" + LEGACY_START + b"\n",
-        "canonical-repeated-pair": canonical + canonical,
-        "legacy-repeated-pair": legacy + legacy,
-        "canonical-repeated-start": (
+        "start-only": CONTEXT_START + b"\n",
+        "end-only": CONTEXT_END + b"\n",
+        "reversed": CONTEXT_END + b"\n" + CONTEXT_START + b"\n",
+        "repeated-pair": managed + managed,
+        "repeated-start": (
             CONTEXT_START + b"\n" + CONTEXT_START + b"\n" + CONTEXT_END + b"\n"
         ),
-        "canonical-repeated-end": (
+        "repeated-end": (
             CONTEXT_START + b"\n" + CONTEXT_END + b"\n" + CONTEXT_END + b"\n"
-        ),
-        "legacy-repeated-start": (
-            LEGACY_START + b"\n" + LEGACY_START + b"\n" + LEGACY_END + b"\n"
-        ),
-        "legacy-repeated-end": (
-            LEGACY_START + b"\n" + LEGACY_END + b"\n" + LEGACY_END + b"\n"
-        ),
-        "mixed-pairs": canonical + legacy,
-        "mixed-opposite-pairs": legacy + canonical,
-        "mixed-half-pair": CONTEXT_START + b"\n" + LEGACY_END + b"\n",
-        "nested-legacy-in-canonical": (
-            CONTEXT_START
-            + b"\n"
-            + LEGACY_START
-            + b"\n"
-            + LEGACY_END
-            + b"\n"
-            + CONTEXT_END
-            + b"\n"
-        ),
-        "nested-canonical-in-legacy": (
-            LEGACY_START
-            + b"\n"
-            + CONTEXT_START
-            + b"\n"
-            + CONTEXT_END
-            + b"\n"
-            + LEGACY_END
-            + b"\n"
         ),
     }
 
@@ -143,17 +99,7 @@ class ManagedBlockTest(unittest.TestCase):
         self.assertEqual(
             (CONTEXT_START, CONTEXT_END),
             (
-                b"<!-- hologram:v2:start -->",
-                b"<!-- hologram:v2:end -->",
-            ),
-        )
-        self.assertEqual(
-            (LEGACY_START, LEGACY_END),
-            (
-                (
-                    b"<!-- hologram:start \xe2\x80\x94 generated, do not edit; "
-                    b"refreshed by git hooks -->"
-                ),
+                b"<!-- hologram:start -->",
                 b"<!-- hologram:end -->",
             ),
         )
@@ -176,8 +122,6 @@ class ManagedBlockTest(unittest.TestCase):
                 "AGENT_PATHS",
                 "CONTEXT_END",
                 "CONTEXT_START",
-                "LEGACY_END",
-                "LEGACY_START",
                 "AtomicWriteError",
                 "ContextStatus",
                 "ManagedBlockError",
@@ -195,7 +139,7 @@ class ManagedBlockTest(unittest.TestCase):
         )
 
     def test_rendered_block_and_all_agent_payloads_are_exact(self) -> None:
-        rendered_map = "# hologram:2 state=" + "a" * 64 + " · regen: hologram build\n"
+        rendered_map = "# hologram state=" + "a" * 64 + " · regen: hologram build\n"
         block = render_managed_block(rendered_map)
         expected = (
             CONTEXT_START
@@ -251,22 +195,6 @@ class ManagedBlockTest(unittest.TestCase):
         self.assertEqual(inspect_managed_block(existing, expected), ContextStatus.FRESH)
         self.assertIs(replace_managed_block(existing, expected), existing)
 
-    def test_legacy_lf_and_crlf_pairs_are_stale_and_migrate_exactly(self) -> None:
-        expected = render_managed_block("new\n")
-        for line_ending in (b"\n", b"\r\n"):
-            with self.subTest(line_ending=line_ending):
-                prefix = b"\xffbefore\r\n"
-                suffix = b"after\x80\r\n"
-                existing = prefix + _legacy_block(line_ending=line_ending) + suffix
-                self.assertEqual(
-                    inspect_managed_block(existing, expected),
-                    ContextStatus.STALE,
-                )
-                self.assertEqual(
-                    replace_managed_block(existing, expected),
-                    prefix + expected + suffix,
-                )
-
     def test_missing_block_appends_only_the_needed_lf(self) -> None:
         expected = render_managed_block("map\n")
         cases = {
@@ -288,23 +216,11 @@ class ManagedBlockTest(unittest.TestCase):
 
     def test_inline_marker_text_is_authored_content_not_a_pair(self) -> None:
         expected = render_managed_block("map\n")
-        inline = (
-            b"Discuss "
-            + CONTEXT_START
-            + b" and "
-            + CONTEXT_END
-            + b" here.\r\n"
-            + b"prefix "
-            + LEGACY_START
-            + b" suffix\n"
-            + b"`"
-            + LEGACY_END
-            + b"`\n"
-        )
+        inline = b"Discuss " + CONTEXT_START + b" and " + CONTEXT_END + b" here.\r\n"
         self.assertEqual(inspect_managed_block(inline, expected), ContextStatus.MISSING)
         self.assertEqual(replace_managed_block(inline, expected), inline + expected)
 
-    def test_duplicate_reversed_unbalanced_mixed_and_nested_are_malformed(
+    def test_duplicate_reversed_and_unbalanced_pairs_are_malformed(
         self,
     ) -> None:
         expected = render_managed_block("expected\n")
@@ -331,7 +247,6 @@ class ManagedBlockTest(unittest.TestCase):
         valid_existing = render_managed_block("old\n")
         invalid_expected = {
             "plain": b"expected",
-            "legacy": _legacy_block(),
             "prefix": b"authored\n" + render_managed_block("map\n"),
             "suffix": render_managed_block("map\n") + b"authored",
             "missing-end": CONTEXT_START + b"\nmap\n",
@@ -598,7 +513,7 @@ class AtomicOutputTest(unittest.TestCase):
         claude.parent.mkdir()
         codex.parent.mkdir()
         claude.write_bytes(b"rules\n" + render_managed_block("old\n"))
-        codex.write_bytes(b"rules\n" + _legacy_block())
+        codex.write_bytes(b"rules\n" + render_managed_block("stale\n"))
         claude.chmod(0o640)
         codex.chmod(0o600)
         before = {

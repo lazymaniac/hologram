@@ -25,7 +25,7 @@ from hologram.model import (
 from hologram.pipeline import BuildSnapshot, IncompleteBuildError, build_project
 from hologram.resolve import ResolutionResult
 from hologram.scan import ScanEntry, ScanResult, ScanStatus, scan_project
-from hologram.state import StateResult, compute_state
+from hologram.state import StateResult
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 PYMINI = FIXTURES / "pymini"
@@ -187,22 +187,11 @@ class PipelineTest(unittest.TestCase):
             self.assertIs(next(iter(sources)), source)
             return project
 
-        def versions_once() -> dict[str, str]:
-            calls.append("versions")
-            return {language.value: f"parser-{language.value}" for language in Language}
-
-        def state_once(
-            root: Path, config: object, final: ScanResult, **kwargs: object
-        ) -> StateResult:
+        def state_once(root: Path, config: object, final: ScanResult) -> StateResult:
             calls.append("state")
             self.assertEqual(root, self.root.resolve())
             self.assertIs(config, self.config)
             self.assertIs(final.entries[0].source, source)
-            self.assertEqual(kwargs["extractor_versions"], {"python": "2"})
-            self.assertEqual(
-                kwargs["parser_versions"],
-                {"python": "parser-python"},
-            )
             return state
 
         def resolve_once(value: ProjectIR) -> ResolutionResult:
@@ -218,10 +207,6 @@ class PipelineTest(unittest.TestCase):
                 "hologram.pipeline.extract_project", side_effect=extract_once
             ) as extractor,
             mock.patch(
-                "hologram.pipeline.DEFAULT_REGISTRY.versions",
-                side_effect=versions_once,
-            ) as versions,
-            mock.patch(
                 "hologram.pipeline.compute_state", side_effect=state_once
             ) as state_call,
             mock.patch(
@@ -230,8 +215,8 @@ class PipelineTest(unittest.TestCase):
         ):
             snapshot = build_project(self.root, self.config)
 
-        self.assertEqual(calls, ["scan", "extract", "versions", "state", "resolve"])
-        for called in (scanner, extractor, versions, state_call, resolver):
+        self.assertEqual(calls, ["scan", "extract", "state", "resolve"])
+        for called in (scanner, extractor, state_call, resolver):
             self.assertEqual(called.call_count, 1)
         self.assertIs(snapshot.scan.entries[0].source, source)
         self.assertIs(snapshot.project, project)
@@ -336,52 +321,7 @@ class PipelineTest(unittest.TestCase):
         self.assertIs(snapshot.project.files[0].source, original)
         self.assertEqual(snapshot.project.files[0].source.raw, b"original = 1\n")
 
-    def test_only_active_versions_are_passed_and_inactive_changes_do_not_hash(
-        self,
-    ) -> None:
-        source = self.source("main.py")
-        scan = self.indexed_scan(source)
-        with (
-            mock.patch("hologram.pipeline.scan_project", return_value=scan),
-            mock.patch(
-                "hologram.pipeline.DEFAULT_REGISTRY.versions",
-                return_value={language.value: "one" for language in Language},
-            ),
-            mock.patch(
-                "hologram.pipeline.compute_state", wraps=compute_state
-            ) as first_state,
-        ):
-            first = build_project(self.root, self.config)
-        with (
-            mock.patch("hologram.pipeline.scan_project", return_value=scan),
-            mock.patch(
-                "hologram.pipeline.DEFAULT_REGISTRY.versions",
-                return_value={
-                    language.value: (
-                        "one" if language is Language.PYTHON else "changed"
-                    )
-                    for language in Language
-                },
-            ),
-            mock.patch(
-                "hologram.pipeline.compute_state", wraps=compute_state
-            ) as second_state,
-        ):
-            second = build_project(self.root, self.config)
-
-        for state_call in (first_state, second_state):
-            self.assertEqual(state_call.call_count, 1)
-            self.assertEqual(
-                state_call.call_args.kwargs["extractor_versions"],
-                {"python": "2"},
-            )
-            self.assertEqual(
-                state_call.call_args.kwargs["parser_versions"],
-                {"python": "one"},
-            )
-        self.assertEqual(first.state.value, second.state.value)
-
-    def test_failed_entry_without_source_still_activates_versions(self) -> None:
+    def test_failed_entry_without_source_still_resolves_partial_project(self) -> None:
         source = self.source("main.py")
         scan = ScanResult(
             (
@@ -401,27 +341,12 @@ class PipelineTest(unittest.TestCase):
         with (
             mock.patch("hologram.pipeline.scan_project", return_value=scan),
             mock.patch(
-                "hologram.pipeline.DEFAULT_REGISTRY.versions",
-                return_value={language.value: language.value for language in Language},
-            ),
-            mock.patch(
-                "hologram.pipeline.compute_state", wraps=compute_state
-            ) as state_call,
-            mock.patch(
                 "hologram.pipeline.resolve_project",
                 wraps=lambda project: ResolutionResult((), (), (), ()),
             ) as resolver,
         ):
             snapshot = build_project(self.root, self.config)
 
-        self.assertEqual(
-            state_call.call_args.kwargs["extractor_versions"],
-            {"java": "2", "python": "2"},
-        )
-        self.assertEqual(
-            state_call.call_args.kwargs["parser_versions"],
-            {"java": "java", "python": "python"},
-        )
         self.assertEqual(
             [file_ir.source.file for file_ir in snapshot.project.files], ["main.py"]
         )

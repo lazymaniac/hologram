@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
-from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ProjectConfig, canonical_config_bytes
-from .model import IR_SCHEMA_VERSION, Diagnostic
+from .model import Diagnostic
 from .scan import ScanEntry, ScanResult, ScanStatus
 
-STATE_FORMAT_VERSION = "hologram-state-v3"
-STATE_HEADER_RE = re.compile(
-    r"(?:^|[ ·])state=([0-9a-f]{64})(?=$|[ ·])"
-)
+_STATE_DOMAIN = b"hologram-state"
+STATE_HEADER_RE = re.compile(r"(?:^|[ ·])state=([0-9a-f]{64})(?=$|[ ·])")
 _STATE_HEADER_MAX_BYTES = 4096  # Includes a trailing newline when present.
 
 
@@ -38,36 +34,6 @@ def _feed(hasher: hashlib._Hash, label: str, value: bytes) -> None:
     hasher.update(value)
 
 
-def _version_bytes(
-    versions: Mapping[str, str],
-    active_languages: set[str],
-    field: str,
-) -> bytes:
-    active_versions: dict[str, str] = {}
-    for language in sorted(active_languages):
-        if language not in versions:
-            raise ValueError(
-                f"{field} missing active language {language!r}"
-            )
-        version = versions[language]
-        if not isinstance(version, str):
-            raise TypeError(
-                f"{field} version for active language {language!r} "
-                "must be a string"
-            )
-        if not version:
-            raise ValueError(
-                f"{field} version for active language {language!r} "
-                "must not be empty"
-            )
-        active_versions[language] = version
-    return json.dumps(
-        active_versions,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-
 def _status_bytes(entry: ScanEntry) -> bytes:
     return f"{entry.status.value}\0{entry.reason or ''}".encode()
 
@@ -88,59 +54,19 @@ def compute_state(
     root: Path,
     config: ProjectConfig,
     scan_result: ScanResult,
-    *,
-    extractor_versions: Mapping[str, str],
-    parser_versions: Mapping[str, str],
 ) -> StateResult:
     del root
     _reject_duplicate_files(scan_result)
     hasher = hashlib.sha256()
-    _feed(hasher, "format", STATE_FORMAT_VERSION.encode("utf-8"))
-    _feed(hasher, "ir-schema", str(IR_SCHEMA_VERSION).encode("ascii"))
+    _feed(hasher, "format", _STATE_DOMAIN)
     _feed(hasher, "config", canonical_config_bytes(config))
-
-    language_entries = sorted(
-        (
-            entry
-            for entry in scan_result.entries
-            if entry.status in (ScanStatus.INDEXED, ScanStatus.FAILED)
-            and entry.language is not None
-        ),
-        key=lambda entry: entry.file,
-    )
-    active_languages = {
-        active_language.value
-        for entry in language_entries
-        if (active_language := entry.language) is not None
-    }
-    _feed(
-        hasher,
-        "extractors",
-        _version_bytes(
-            extractor_versions,
-            active_languages,
-            "extractor_versions",
-        ),
-    )
-    _feed(
-        hasher,
-        "parsers",
-        _version_bytes(
-            parser_versions,
-            active_languages,
-            "parser_versions",
-        ),
-    )
 
     included = sorted(
         (
             entry
             for entry in scan_result.entries
             if entry.status is ScanStatus.FAILED
-            or (
-                entry.status is ScanStatus.INDEXED
-                and entry.language is not None
-            )
+            or (entry.status is ScanStatus.INDEXED and entry.language is not None)
         ),
         key=lambda entry: entry.file,
     )

@@ -2,7 +2,6 @@ from importlib import import_module
 
 from .config import (
     CONFIG_NAME,
-    CONFIG_SCHEMA_VERSION,
     ConfigError,
     ProjectConfig,
     canonical_config_bytes,
@@ -36,14 +35,7 @@ from .model import (
     Visibility,
 )
 from .scan import ScanEntry, ScanResult, ScanStatus, detect_language, scan_project
-from .state import (
-    STATE_FORMAT_VERSION,
-    StateResult,
-    compute_state,
-    read_digest_state,
-)
-
-__version__ = "0.2.0"
+from .state import StateResult, compute_state, read_digest_state
 
 _RESOLVE_NAMES = frozenset(
     {
@@ -84,8 +76,6 @@ _RENDER_NAMES = frozenset(
 
 __all__ = [
     "CONFIG_NAME",
-    "CONFIG_SCHEMA_VERSION",
-    "STATE_FORMAT_VERSION",
     "UNKNOWN_TYPE_KEY",
     "AnalyzedProject",
     "Binding",
@@ -125,7 +115,6 @@ __all__ = [
     "SymbolId",
     "SymbolKind",
     "Visibility",
-    "__version__",
     "analyze_project",
     "build_project",
     "canonical_config_bytes",

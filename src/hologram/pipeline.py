@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import ProjectConfig
-from .model import Diagnostic, DiagnosticSeverity, FileIR, Language, ProjectIR
-from .parsers.api import DEFAULT_REGISTRY, EXTRACTOR_VERSIONS, extract_project
+from .model import Diagnostic, DiagnosticSeverity, FileIR, ProjectIR
+from .parsers.api import extract_project
 from .resolve import ResolutionResult, resolve_project
 from .scan import ScanEntry, ScanResult, ScanStatus, scan_project
 from .state import StateResult, compute_state
@@ -90,39 +90,13 @@ def _finalize_scan(provisional: ScanResult, project: ProjectIR) -> ScanResult:
     return ScanResult(entries, provisional.diagnostics, complete)
 
 
-def _active_languages(scan_result: ScanResult) -> tuple[Language, ...]:
-    return tuple(
-        sorted(
-            {
-                entry.language
-                for entry in scan_result.entries
-                if entry.status in (ScanStatus.INDEXED, ScanStatus.FAILED)
-                and entry.language is not None
-            },
-            key=lambda language: language.value,
-        )
-    )
-
-
 def build_project(root: Path, config: ProjectConfig) -> BuildSnapshot:
     resolved_root = Path(root).resolve()
     provisional = scan_project(resolved_root, config)
     project = extract_project(resolved_root, provisional.sources)
     final_scan = _finalize_scan(provisional, project)
 
-    active = _active_languages(final_scan)
-    parser_versions = DEFAULT_REGISTRY.versions()
-    state = compute_state(
-        resolved_root,
-        config,
-        final_scan,
-        extractor_versions={
-            language.value: EXTRACTOR_VERSIONS[language] for language in active
-        },
-        parser_versions={
-            language.value: parser_versions[language.value] for language in active
-        },
-    )
+    state = compute_state(resolved_root, config, final_scan)
     resolution = resolve_project(project)
     complete = (
         final_scan.complete

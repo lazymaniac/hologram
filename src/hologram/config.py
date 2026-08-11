@@ -11,7 +11,6 @@ from typing import TypeVar
 from .model import Language
 
 CONFIG_NAME = ".hologram.toml"
-CONFIG_SCHEMA_VERSION = 2
 ALLOWED_AGENTS = frozenset({"claude", "codex", "gemini"})
 
 _DEFAULT_AGENTS = ("claude", "codex", "gemini")
@@ -32,7 +31,6 @@ _DEFAULT_EXCLUDE = (
 )
 _KNOWN_KEYS = frozenset(
     {
-        "schema_version",
         "agents",
         "languages",
         "include",
@@ -41,9 +39,7 @@ _KNOWN_KEYS = frozenset(
         "output",
     }
 )
-_RESERVED_OUTPUTS = frozenset(
-    {CONFIG_NAME, "CLAUDE.md", "AGENTS.md", "GEMINI.md"}
-)
+_RESERVED_OUTPUTS = frozenset({CONFIG_NAME, "CLAUDE.md", "AGENTS.md", "GEMINI.md"})
 _RESERVED_OUTPUT_CASEFOLDS = frozenset(
     output.casefold() for output in _RESERVED_OUTPUTS
 )
@@ -67,7 +63,6 @@ def _own_tuple(
 
 @dataclass(frozen=True, slots=True)
 class ProjectConfig:
-    schema_version: int
     agents: tuple[str, ...]
     languages: tuple[Language, ...]
     include: tuple[str, ...]
@@ -82,7 +77,6 @@ class ProjectConfig:
 
 def default_config() -> ProjectConfig:
     return ProjectConfig(
-        CONFIG_SCHEMA_VERSION,
         _DEFAULT_AGENTS,
         (),
         _DEFAULT_INCLUDE,
@@ -191,20 +185,6 @@ def load_config(root: Path, path: Path | None = None) -> ProjectConfig:
     if unknown:
         raise _invalid(selected, unknown[0], "unknown top-level key")
 
-    if "schema_version" not in data:
-        raise _invalid(selected, "schema_version", "is required")
-    schema_version = data["schema_version"]
-    if (
-        isinstance(schema_version, bool)
-        or not isinstance(schema_version, int)
-        or schema_version != CONFIG_SCHEMA_VERSION
-    ):
-        raise _invalid(
-            selected,
-            "schema_version",
-            f"must be exactly {CONFIG_SCHEMA_VERSION}",
-        )
-
     agents = _string_list(data, "agents", _DEFAULT_AGENTS, selected)
     unknown_agents = sorted(set(agents) - ALLOWED_AGENTS)
     if unknown_agents:
@@ -259,7 +239,6 @@ def load_config(root: Path, path: Path | None = None) -> ProjectConfig:
         )
 
     return ProjectConfig(
-        schema_version,
         agents,
         languages,
         include,
@@ -281,7 +260,6 @@ def render_config(config: ProjectConfig) -> str:
     agents = tuple(sorted(config.agents))
     languages = tuple(sorted(language.value for language in config.languages))
     lines = [
-        f"schema_version = {config.schema_version}",
         f"agents = {_toml_array(agents)}",
         f"languages = {_toml_array(languages)}",
         f"include = {_toml_array(config.include)}",
@@ -320,9 +298,7 @@ def create_default_manifest(root: Path) -> bool:
             os.close(fd)
         except BaseException as close_error:  # noqa: BLE001
             # Preserve the primary write failure even if cleanup is interrupted.
-            error.add_note(
-                f"closing configuration manifest failed: {close_error!r}"
-            )
+            error.add_note(f"closing configuration manifest failed: {close_error!r}")
         raise
     else:
         os.close(fd)

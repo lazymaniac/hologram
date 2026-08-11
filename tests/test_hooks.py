@@ -16,7 +16,6 @@ from hologram.hooks import (
     HOOK_START,
     UnsupportedHookError,
     preflight_precommit,
-    remove_legacy_post_hook_lines,
     render_precommit_command,
 )
 
@@ -70,12 +69,11 @@ class PreCommitHookTest(unittest.TestCase):
         self.python = self.base / "python launcher"
 
     def test_exact_public_hook_surface(self) -> None:
-        self.assertEqual(HOOK_START, b"# hologram:v2:start")
-        self.assertEqual(HOOK_END, b"# hologram:v2:end")
+        self.assertEqual(HOOK_START, b"# hologram:start")
+        self.assertEqual(HOOK_END, b"# hologram:end")
         self.assertTrue(issubclass(UnsupportedHookError, ValueError))
         self.assertTrue(callable(render_precommit_command))
         self.assertTrue(callable(preflight_precommit))
-        self.assertTrue(callable(remove_legacy_post_hook_lines))
         self.assertEqual(
             hooks_module.__all__,
             [
@@ -83,7 +81,6 @@ class PreCommitHookTest(unittest.TestCase):
                 "HOOK_START",
                 "UnsupportedHookError",
                 "preflight_precommit",
-                "remove_legacy_post_hook_lines",
                 "render_precommit_command",
             ],
         )
@@ -105,11 +102,11 @@ class PreCommitHookTest(unittest.TestCase):
             rendered,
             HOOK_START
             + b"\n"
-            + b"hologram_v2_root=$(git rev-parse --show-toplevel) || exit $?\n"
+            + b"hologram_root=$(git rev-parse --show-toplevel) || exit $?\n"
             + (
                 f"{shlex.quote(os.fspath(python))} -B -m hologram check "
-                f'--root "$hologram_v2_root" '
-                f'--config "$hologram_v2_root/{escaped_config}" '
+                f'--root "$hologram_root" '
+                f'--config "$hologram_root/{escaped_config}" '
                 "--quiet || exit $?\n"
             ).encode()
             + HOOK_END
@@ -237,8 +234,8 @@ class PreCommitHookTest(unittest.TestCase):
         hook = _hook_path(self.repo)
         authored = (
             b"#!/bin/sh\n"
-            b"printf 'inline # hologram:v2:start remains'\n"
-            b"printf 'inline # hologram:v2:end remains'\n"
+            b"printf 'inline # hologram:start remains'\n"
+            b"printf 'inline # hologram:end remains'\n"
         )
         hook.write_bytes(authored)
         hook.chmod(0o755)
@@ -484,135 +481,6 @@ class PreCommitHookTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(authored_capture.read_bytes(), b"authored")
         self.assertEqual(_snapshot_file(hook), before)
-
-    def test_legacy_cleanup_removes_only_exact_owned_lines_and_preserves_shebang(
-        self,
-    ) -> None:
-        hooks_dir = _hook_path(self.repo).parent
-        python = Path("/usr/bin/python3")
-        options = (
-            "--root",
-            os.fspath(self.repo.resolve()),
-            "--lang",
-            "java",
-            "--embed",
-            "--quiet",
-        )
-        module_line = (
-            shlex.join(
-                (
-                    os.fspath(python),
-                    "-m",
-                    "hologram",
-                    "build",
-                    *options,
-                )
-            )
-            + " || true\n"
-        ).encode()
-        relative_module_line = module_line.replace(
-            os.fspath(python).encode(), b"python3", 1
-        )
-        legacy_script = Path(hooks_module.__file__).resolve().parents[2] / "hologram.py"
-        script_line = (
-            shlex.join(
-                (
-                    os.fspath(python),
-                    os.fspath(legacy_script),
-                    "build",
-                    *options,
-                )
-            )
-            + " || true\n"
-        ).encode()
-        post_commit = hooks_dir / "post-commit"
-        post_merge = hooks_dir / "post-merge"
-        post_checkout = hooks_dir / "post-checkout"
-        post_commit.write_bytes(
-            b"#!/bin/sh\n"
-            + module_line
-            + relative_module_line
-            + b"\xffauthored\n"
-            + script_line
-        )
-        post_merge.write_bytes(b"#!/bin/sh\n" + module_line.removesuffix(b"\n"))
-        near_misses = (
-            module_line.replace(b" || true", b""),
-            module_line.replace(b"--quiet", b"--private --quiet"),
-            module_line.replace(os.fspath(self.repo.resolve()).encode(), b"/other"),
-            b" " + module_line,
-            b"\xff" + module_line,
-        )
-        post_checkout.write_bytes(b"#!/bin/sh\n" + b"".join(near_misses))
-        post_commit.chmod(0o751)
-        post_merge.chmod(0o755)
-        post_checkout.chmod(0o700)
-        before_checkout = _snapshot_file(post_checkout)
-
-        plans = remove_legacy_post_hook_lines(self.repo)
-
-        self.assertEqual(
-            tuple(plan.path for plan in plans),
-            (post_commit, post_merge),
-        )
-        by_path = {plan.path: plan for plan in plans}
-        self.assertEqual(by_path[post_commit].content, b"#!/bin/sh\n\xffauthored\n")
-        self.assertEqual(by_path[post_commit].mode, 0o751)
-        self.assertEqual(by_path[post_merge].content, b"#!/bin/sh\n")
-        self.assertEqual(by_path[post_merge].mode, 0o755)
-        self.assertEqual(_snapshot_file(post_checkout), before_checkout)
-        commit_writes(plans)
-        self.assertEqual(post_merge.read_bytes(), b"#!/bin/sh\n")
-        self.assertTrue(post_merge.exists())
-        self.assertEqual(_snapshot_file(post_checkout), before_checkout)
-
-    def test_legacy_script_cleanup_requires_the_source_layout(self) -> None:
-        hooks_dir = _hook_path(self.repo).parent
-        post_commit = hooks_dir / "post-commit"
-        installed_script = Path("/opt/hologram/hologram.py")
-        line = (
-            shlex.join(
-                (
-                    "python3",
-                    os.fspath(installed_script),
-                    "build",
-                    "--root",
-                    os.fspath(self.repo.resolve()),
-                    "--quiet",
-                )
-            )
-            + " || true\n"
-        ).encode()
-        post_commit.write_bytes(b"#!/bin/sh\n" + line)
-        post_commit.chmod(0o755)
-        before = _snapshot_file(post_commit)
-
-        with mock.patch.object(
-            hooks_module,
-            "__file__",
-            "/opt/hologram/hologram/hooks.py",
-        ):
-            plans = remove_legacy_post_hook_lines(self.repo)
-
-        self.assertEqual(plans, ())
-        self.assertEqual(_snapshot_file(post_commit), before)
-
-    def test_legacy_cleanup_rejects_unsafe_hook_entries_without_partial_writes(
-        self,
-    ) -> None:
-        hooks_dir = _hook_path(self.repo).parent
-        owned = self.base / "owned"
-        owned.write_bytes(b"owned")
-        (hooks_dir / "post-merge").symlink_to(owned)
-        post_commit = hooks_dir / "post-commit"
-        post_commit.write_bytes(b"#!/bin/sh\n")
-        before = _snapshot_file(post_commit)
-
-        with self.assertRaises(OSError):
-            remove_legacy_post_hook_lines(self.repo)
-
-        self.assertEqual(_snapshot_file(post_commit), before)
-        self.assertEqual(owned.read_bytes(), b"owned")
 
 
 if __name__ == "__main__":

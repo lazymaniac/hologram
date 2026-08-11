@@ -41,8 +41,6 @@ from hologram.config import (
 from hologram.context import (
     AGENT_PATHS,
     CONTEXT_START,
-    LEGACY_END,
-    LEGACY_START,
     PlannedWrite,
     render_managed_block,
 )
@@ -94,10 +92,6 @@ def _artifact_factory(
 ) -> BuildArtifact:
     del root
     return _artifact(config)
-
-
-def _legacy_block(payload: bytes = b"old\n") -> bytes:
-    return LEGACY_START + b"\n" + payload + LEGACY_END + b"\n"
 
 
 def _file_metadata(path: Path) -> tuple[int, int, int, bytes]:
@@ -449,7 +443,7 @@ class BuildCheckServiceTest(unittest.TestCase):
         self.assertFalse((root / "nested").exists())
 
     def test_check_matrix_is_exact_read_only_and_inspects_every_target(self) -> None:
-        states = ("fresh", "stale", "legacy", "missing", "malformed", "raw-mismatch")
+        states = ("fresh", "stale", "missing", "malformed", "raw-mismatch")
         for state in states:
             with self.subTest(state=state):
                 root, config_path, _ = _configured_root(
@@ -467,8 +461,6 @@ class BuildCheckServiceTest(unittest.TestCase):
                 output.write_bytes(_RENDERED.encode())
                 if state == "stale":
                     claude.write_bytes(render_managed_block("old\n"))
-                elif state == "legacy":
-                    claude.write_bytes(_legacy_block())
                 elif state == "missing":
                     claude.unlink()
                 elif state == "malformed":
@@ -754,9 +746,7 @@ class BuildCheckServiceTest(unittest.TestCase):
                     )
                 build.assert_not_called()
 
-    def test_orphan_canonical_and_legacy_blocks_are_retained_and_refreshed(
-        self,
-    ) -> None:
+    def test_orphan_managed_blocks_are_retained_and_refreshed(self) -> None:
         root, config_path, _ = _configured_root(
             self.base,
             "orphan-refresh",
@@ -766,7 +756,7 @@ class BuildCheckServiceTest(unittest.TestCase):
         claude = root / "CLAUDE.md"
         gemini = root / "GEMINI.md"
         claude.write_bytes(b"claude rules\n" + render_managed_block("old\n"))
-        gemini.write_bytes(b"gemini rules\r\n" + _legacy_block())
+        gemini.write_bytes(b"gemini rules\r\n" + render_managed_block("older\n"))
 
         with mock.patch.object(
             cli_module,
@@ -843,7 +833,7 @@ class BuildCheckServiceTest(unittest.TestCase):
                     gemini.write_bytes(b"also authored\n")
                 elif scenario == "inline":
                     claude.write_bytes(b"inline " + CONTEXT_START + b" prose\n")
-                    gemini.write_bytes(b"prefix " + LEGACY_START + b" suffix\n")
+                    gemini.write_bytes(b"prefix " + CONTEXT_START + b" suffix\n")
                 else:
                     claude.symlink_to(owned)
                     gemini.mkdir()
@@ -987,7 +977,7 @@ class CliContractTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
 
-    def test_parser_exposes_only_the_v2_command_surface(self) -> None:
+    def test_parser_exposes_only_the_command_surface(self) -> None:
         parser = build_parser()
 
         build = parser.parse_args(
@@ -1149,31 +1139,6 @@ class CliContractTest(unittest.TestCase):
             for command in (build, check, diff, init):
                 command.assert_not_called()
 
-    def test_all_seven_removed_legacy_flags_are_usage_errors(self) -> None:
-        removed = (
-            ["build", "--embed"],
-            ["build", "--embed-max-tokens", "1"],
-            ["build", "--out", "map.md"],
-            ["build", "--lang", "python"],
-            ["build", "--private"],
-            ["build", "--behaviors"],
-            ["build", "--if-stale"],
-        )
-        with (
-            mock.patch.object(cli_module, "command_build") as build,
-            mock.patch.object(cli_module, "command_check") as check,
-            mock.patch.object(cli_module, "command_diff") as diff,
-            mock.patch.object(cli_module, "command_init") as init,
-        ):
-            for argv in removed:
-                with (
-                    self.subTest(argv=argv),
-                    contextlib.redirect_stderr(io.StringIO()),
-                ):
-                    self.assertEqual(main(argv), EXIT_USAGE)
-            for command in (build, check, diff, init):
-                command.assert_not_called()
-
 
 class SelfConfigTest(unittest.TestCase):
     def test_tracked_self_config_is_canonical_digest_only_config(self) -> None:
@@ -1184,7 +1149,7 @@ class SelfConfigTest(unittest.TestCase):
         self.assertEqual(load_config(path.parent, path), expected)
         self.assertEqual(expected.output, "PROJECT_DIGEST.md")
 
-    def test_readme_documents_the_complete_v2_delivery_contract(self) -> None:
+    def test_readme_documents_the_complete_delivery_contract(self) -> None:
         readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
             encoding="utf-8"
         )
@@ -1200,12 +1165,9 @@ class SelfConfigTest(unittest.TestCase):
             "hologram diff",
             "Atomic replacement is per target",
             "Static evidence cannot prove semantic deadness or authorize deletion",
-            "`--embed`",
-            "not supported",
             "supported source that cannot be read",
-            "v2 CLI orchestration",
-            "retired v1 library entry points",
-            "have been removed",
+            "CLI orchestration",
+            "canonical phase APIs",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, readme)
@@ -1234,11 +1196,6 @@ class InitTest(unittest.TestCase):
                 cli_module,
                 "preflight_precommit",
                 side_effect=AssertionError("--no-hook touched pre-commit"),
-            ),
-            mock.patch.object(
-                cli_module,
-                "remove_legacy_post_hook_lines",
-                side_effect=AssertionError("--no-hook touched legacy hooks"),
             ),
         ):
             self.assertEqual(
@@ -1451,11 +1408,6 @@ class InitTest(unittest.TestCase):
                 "preflight_precommit",
                 side_effect=AssertionError("--no-hook preflighted hook"),
             ),
-            mock.patch.object(
-                cli_module,
-                "remove_legacy_post_hook_lines",
-                side_effect=AssertionError("--no-hook inspected hooks"),
-            ),
         ):
             self.assertEqual(
                 command_init(
@@ -1495,7 +1447,6 @@ class InitTest(unittest.TestCase):
         events: list[str] = []
         real_artifact_preflight = cli_module._preflight_artifact_writes
         real_precommit = cli_module.preflight_precommit
-        real_cleanup = cli_module.remove_legacy_post_hook_lines
         real_commit = cli_module.commit_writes
 
         def artifact_preflight(*args: object, **kwargs: object) -> object:
@@ -1505,10 +1456,6 @@ class InitTest(unittest.TestCase):
         def precommit(*args: object, **kwargs: object) -> object:
             events.append("precommit-preflight")
             return real_precommit(*args, **kwargs)  # type: ignore[arg-type]
-
-        def cleanup(*args: object, **kwargs: object) -> object:
-            events.append("cleanup-preflight")
-            return real_cleanup(*args, **kwargs)  # type: ignore[arg-type]
 
         committed: list[tuple[Path, ...]] = []
 
@@ -1534,11 +1481,6 @@ class InitTest(unittest.TestCase):
                 "preflight_precommit",
                 side_effect=precommit,
             ),
-            mock.patch.object(
-                cli_module,
-                "remove_legacy_post_hook_lines",
-                side_effect=cleanup,
-            ),
             mock.patch.object(cli_module, "commit_writes", side_effect=commit),
         ):
             self.assertEqual(
@@ -1557,7 +1499,6 @@ class InitTest(unittest.TestCase):
             [
                 "artifact-preflight",
                 "precommit-preflight",
-                "cleanup-preflight",
                 "commit",
                 "commit",
             ],
