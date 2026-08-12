@@ -37,7 +37,7 @@ class CliBuildTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "hologram.md"
             code = run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
-                            "--quiet"])
+                            "--no-embed", "--quiet"])
             self.assertEqual(code, 0)
             content = out.read_text()
             self.assertIn("PricingEngine", content)
@@ -55,8 +55,41 @@ class InitHooksTest(unittest.TestCase):
             self.assertTrue(hook.exists())
             content = hook.read_text()
             self.assertEqual(content.count("hologram.py"), 1)
+            self.assertIn("--embed", content)
             gitignore = (repo / ".gitignore").read_text()
             self.assertEqual(gitignore.count("PROJECT_DIGEST.md"), 1)
+            self.assertIn("hologram:start", (repo / "CLAUDE.md").read_text())
+
+    def test_init_no_embed_keeps_digest_on_disk_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            run_cli(["init", "--root", str(repo), "--no-embed", "--quiet"])
+            hook = (repo / ".git" / "hooks" / "post-commit").read_text()
+            self.assertIn("--no-embed", hook)
+            self.assertFalse((repo / "CLAUDE.md").exists())
+
+    def test_reinitializing_updates_hook_delivery_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            run_cli(["init", "--root", str(repo), "--no-embed", "--quiet"])
+            run_cli(["init", "--root", str(repo), "--quiet"])
+            hook = (repo / ".git" / "hooks" / "post-commit").read_text()
+            self.assertIn("--embed", hook)
+            self.assertNotIn("--no-embed", hook)
+            self.assertEqual(hook.count("hologram.py"), 1)
+
+    def test_init_preserves_custom_wrapped_hologram_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            hook = repo / ".git" / "hooks" / "post-commit"
+            script = Path(hologram.__file__).resolve()
+            custom = (f'[ -f /tmp/run-hologram ] && python3 "{script}" build '
+                      f'--root "{repo.resolve()}" --quiet || true')
+            hook.write_text("#!/bin/sh\n" + custom + "\n")
+            run_cli(["init", "--root", str(repo), "--quiet"])
+            content = hook.read_text()
+            self.assertIn(custom, content)
+            self.assertEqual(content.count("hologram.py"), 2)
 
     def test_init_chains_existing_hook(self):
         with tempfile.TemporaryDirectory() as tmp:
