@@ -32,9 +32,9 @@ class StateAndCheckTest(unittest.TestCase):
     def test_state_stamp_matches_state_hash(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            out = Path(tmp) / "d.md"
-            run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
-            self.assertEqual(hologram._digest_state(out),
+            run_cli(["build", "--root", str(root), "--quiet"])
+            embedded = hologram.embedded_digest(root / "CLAUDE.md")
+            self.assertEqual(hologram._digest_state(embedded),
                              hologram._state_hash(root))
 
     def test_generator_change_invalidates_state(self):
@@ -49,27 +49,30 @@ class StateAndCheckTest(unittest.TestCase):
     def test_check_fresh_then_stale(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            out = Path(tmp) / "d.md"
-            run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
+            run_cli(["build", "--root", str(root), "--quiet"])
             self.assertEqual(run_cli(["check", "--root", str(root),
-                                      "--out", str(out), "--quiet"]), 0)
+                                      "--quiet"]), 0)
             (root / "svc.py").write_text("def added() -> int:\n    return 2\n")
             self.assertEqual(run_cli(["check", "--root", str(root),
-                                      "--out", str(out), "--quiet"]), 1)
+                                      "--quiet"]), 1)
+
+    def test_check_stale_when_no_block_embedded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            (root / "CLAUDE.md").write_text("# User rules\n")
+            self.assertEqual(run_cli(["check", "--root", str(root), "--quiet"]), 1)
 
     def test_build_if_stale_skips_when_fresh(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            out = Path(tmp) / "d.md"
-            run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
-            mtime = out.stat().st_mtime_ns
-            run_cli(["build", "--root", str(root), "--out", str(out),
-                     "--if-stale", "--quiet"])
-            self.assertEqual(out.stat().st_mtime_ns, mtime)   # untouched
+            claude = root / "CLAUDE.md"
+            run_cli(["build", "--root", str(root), "--quiet"])
+            mtime = claude.stat().st_mtime_ns
+            run_cli(["build", "--root", str(root), "--if-stale", "--quiet"])
+            self.assertEqual(claude.stat().st_mtime_ns, mtime)   # untouched
             (root / "svc.py").write_text("def other() -> int:\n    return 3\n")
-            run_cli(["build", "--root", str(root), "--out", str(out),
-                     "--if-stale", "--quiet"])
-            self.assertNotEqual(out.stat().st_mtime_ns, mtime)
+            run_cli(["build", "--root", str(root), "--if-stale", "--quiet"])
+            self.assertNotEqual(claude.stat().st_mtime_ns, mtime)
 
 
 class TestedMarkerTest(unittest.TestCase):
@@ -142,9 +145,8 @@ class EmbedTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cm = Path(tmp) / "CLAUDE.md"
             cm.write_text("# My rules\nUse tabs.\n")
-            tier = hologram.embed_digest(cm, self.DIGEST)
+            hologram.embed_digest(cm, self.DIGEST)
             text = cm.read_text()
-        self.assertEqual(tier, "full")
         self.assertIn("My rules", text)                     # user content kept
         self.assertIn("hologram:start", text)
         self.assertIn("run():int ✓ > _step", text)
@@ -167,64 +169,123 @@ class EmbedTest(unittest.TestCase):
             f"  method{i}(int):int > callee{i},other{i}" for i in range(400))
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "CLAUDE.md"
-            tier = hologram.embed_digest(path, big)
+            hologram.embed_digest(path, big)
             embedded = path.read_text()
-        self.assertEqual(tier, "full")
         self.assertEqual(
             embedded,
-            f"{hologram._EMBED_START}\n```\n{big.rstrip()}\n```\n"
-            f"{hologram._EMBED_END}\n",
+            f"{hologram._EMBED_START}\n{hologram._EMBED_NOTE}\n\n```\n"
+            f"{big.rstrip()}\n```\n{hologram._EMBED_END}\n",
         )
         self.assertIn("> callee399,other399", embedded)
 
-    def test_cli_build_embeds_by_default(self):
+    def test_block_carries_a_note_explaining_what_it_is(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "CLAUDE.md"
+            hologram.embed_digest(path, self.DIGEST)
+            text = path.read_text()
+        self.assertIn("hologram map of this repository", text)
+        self.assertIn("notation legend", text)
+        # the note lives inside the managed block, not in user-owned prose
+        self.assertLess(text.index(hologram._EMBED_START),
+                        text.index("hologram map of this repository"))
+
+    def test_embedded_digest_roundtrips_the_exact_digest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "CLAUDE.md"
+            path.write_text("# Rules\n\nmentioning hologram:end in prose\n")
+            hologram.embed_digest(path, self.DIGEST)
+            self.assertEqual(hologram.embedded_digest(path), self.DIGEST.rstrip())
+
+    def test_prose_mentioning_end_marker_does_not_duplicate_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "CLAUDE.md"
+            path.write_text(f"# Rules\n\nDon't write {hologram._EMBED_END} here.\n")
+            hologram.embed_digest(path, self.DIGEST)
+            hologram.embed_digest(path, self.DIGEST)
+            text = path.read_text()
+        self.assertEqual(text.count(hologram._EMBED_START), 1)
+        self.assertEqual(text.count("run():int"), 1)
+
+    def test_cli_build_embeds(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            out = Path(tmp) / "d.md"
-            run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
+            run_cli(["build", "--root", str(root), "--quiet"])
             text = (root / "CLAUDE.md").read_text()
         self.assertIn("hologram:start", text)
         self.assertIn("Svc(C)", text)
 
-    def test_cli_build_no_embed_opt_out(self):
+    def test_cli_build_preserves_user_content(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            out = Path(tmp) / "d.md"
-            run_cli(["build", "--root", str(root), "--out", str(out),
-                     "--no-embed", "--quiet"])
-            self.assertTrue(out.exists())
-            self.assertFalse((root / "CLAUDE.md").exists())
-            self.assertEqual(
-                run_cli(["check", "--root", str(root), "--out", str(out),
-                         "--no-embed", "--quiet"]),
-                0,
-            )
-
-    def test_cli_no_embed_removes_existing_managed_block(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = _proj(Path(tmp))
-            out = Path(tmp) / "d.md"
             claude = root / "CLAUDE.md"
             claude.write_text("# User rules\n\nKeep this.\n")
-            run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
-            self.assertIn("hologram:start", claude.read_text())
-            run_cli(["build", "--root", str(root), "--out", str(out),
-                     "--if-stale", "--no-embed", "--quiet"])
-            self.assertEqual(claude.read_text(), "# User rules\n\nKeep this.\n")
+            run_cli(["build", "--root", str(root), "--quiet"])
+            text = claude.read_text()
+        self.assertTrue(text.startswith("# User rules\n\nKeep this."))
+        self.assertIn("hologram:start", text)
 
-    def test_check_and_if_stale_require_exact_embedded_body(self):
+    def test_check_and_if_stale_follow_the_embedded_block(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            out = root / "PROJECT_DIGEST.md"
-            args = ["--root", str(root), "--out", str(out), "--quiet"]
-            run_cli(["build", *args])
-            digest_mtime = out.stat().st_mtime_ns
+            args = ["--root", str(root), "--quiet"]
             claude = root / "CLAUDE.md"
-            claude.write_text(claude.read_text().replace("Svc(C)", "Svc(C) STALE"))
+            run_cli(["build", *args])
+            self.assertEqual(run_cli(["check", *args]), 0)
+            claude.write_text(claude.read_text().replace("· state ", "· state x"))
             self.assertEqual(run_cli(["check", *args]), 1)
             self.assertEqual(run_cli(["build", "--if-stale", *args]), 0)
-            self.assertEqual(out.stat().st_mtime_ns, digest_mtime)
-            self.assertTrue(hologram._embedded_digest_matches(claude, out.read_text()))
+            self.assertEqual(run_cli(["check", *args]), 0)
+
+
+class ContextTargetsTest(unittest.TestCase):
+    def test_defaults_to_claude_md_when_repo_has_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            self.assertEqual(hologram.context_targets(root),
+                             [root / "CLAUDE.md"])
+
+    def test_detects_existing_agent_files_and_rule_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            (root / "AGENTS.md").write_text("# codex\n")
+            (root / "GEMINI.md").write_text("# gemini\n")
+            (root / ".clinerules").write_text("# cline\n")
+            (root / ".github").mkdir()
+            (root / ".github" / "copilot-instructions.md").write_text("# copilot\n")
+            (root / ".cursor" / "rules").mkdir(parents=True)
+            targets = {str(t.relative_to(root))
+                       for t in hologram.context_targets(root)}
+        self.assertEqual(targets, {
+            "AGENTS.md", "GEMINI.md", ".clinerules",
+            ".github/copilot-instructions.md", ".cursor/rules/hologram.mdc",
+        })
+        self.assertNotIn("CLAUDE.md", targets)   # absent file isn't created
+
+    def test_build_embeds_into_every_present_context_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            (root / "CLAUDE.md").write_text("# claude\n")
+            (root / "AGENTS.md").write_text("# codex\n")
+            (root / ".cursor" / "rules").mkdir(parents=True)
+            run_cli(["build", "--root", str(root), "--quiet"])
+            for rel in ("CLAUDE.md", "AGENTS.md", ".cursor/rules/hologram.mdc"):
+                self.assertIn("Svc(C)", hologram.embedded_digest(root / rel), rel)
+            mdc = (root / ".cursor/rules/hologram.mdc").read_text()
+        self.assertTrue(mdc.startswith("---\n"))       # cursor front matter seeded
+        self.assertIn("alwaysApply: true", mdc)
+
+    def test_check_is_stale_when_one_target_lags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            (root / "CLAUDE.md").write_text("# claude\n")
+            (root / "AGENTS.md").write_text("# codex\n")
+            args = ["--root", str(root), "--quiet"]
+            run_cli(["build", *args])
+            self.assertEqual(run_cli(["check", *args]), 0)
+            (root / "AGENTS.md").write_text("# codex only\n")   # block dropped
+            self.assertEqual(run_cli(["check", *args]), 1)
+            run_cli(["build", "--if-stale", *args])
+            self.assertEqual(run_cli(["check", *args]), 0)
 
 
 class DiffCommandTest(unittest.TestCase):

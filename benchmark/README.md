@@ -1,9 +1,9 @@
 # hologram benchmark
 
-Measures agents with a digest (condition A) against agents without (condition B)
-on the same tasks in the same corpus. Every run is a headless `claude -p` session
-in a throwaway git worktree; metrics come from the transcript, an acceptance
-command, and a digest-diff duplication check.
+Measures agents with the map in context (condition A) against agents without
+(condition B) on the same tasks in the same corpus. Every run is a headless
+`claude -p` session in a throwaway git worktree; metrics come from the transcript,
+an acceptance command, and a map-diff duplication check.
 
 ## Smoke run (do this first — ~4 sessions)
 
@@ -12,8 +12,8 @@ command, and a digest-diff duplication check.
     .venv/bin/python benchmark/bench.py report
 
 Read the two transcripts in `benchmark/results/` end to end once. Check that the
-condition-A agent actually opened PROJECT_DIGEST.md (a Read tool call naming it)
-and that the acceptance commands measured what you meant.
+condition-A workspace really carries the embedded block in its `CLAUDE.md` and that
+the acceptance commands measured what you meant.
 
 ## Full matrix (~60 sessions — this costs real money)
 
@@ -36,7 +36,10 @@ and that the acceptance commands measured what you meant.
 
 - The duplication detector is a heuristic (call-chain + name similarity). Review
   its verdicts manually before quoting them; the per-task list makes that fast.
-- One corpus, one model, ten tasks. This answers "does the digest help *here*",
+- One corpus, one model, ten tasks. This answers "does the map help *here*",
   not "does it help everywhere".
+- Corpora the model has memorized (large, famous OSS) measure the wrong thing: the
+  control answers from training memory, so the map can only add cost. Run this
+  against code the model has never seen.
 - Navigation tasks are judged by acceptance `true` — their signal is in
   reads/searches/tokens, not correctness. A human should spot-check the answers.

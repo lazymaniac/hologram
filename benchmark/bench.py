@@ -19,6 +19,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import hologram  # noqa: E402
+
 HOLOGRAM = Path(__file__).resolve().parents[1] / "hologram.py"
 
 
@@ -65,10 +69,9 @@ def parse_transcript(text: str) -> dict:
     """Tool-call counts and usage from a claude stream-json transcript.
     Agents search/read through Bash as often as through dedicated tools, so
     Bash commands are classified too. tokens_in sums fresh input + cache
-    creation + cache reads — the actual context consumption. digest_hits
-    counts tool calls that touch PROJECT_DIGEST.md (did the agent actually
-    consult the digest?). Tolerant of non-JSON noise lines."""
-    m = {"reads": 0, "searches": 0, "edits": 0, "digest_hits": 0,
+    creation + cache reads — the actual context consumption. Tolerant of
+    non-JSON noise lines."""
+    m = {"reads": 0, "searches": 0, "edits": 0,
          "turns": 0, "tokens_in": 0, "tokens_out": 0}
     for line in text.splitlines():
         try:
@@ -80,9 +83,6 @@ def parse_transcript(text: str) -> dict:
                 if block.get("type") != "tool_use":
                     continue
                 name = block.get("name", "")
-                blob = json.dumps(block.get("input", {}))
-                if "PROJECT_DIGEST" in blob:
-                    m["digest_hits"] += 1
                 if name in _READ_TOOLS:
                     m["reads"] += 1
                 elif name in _SEARCH_TOOLS:
@@ -150,22 +150,6 @@ def judge_reuse(before: str, after: str, expect_reuse: list[str]) -> dict:
             "duplicated": sorted(set(duplicated))}
 
 
-_AGENT_SNIPPET = """## Project index: PROJECT_DIGEST.md
-
-`PROJECT_DIGEST.md` indexes public signatures, named fields, resolved project calls,
-private identifiers, and test files/classes. Query it with grep when needed.
-
-- Who calls X (before changing X): `grep "> .*X" PROJECT_DIGEST.md` — one line
-  per caller, receivers resolved to types; source grep cannot answer this.
-- Does something like X exist (before writing ANY new helper): grep concept
-  synonyms over it (`grep -i "trim\\|blank\\|strip" PROJECT_DIGEST.md`), reuse
-  what you find.
-- Canonical choice: prefer `✓` (called by tests) lines.
-- Placement: the tree + `· deps a→b` + grouped families show where code belongs.
-- Debugging: a class's `- name,name` line lists private internals; `⋮N` marks
-  heavy bodies. Open those files first.
-"""
-
 _BASE_CLAUDE_MD = """# Working notes
 
 Complete the requested task directly. Keep changes minimal and idiomatic.
@@ -174,24 +158,19 @@ Complete the requested task directly. Keep changes minimal and idiomatic.
 
 def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
     """Detached git worktree of the corpus, prepared for one condition.
-    A = digest on disk + query instructions (pull model); B = control;
-    C = digest embedded directly into CLAUDE.md (push model — the whole map is
-    in context from turn zero, the tool's actual thesis). The corpus's own
-    CLAUDE.md is preserved, and the setup is committed in the detached worktree
-    so that any later `git diff` shows exactly what the agent changed."""
+    A = the map embedded in the agent's context file (the whole map in context
+    from turn zero); B = control. The corpus's own CLAUDE.md is preserved, and
+    the setup is committed in the detached worktree so that any later
+    `git diff` shows exactly what the agent changed."""
     subprocess.run(["git", "-C", str(corpus), "worktree", "add", "--detach",
                     "-f", str(ws), "HEAD"], check=True, capture_output=True)
     claude_path = ws / "CLAUDE.md"
     existing = claude_path.read_text() if claude_path.exists() else ""
     claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
+    claude_path.write_text(claude_md)
     if condition == "A":
         subprocess.run([sys.executable, str(HOLOGRAM), "build",
-                        "--root", str(ws), "--no-embed", "--quiet"], check=True)
-        claude_md += "\n" + _AGENT_SNIPPET
-    claude_path.write_text(claude_md)
-    if condition == "C":
-        subprocess.run([sys.executable, str(HOLOGRAM), "build",
-                        "--root", str(ws), "--embed", "--quiet"], check=True)
+                        "--root", str(ws), "--quiet"], check=True)
     subprocess.run(["git", "-C", str(ws), "add", "-A"],
                    check=True, capture_output=True)
     subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",
@@ -218,12 +197,7 @@ def claude_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
 
 
 def _digest_of(ws: Path) -> str:
-    out = ws / ".bench-digest.md"
-    subprocess.run([sys.executable, str(HOLOGRAM), "build", "--root", str(ws),
-                    "--out", str(out), "--quiet"], check=True)
-    text = out.read_text()
-    out.unlink()
-    return text
+    return hologram.build_digest(ws)
 
 
 def run_one(corpus: Path, task: Task, condition: str, rep: int,
@@ -257,8 +231,8 @@ def report(rows: list[dict]) -> str:
     if not rows:
         return "no runs recorded\n"
     lines = ["| condition | runs | accepted | duplication (reuse tasks) | "
-             "reads | searches | digest hits | turns | tokens in | tokens out |",
-             "|---|---|---|---|---|---|---|---|---|---|"]
+             "reads | searches | turns | tokens in | tokens out |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for cond in sorted({r["condition"] for r in rows}):
         rs = [r for r in rows if r["condition"] == cond]
         reuse = [r for r in rs if r["kind"] == "reuse"]
@@ -269,10 +243,9 @@ def report(rows: list[dict]) -> str:
         def mean(key, rows=rs):
             return statistics.fmean(r[key] for r in rows)
 
-        dh = statistics.fmean(r.get("digest_hits", 0) for r in rs)
         lines.append(
             f"| {cond} | {len(rs)} | {acc:.0f}% | {dup_rate:.0f}% | "
-            f"{mean('reads'):.1f} | {mean('searches'):.1f} | {dh:.1f} | "
+            f"{mean('reads'):.1f} | {mean('searches'):.1f} | "
             f"{mean('turns'):.1f} | {mean('tokens_in'):,.0f} | "
             f"{mean('tokens_out'):,.0f} |")
     lines.append("")

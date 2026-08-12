@@ -33,20 +33,20 @@ def _make_repo(tmp: Path) -> Path:
 
 @needs_java
 class CliBuildTest(unittest.TestCase):
-    def test_build_writes_digest_file(self):
+    def test_build_embeds_map_in_claude_md(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "hologram.md"
-            code = run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
-                            "--no-embed", "--quiet"])
+            proj = Path(tmp) / "proj"
+            shutil.copytree(JAVAMINI, proj)
+            code = run_cli(["build", "--root", str(proj), "--quiet"])
             self.assertEqual(code, 0)
-            content = out.read_text()
+            content = hologram.embedded_digest(proj / "CLAUDE.md")
             self.assertIn("PricingEngine", content)
             self.assertIn("> ", content)
 
 
 @needs_java
 class InitHooksTest(unittest.TestCase):
-    def test_init_installs_hooks_and_gitignore_idempotently(self):
+    def test_init_installs_hooks_idempotently(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp))
             self.assertEqual(run_cli(["init", "--root", str(repo), "--quiet"]), 0)
@@ -55,28 +55,21 @@ class InitHooksTest(unittest.TestCase):
             self.assertTrue(hook.exists())
             content = hook.read_text()
             self.assertEqual(content.count("hologram.py"), 1)
-            self.assertIn("--embed", content)
-            gitignore = (repo / ".gitignore").read_text()
-            self.assertEqual(gitignore.count("PROJECT_DIGEST.md"), 1)
+            self.assertNotIn("--embed", content)     # embedding is the only mode
             self.assertIn("hologram:start", (repo / "CLAUDE.md").read_text())
 
-    def test_init_no_embed_keeps_digest_on_disk_only(self):
+    def test_init_replaces_hook_line_from_older_versions(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp))
-            run_cli(["init", "--root", str(repo), "--no-embed", "--quiet"])
-            hook = (repo / ".git" / "hooks" / "post-commit").read_text()
-            self.assertIn("--no-embed", hook)
-            self.assertFalse((repo / "CLAUDE.md").exists())
-
-    def test_reinitializing_updates_hook_delivery_mode(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp))
-            run_cli(["init", "--root", str(repo), "--no-embed", "--quiet"])
+            script = Path(hologram.__file__).resolve()
+            hook = repo / ".git" / "hooks" / "post-commit"
+            old = (f'python3 "{script}" build --root "{repo.resolve()}" '
+                   f'--no-embed --quiet || true')
+            hook.write_text("#!/bin/sh\n" + old + "\n")
             run_cli(["init", "--root", str(repo), "--quiet"])
-            hook = (repo / ".git" / "hooks" / "post-commit").read_text()
-            self.assertIn("--embed", hook)
-            self.assertNotIn("--no-embed", hook)
-            self.assertEqual(hook.count("hologram.py"), 1)
+            content = hook.read_text()
+            self.assertNotIn("--no-embed", content)
+            self.assertEqual(content.count("hologram.py"), 1)
 
     def test_init_preserves_custom_wrapped_hologram_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,10 +123,10 @@ class BootstrapTest(unittest.TestCase):
         os.environ["HOLOGRAM_BOOTSTRAPPED"] = "1"  # pretend re-exec already happened
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                out = Path(tmp) / "d.md"
+                proj = Path(tmp) / "proj"
+                shutil.copytree(JAVAMINI, proj)
                 with self.assertRaises(SystemExit) as ctx:
-                    run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
-                             "--quiet"])
+                    run_cli(["build", "--root", str(proj), "--quiet"])
             self.assertIn("pip install", str(ctx.exception))
             self.assertIn("tree-sitter-java", str(ctx.exception))
         finally:

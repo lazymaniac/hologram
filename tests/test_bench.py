@@ -62,10 +62,10 @@ TRANSCRIPT = "\n".join([
          "input": {"command": "sed -n '1,40p' StringUtils.java"}}]}}),
     json.dumps({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Bash",
-         "input": {"command": "grep -n trimToNull PROJECT_DIGEST.md"}}]}}),
+         "input": {"command": "grep -n trimToNull spring-core/src"}}]}}),
     json.dumps({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Read",
-         "input": {"file_path": "/ws/PROJECT_DIGEST.md"}}]}}),
+         "input": {"file_path": "/ws/StringUtils.java"}}]}}),
     json.dumps({"type": "assistant", "message": {"content": [
         {"type": "tool_use", "name": "Edit", "input": {}}]}}),
     json.dumps({"type": "assistant", "message": {"content": [
@@ -84,7 +84,6 @@ class TranscriptMetricsTest(unittest.TestCase):
         self.assertEqual(m["reads"], 3)      # Read ×2 + bash sed -n
         self.assertEqual(m["searches"], 3)   # Grep + bash grep ×2
         self.assertEqual(m["edits"], 2)      # Edit + Write
-        self.assertEqual(m["digest_hits"], 2)  # bash grep on digest + Read digest
         self.assertEqual(m["turns"], 7)
         self.assertEqual(m["tokens_in"], 91000 + 30000 + 500000)
         self.assertEqual(m["tokens_out"], 4200)
@@ -92,8 +91,7 @@ class TranscriptMetricsTest(unittest.TestCase):
     def test_empty_transcript_gives_zeroes(self):
         m = bench.parse_transcript("")
         self.assertEqual(m, {"reads": 0, "searches": 0, "edits": 0,
-                             "digest_hits": 0, "turns": 0,
-                             "tokens_in": 0, "tokens_out": 0})
+                             "turns": 0, "tokens_in": 0, "tokens_out": 0})
 
 
 BEFORE_DIGEST = """# hologram · 100 LOC · state aaa
@@ -154,13 +152,12 @@ def _mini_corpus(tmp: Path) -> Path:
 
 
 class WorkspaceTest(unittest.TestCase):
-    def test_condition_a_has_digest_and_instructions(self):
+    def test_condition_a_embeds_the_map(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
             ws = bench.make_workspace(repo, Path(tmp) / "wsA", "A")
             try:
-                self.assertTrue((ws / "PROJECT_DIGEST.md").exists())
-                self.assertIn("PROJECT_DIGEST.md", (ws / "CLAUDE.md").read_text())
+                self.assertIn("hologram:start", (ws / "CLAUDE.md").read_text())
                 self.assertTrue((ws / "svc.py").exists())
             finally:
                 bench.drop_workspace(repo, ws)
@@ -170,8 +167,7 @@ class WorkspaceTest(unittest.TestCase):
             repo = _mini_corpus(Path(tmp))
             ws = bench.make_workspace(repo, Path(tmp) / "wsB", "B")
             try:
-                self.assertFalse((ws / "PROJECT_DIGEST.md").exists())
-                self.assertNotIn("PROJECT_DIGEST", (ws / "CLAUDE.md").read_text())
+                self.assertNotIn("hologram:start", (ws / "CLAUDE.md").read_text())
             finally:
                 bench.drop_workspace(repo, ws)
 
@@ -192,7 +188,7 @@ class WorkspaceTest(unittest.TestCase):
             try:
                 text = (ws / "CLAUDE.md").read_text()
                 self.assertIn("Corpus conventions", text)      # corpus part kept
-                self.assertIn("PROJECT_DIGEST.md", text)       # snippet appended
+                self.assertIn("hologram:start", text)          # map embedded
                 diff = subprocess.run(["git", "-C", str(ws), "diff", "--stat"],
                                       capture_output=True, text=True).stdout
                 self.assertEqual(diff, "")   # setup committed -> clean slate
@@ -279,7 +275,7 @@ class ReportTest(unittest.TestCase):
         self.assertIn("0%", md)
         self.assertIn("100%", md)
         self.assertIn("reads", md)
-        self.assertIn("digest hits", md)
+        self.assertIn("searches", md)
 
     def test_empty_rows(self):
         self.assertIn("no runs", bench.report([]))
