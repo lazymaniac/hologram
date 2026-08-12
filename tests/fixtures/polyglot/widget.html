@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+<head>
+  <style>
+    .widget { border: 1px solid; }
+    #widget-root { --accent: blue; }
+  </style>
+  <script>
+    function renderWidget(target) {
+      attach(target);
+    }
+    function attach(el) {
+      el.innerHTML = "ok";
+    }
+  </script>
+</head>
+<body>
+  <div id="widget-root"><status-badge></status-badge></div>
+</body>
+</html>

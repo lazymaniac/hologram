@@ -1,0 +1,23 @@
+:root {
+  --brand-color: #c0392b;
+  --gap: 8px;
+}
+
+.card {
+  color: var(--brand-color);
+  padding: var(--gap);
+}
+
+.card:hover .card-title,
+#app > .nav-item {
+  text-decoration: underline;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 600px) {
+  .sidebar { display: none; }
+}

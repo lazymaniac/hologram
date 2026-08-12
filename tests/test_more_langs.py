@@ -156,6 +156,37 @@ class CppExtractTest(unittest.TestCase):
         self.assertEqual(ctor.name, "Engine")
 
 
+@_needs("bash")
+class BashExtractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(POLY / "sample.sh", POLY)
+
+    def test_both_definition_forms(self):
+        names = {s.name for s in self.syms}
+        self.assertEqual(names, {"_log", "build_image", "deploy"})
+        deploy = next(s for s in self.syms if s.name == "deploy")
+        self.assertEqual(deploy.kind, "fn")
+        self.assertEqual(deploy.signature, "deploy()")
+
+    def test_underscore_prefix_private(self):
+        log = next(s for s in self.syms if s.name == "_log")
+        self.assertEqual(log.visibility, "priv")
+        self.assertTrue(all(
+            s.visibility == "pub" for s in self.syms if s.name != "_log"))
+
+    def test_call_chains(self):
+        deploy = next(s for s in self.syms if s.name == "deploy")
+        self.assertIn("_log", deploy.calls)
+        self.assertIn("build_image", deploy.calls)
+        self.assertIn("docker", deploy.calls)
+        build = next(s for s in self.syms if s.name == "build_image")
+        self.assertIn("_log", build.calls)
+
+    def test_sizes(self):
+        self.assertTrue(all(s.size > 0 for s in self.syms))
+
+
 @_needs("lua")
 class LuaExtractTest(unittest.TestCase):
     @classmethod
@@ -175,6 +206,64 @@ class LuaExtractTest(unittest.TestCase):
         self.assertEqual(helper.visibility, "priv")
         self.assertEqual(helper.params, ["x"])
         self.assertEqual(helper.param_names, ["x"])
+
+
+@_needs("css")
+class CssExtractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(POLY / "theme.css", POLY)
+
+    def test_selectors(self):
+        names = {s.name for s in self.syms}
+        self.assertIn(".card", names)
+        self.assertIn(".card-title", names)
+        self.assertIn(".nav-item", names)
+        self.assertIn("#app", names)
+        self.assertIn(".sidebar", names)  # inside @media
+
+    def test_pseudo_classes_not_selectors(self):
+        names = {s.name for s in self.syms}
+        self.assertNotIn(".hover", names)
+        self.assertNotIn(".root", names)
+
+    def test_custom_properties_and_keyframes(self):
+        names = {s.name for s in self.syms}
+        self.assertIn("--brand-color", names)
+        self.assertIn("--gap", names)
+        self.assertIn("@spin", names)
+        self.assertTrue(all(s.visibility == "priv" for s in self.syms))
+
+    def test_dedup(self):
+        self.assertEqual(len([s for s in self.syms if s.name == ".card"]), 1)
+
+
+@_needs("html")
+@_needs("typescript")
+@_needs("css")
+class HtmlNestedBlocksTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(POLY / "widget.html", POLY)
+
+    def test_script_functions_extracted(self):
+        render = next(s for s in self.syms if s.name == "renderWidget")
+        self.assertEqual(render.lang, "typescript")
+        self.assertIn("attach", render.calls)
+        self.assertGreater(render.line, 1)  # offset into the html file
+
+    def test_style_selectors_extracted(self):
+        names = {s.name for s in self.syms}
+        self.assertIn(".widget", names)
+        self.assertIn("--accent", names)
+
+    def test_ids_and_custom_elements_still_present(self):
+        names = {s.name for s in self.syms}
+        self.assertIn("#widget-root", names)
+        self.assertIn("status-badge", names)
+        # #widget-root appears as both html id and css id selector: one symbol
+        self.assertEqual(len([s for s in self.syms
+                              if s.name == "#widget-root"]), 1)
 
 
 @_needs("html")
