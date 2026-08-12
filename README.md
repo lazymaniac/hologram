@@ -106,7 +106,9 @@ any LLM:
 | Go, Rust, C, C++ | types, traits, structs, signatures, calls, receiver bindings |
 | Vue, Svelte | the component plus everything in its `<script>` block |
 | Lua | functions and methods with call chains (params by name — it's untyped) |
-| HTML | element ids and custom-element tags, names only |
+| Bash/zsh (`.sh`, `.bash`, `.zsh`) | functions (both definition forms) with command-call chains; `_name` = private |
+| HTML | element ids and custom-element tags, plus nested `<script>`/`<style>` blocks run through the JS/CSS extractors (when those grammars are installed) |
+| CSS | class/id selectors, custom properties (`--x`), `@keyframes` names — names only |
 | Helm | template `define` names, `values.yaml` keys, chart name |
 
 ## Getting started

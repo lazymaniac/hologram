@@ -139,7 +139,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
 
 ```
-# hologram · 5,139 LOC · state bcd45736afb1
+# hologram · 5,324 LOC · state 3d552b288174
 · C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb
 build_digest(root,langs):str ✓ > _gather,_dep_lines,render_simple,_zero_usage_names
 context_targets(root):list[Path] ✓
@@ -159,18 +159,19 @@ Symbol(C{name,kind,file,line,signature,params,param_names,returns,visibility,con
 - hologram.py: _parse_throws,_split_top_commas,_base_type,_heritage,_load_parser,_grammar_pkgs,
                _ast_{text,field,collect,calls,modifiers,param_types,vis},_body_lines,
                _java_{param_names,call_entry,calls,param_bindings,class_bindings,local_bindings,method_symbol},
-               _extract_{java,ts,tsx,sfc,go,rust,cs,kotlin,c,cpp,lua,html,helm,python},
+               _extract_{java,ts,tsx,sfc,go,rust,cs,kotlin,c,cpp,lua,bash,css,html,helm,python},
                _ts_{exported,params,param_names,return,call_entry,calls,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,top_level_arrows,aliases_and_reexports},
                _go_{vis,type_text,params,param_names,result,call_entry,local_bindings},
                _rs_{vis,params,param_names,call_entry,local_bindings,fn_symbol},
                _cs_{vis,params,param_names,call_entry,local_bindings},
                _kt_{vis,params,param_names,return,call_entry,fn_symbol},
                _c_{fn_declarator,params,param_names,field_names,call_entry,static,enum_symbol},_lua_call_entry,
-               _py_{param_facts,calls,raises,bindings,fn_symbol},_generator_fingerprint,_new_state_hash,_gather,
-               _state_hash,_digest_state,_zero_usage_names,_is_test_path,_tree_lines,_strip_exc,_dep_lines,_total_loc,
-               _symbol_identity,_target_descriptions,_resolved_project_calls,_factored_name_tokens,_factored_names,
-               _private_lines,_braced_lines,_test_index_lines,_embed_block,_block_span,_seed_content,_venv_python,
-               _missing_parser_langs,_venv_has_grammars,_bootstrap_or_die,_hook_python,_managed_hook_line,_install_hooks
+               _bash_call_entry,_css_symbols,_py_{param_facts,calls,raises,bindings,fn_symbol},_generator_fingerprint,
+               _new_state_hash,_gather,_state_hash,_digest_state,_zero_usage_names,_is_test_path,_tree_lines,_strip_exc,
+               _dep_lines,_total_loc,_symbol_identity,_target_descriptions,_resolved_project_calls,_factored_name_tokens,
+               _factored_names,_private_lines,_braced_lines,_test_index_lines,_embed_block,_block_span,_seed_content,
+               _venv_python,_missing_parser_langs,_venv_has_grammars,_bootstrap_or_die,_hook_python,_managed_hook_line,
+               _install_hooks
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
  drop_workspace(corpus,ws) ✓
@@ -190,8 +191,9 @@ benchmark
  test_extract_langs.py{PythonExtractTest,TypeScriptExtractTest,ArrowFunctionTest}
  test_freshness_and_markers.py{StateAndCheckTest,TestedMarkerTest,SizeMarkerTest,TestIndexTest,DepsMapTest,EmbedTest,
                                ContextTargetsTest,DiffCommandTest}
- test_more_langs.py{GoExtractTest,RustExtractTest,CSharpExtractTest,CExtractTest,CppExtractTest,LuaExtractTest,
-                    HtmlExtractTest,HelmExtractTest,KotlinExtractTest,TsGapsTest,TsxExtractTest,SfcExtractTest}
+ test_more_langs.py{GoExtractTest,RustExtractTest,CSharpExtractTest,CExtractTest,CppExtractTest,BashExtractTest,
+                    LuaExtractTest,CssExtractTest,HtmlNestedBlocksTest,HtmlExtractTest,HelmExtractTest,KotlinExtractTest,
+                    TsGapsTest,TsxExtractTest,SfcExtractTest}
  test_simple_mode.py{CallExtractionTest,SimpleDigestTest,SameShapeGroupingTest,RenderUnitTest,EnumValuesTest,
                      InterfaceMethodTest,QualifiedCallTest,FieldNamesTest,ReconstructablePathTest,LanguageFilterTest,
                      RelationsTest,LegendTest,ThrowsTest,TransitiveReductionTest,VoidOmissionTest,GroupExtrasTest,
