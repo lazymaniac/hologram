@@ -186,7 +186,7 @@ def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
     claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
     if condition == "A":
         subprocess.run([sys.executable, str(HOLOGRAM), "build",
-                        "--root", str(ws), "--quiet"], check=True)
+                        "--root", str(ws), "--no-embed", "--quiet"], check=True)
         claude_md += "\n" + _AGENT_SNIPPET
     claude_path.write_text(claude_md)
     if condition == "C":

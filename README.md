@@ -117,9 +117,9 @@ Clone it anywhere and point it at a repo:
 python3 ~/workspace/hologram/hologram.py init --root /path/to/repo
 ```
 
-That installs git hooks, adds a `.gitignore` entry, and writes the first
-`PROJECT_DIGEST.md` at the repo root. From then on the hooks rebuild it after every
-commit, merge, and checkout. You never touch it again.
+That installs git hooks, adds a `.gitignore` entry, writes `PROJECT_DIGEST.md`, and
+embeds the same map in `CLAUDE.md`. From then on the hooks rebuild both after every
+commit, merge, and checkout. You never touch them again.
 
 The first time it meets a language it has no parser for, it offers to set one up: it
 creates a `.venv` next to itself and pip-installs the right tree-sitter grammar. You
@@ -130,11 +130,12 @@ standard library is enough.
 Everything it can do:
 
 ```bash
-hologram.py build --root .                                 # manual rebuild
+hologram.py build --root .                                 # rebuild file + embedded map
 hologram.py build --root . --lang java --out DIGEST.md     # limit languages, pick the filename
 hologram.py build --root . --if-stale                      # rebuild only if the code changed
-hologram.py check --root .                                 # is the digest current? exit 0 yes / 1 no
+hologram.py check --root .                                 # are file + embed current? exit 0 yes / 1 no
 hologram.py diff HEAD~3 --root .                           # how did the API change since then?
+hologram.py build --root . --no-embed                      # digest file only
 ```
 
 ## Staying fresh
@@ -143,7 +144,8 @@ A stale digest is worse than none — an agent trusting a description of deleted
 is confidently wrong. Three commands make freshness a non-issue:
 
 - `check` recomputes the header's `state` hash in milliseconds, without parsing
-  anything, and answers yes or no. Wire it into CI or an agent harness.
+  anything, and verifies both copies (`--no-embed` checks only the file). Wire it
+  into CI or an agent harness.
 - `build --if-stale` uses the same probe, so "rebuild just in case" costs nothing
   when nothing changed.
 - `diff <rev>` points the same machinery backwards: it rebuilds the digest as it
@@ -155,10 +157,10 @@ is confidently wrong. Three commands make freshness a non-issue:
 There are two delivery modes, and the difference matters more than anything else
 about this tool.
 
-**Embed it (recommended) — the holistic view, always in context:**
+**Embed it (the default) — the holistic view, always in context:**
 
 ```bash
-hologram.py init --root /path/to/repo --embed
+hologram.py init --root /path/to/repo
 ```
 
 This injects the digest directly into `CLAUDE.md` between managed markers, and
@@ -168,10 +170,14 @@ tier and no semantic truncation. Output size is controlled by representation:
 parameter names, field names, resolved project calls, prefix-factored private names,
 and file/class-only test indexing.
 
-**Or keep it on disk** — the digest stays a file the agent queries when it
-chooses to. Weaker (the benchmark below showed agents mostly don't choose to),
-but free of context cost. If you use this mode, teach the query patterns — copy
-this into `CLAUDE.md` / `AGENTS.md`:
+**Or keep it on disk** with `--no-embed` — the digest stays a file the agent
+queries when it chooses to. Weaker (the benchmark below showed agents mostly don't
+choose to), but free of context cost. If you use this mode, teach the query patterns
+— copy this into `CLAUDE.md` / `AGENTS.md`:
+
+```bash
+hologram.py init --root /path/to/repo --no-embed
+```
 
 ```markdown
 ## Project index: PROJECT_DIGEST.md

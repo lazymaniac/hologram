@@ -177,21 +177,46 @@ class EmbedTest(unittest.TestCase):
         )
         self.assertIn("> callee399,other399", embedded)
 
-    def test_cli_build_embed(self):
+    def test_cli_build_embeds_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            out = Path(tmp) / "d.md"
+            run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
+            text = (root / "CLAUDE.md").read_text()
+        self.assertIn("hologram:start", text)
+        self.assertIn("Svc(C)", text)
+
+    def test_cli_build_no_embed_opt_out(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
             out = Path(tmp) / "d.md"
             run_cli(["build", "--root", str(root), "--out", str(out),
-                     "--embed", "--quiet"])
-            text = (root / "CLAUDE.md").read_text()
-        self.assertIn("hologram:start", text)
-        self.assertIn("Svc(C)", text)
+                     "--no-embed", "--quiet"])
+            self.assertTrue(out.exists())
+            self.assertFalse((root / "CLAUDE.md").exists())
+            self.assertEqual(
+                run_cli(["check", "--root", str(root), "--out", str(out),
+                         "--no-embed", "--quiet"]),
+                0,
+            )
+
+    def test_cli_no_embed_removes_existing_managed_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            out = Path(tmp) / "d.md"
+            claude = root / "CLAUDE.md"
+            claude.write_text("# User rules\n\nKeep this.\n")
+            run_cli(["build", "--root", str(root), "--out", str(out), "--quiet"])
+            self.assertIn("hologram:start", claude.read_text())
+            run_cli(["build", "--root", str(root), "--out", str(out),
+                     "--if-stale", "--no-embed", "--quiet"])
+            self.assertEqual(claude.read_text(), "# User rules\n\nKeep this.\n")
 
     def test_check_and_if_stale_require_exact_embedded_body(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
             out = root / "PROJECT_DIGEST.md"
-            args = ["--root", str(root), "--out", str(out), "--embed", "--quiet"]
+            args = ["--root", str(root), "--out", str(out), "--quiet"]
             run_cli(["build", *args])
             digest_mtime = out.stat().st_mtime_ns
             claude = root / "CLAUDE.md"

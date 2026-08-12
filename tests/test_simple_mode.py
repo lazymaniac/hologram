@@ -223,7 +223,7 @@ class LanguageFilterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "d.md"
             code = run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
-                            "--lang", "java", "--quiet"])
+                            "--lang", "java", "--no-embed", "--quiet"])
             self.assertEqual(code, 0)
             self.assertIn("PricingEngine", out.read_text())
 
