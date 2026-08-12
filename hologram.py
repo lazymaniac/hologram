@@ -2093,13 +2093,9 @@ def _state_hash(root: Path, langs: set[str] | None = None) -> str:
     return state.hexdigest()[:12]
 
 
-def _digest_state(out_path: Path) -> str | None:
-    """The `state` stamp recorded in an existing digest's header, if any."""
-    try:
-        head = out_path.read_text(errors="replace").split("\n", 1)[0]
-    except OSError:
-        return None
-    m = re.search(r"· state (\w{12})", head)
+def _digest_state(digest: str) -> str | None:
+    """The `state` stamp recorded in a digest's header line, if any."""
+    m = re.search(r"· state (\w{12})", digest.split("\n", 1)[0])
     return m.group(1) if m else None
 
 
@@ -2696,65 +2692,116 @@ def build_digest(root: Path, langs: set[str] | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Embed: put the digest INSIDE CLAUDE.md so every agent session starts with
-# the whole map in context — push, not pull; no retrieval decision to lose.
+# Embed: put the digest INSIDE the agent's context files so every session starts
+# with the whole map in context — push, not pull; no retrieval decision to lose.
 # ---------------------------------------------------------------------------
 
 _EMBED_START = "<!-- hologram:start — generated, do not edit; refreshed by git hooks -->"
 _EMBED_END = "<!-- hologram:end -->"
 
 
+_EMBED_NOTE = (
+    "This is a hologram map of this repository: a deterministic, always-current "
+    "index of its public callables and their signatures, type fields, "
+    "project-internal call chains, private identifiers, and test locations — "
+    "the shape of the code without its bodies. Read it before exploring: it says "
+    "what exists and where, so you can find the helper that already does the job, "
+    "extend the conventions in place, and open the right file first. It says "
+    "nothing about whether that code is correct. Line 2 is the notation legend."
+)
+
+
 def _embed_block(digest: str) -> str:
-    return f"{_EMBED_START}\n```\n{digest.rstrip()}\n```\n{_EMBED_END}"
+    return (f"{_EMBED_START}\n{_EMBED_NOTE}\n\n```\n{digest.rstrip()}\n```\n"
+            f"{_EMBED_END}")
 
 
-def _embedded_digest_matches(path: Path, digest: str) -> bool:
-    try:
-        existing = path.read_text()
-    except OSError:
-        return False
+def _block_span(existing: str) -> tuple[int, int] | None:
+    """Offsets of the managed block, or None. The end marker is located *after* the
+    start one, so prose that mentions a marker before the block can't misplace it."""
     start = existing.find(_EMBED_START)
+    if start < 0:
+        return None
     end = existing.find(_EMBED_END, start + len(_EMBED_START))
-    if start < 0 or end < 0:
-        return False
-    return existing[start:end + len(_EMBED_END)] == _embed_block(digest)
+    if end < 0:
+        return None
+    return start, end + len(_EMBED_END)
 
 
-def embed_digest(claude_path: Path, digest: str) -> str:
-    """Insert or refresh one exact, non-degraded digest block in CLAUDE.md."""
+def embedded_digest(path: Path) -> str:
+    """The digest text inside a context file's managed block, "" when there is none."""
+    try:
+        existing = path.read_text(errors="replace")
+    except OSError:
+        return ""
+    span = _block_span(existing)
+    if span is None:
+        return ""
+    body = existing[span[0] + len(_EMBED_START):span[1] - len(_EMBED_END)]
+    m = re.search(r"```\n(.*?)\n```", body, re.S)
+    return m.group(1) if m else ""
+
+
+def embed_digest(path: Path, digest: str) -> None:
+    """Insert or refresh one exact, non-degraded digest block in a context file,
+    preserving hand-written content around it."""
     block = _embed_block(digest)
-    existing = claude_path.read_text() if claude_path.exists() else ""
-    if _EMBED_START in existing and _EMBED_END in existing:
-        pre = existing.split(_EMBED_START, 1)[0]
-        post = existing.split(_EMBED_END, 1)[1]
-        updated = pre + block + post
+    existing = path.read_text() if path.exists() else _seed_content(path)
+    span = _block_span(existing)
+    if span is not None:
+        updated = existing[:span[0]] + block + existing[span[1]:]
     else:
         sep = "\n\n" if existing.strip() else ""
         updated = existing.rstrip("\n") + sep + block + "\n"
-    claude_path.write_text(updated)
-    return "full"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(updated)
 
 
-def remove_embedded_digest(claude_path: Path) -> bool:
-    """Remove the managed digest block while preserving surrounding user content."""
-    try:
-        existing = claude_path.read_text()
-    except OSError:
-        return False
-    start = existing.find(_EMBED_START)
-    end = existing.find(_EMBED_END, start + len(_EMBED_START))
-    if start < 0 or end < 0:
-        return False
-    before = existing[:start].rstrip("\n")
-    after = existing[end + len(_EMBED_END):].lstrip("\n")
-    if before and after:
-        updated = before + "\n\n" + after
-    elif before:
-        updated = before + "\n"
-    else:
-        updated = after
-    claude_path.write_text(updated)
-    return True
+# Context files of the popular coding agents. Files are only touched when they
+# already exist; rule *directories* get one managed file of ours. When a repo has
+# none of them, CLAUDE.md is created.
+CONTEXT_FILES = (
+    "CLAUDE.md",                        # Claude Code
+    "AGENTS.md",                        # Codex, opencode, Amp, Jules, Zed
+    "GEMINI.md",                        # Gemini CLI
+    "QWEN.md",                          # Qwen Code
+    ".clinerules",                       # Cline (single-file form)
+    ".cursorrules",                      # Cursor (legacy single-file form)
+    ".windsurfrules",                    # Windsurf (legacy single-file form)
+    ".roorules",                         # Roo Code (single-file form)
+    ".rules",                            # Zed / generic
+    ".github/copilot-instructions.md",   # GitHub Copilot
+)
+
+CONTEXT_DIRS = (
+    (".clinerules", "hologram.md"),
+    (".cursor/rules", "hologram.mdc"),
+    (".roo/rules", "hologram.md"),
+    (".windsurf/rules", "hologram.md"),
+    (".github/instructions", "hologram.instructions.md"),
+)
+
+_SEEDS = {
+    ".mdc": "---\ndescription: hologram project map\nalwaysApply: true\n---\n",
+    ".instructions.md": "---\napplyTo: '**'\n---\n",
+}
+
+
+def _seed_content(path: Path) -> str:
+    """Front matter a newly created rule file needs to be picked up by its agent."""
+    for suffix, seed in _SEEDS.items():
+        if path.name.endswith(suffix):
+            return seed
+    return ""
+
+
+def context_targets(root: Path) -> list[Path]:
+    """Every agent context file in `root` to attach the map to. Falls back to
+    CLAUDE.md when the repo has no agent context file yet."""
+    targets = [root / rel for rel in CONTEXT_FILES if (root / rel).is_file()]
+    targets += [root / rel / name for rel, name in CONTEXT_DIRS
+                if (root / rel).is_dir()]
+    return targets or [root / "CLAUDE.md"]
 
 
 # ---------------------------------------------------------------------------
@@ -2839,13 +2886,11 @@ def _managed_hook_line(line: str, script: Path, repo: Path) -> bool:
     return re.fullmatch(pattern, line) is not None
 
 
-def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None,
-                   embed: bool = True) -> None:
+def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None) -> None:
     script = Path(__file__).resolve()
     lang_args = "".join(f' --lang {l}' for l in sorted(langs)) if langs else ""
-    embed_arg = " --embed" if embed else " --no-embed"
     hook_line = (f'"{_hook_python()}" "{script}" build --root "{repo.resolve()}"'
-                 f'{lang_args}{embed_arg} --quiet || true {_HOOK_MARKER}\n')
+                 f'{lang_args} --quiet || true {_HOOK_MARKER}\n')
     hooks_dir = repo / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     for name in HOOK_NAMES:
@@ -2866,13 +2911,8 @@ def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None,
         else:
             hook.write_text("#!/bin/sh\n" + hook_line)
         hook.chmod(0o755)
-    gitignore = repo / ".gitignore"
-    existing = gitignore.read_text() if gitignore.exists() else ""
-    if "PROJECT_DIGEST.md" not in existing:
-        gitignore.write_text(existing.rstrip("\n") + ("\n" if existing else "")
-                             + "PROJECT_DIGEST.md\n")
     if not quiet:
-        print(f"hooks installed: {', '.join(HOOK_NAMES)}; PROJECT_DIGEST.md gitignored")
+        print(f"hooks installed: {', '.join(HOOK_NAMES)}")
 
 
 def run_cli(argv: list[str] | None = None) -> int:
@@ -2881,27 +2921,21 @@ def run_cli(argv: list[str] | None = None) -> int:
     common.add_argument("--lang", action="append", default=None,
                         help="restrict to language(s), repeatable or comma-separated "
                              "(java, python, typescript, javascript)")
-    common.add_argument(
-        "--embed", action=argparse.BooleanOptionalAction, default=True,
-        help="inject the digest into CLAUDE.md (default; use --no-embed to keep "
-             "it only in the digest file)",
-    )
-    common.add_argument("--out", type=Path, default=None)
     common.add_argument("--quiet", action="store_true")
 
     parser = argparse.ArgumentParser(prog="hologram", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_build = sub.add_parser("build", parents=[common],
-                             help="(re)generate the digest file")
+                             help="(re)generate the map embedded in CLAUDE.md")
     p_build.add_argument("--if-stale", action="store_true",
-                         help="skip the rebuild when the digest's state stamp "
+                         help="skip the rebuild when the embedded map's state stamp "
                               "matches the current sources")
     sub.add_parser("init", parents=[common],
-                   help="install git hooks and gitignore entry, then build")
+                   help="install git hooks, then build")
     sub.add_parser("check", parents=[common],
-                   help="exit 0 if the digest is fresh, 1 if stale or missing")
+                   help="exit 0 if the embedded map is fresh, 1 if stale or missing")
     p_diff = sub.add_parser("diff", parents=[common],
-                            help="diff the digest against another git revision")
+                            help="diff the map against another git revision")
     p_diff.add_argument("rev", nargs="?", default="HEAD~1")
     args = parser.parse_args(argv)
 
@@ -2909,33 +2943,19 @@ def run_cli(argv: list[str] | None = None) -> int:
     langs = None
     if getattr(args, "lang", None):
         langs = {l.strip() for arg in args.lang for l in arg.split(",") if l.strip()}
-    out_path = args.out or root / "PROJECT_DIGEST.md"
-    source_fresh = _digest_state(out_path) == _state_hash(root, langs)
-    try:
-        current_digest = out_path.read_text() if source_fresh else ""
-    except OSError:
-        current_digest = ""
-        source_fresh = False
-    embed_fresh = (not args.embed
-                   or _embedded_digest_matches(root / "CLAUDE.md", current_digest))
+    targets = context_targets(root)
+    state = _state_hash(root, langs)
+    stale = [t for t in targets if _digest_state(embedded_digest(t)) != state]
 
     if args.cmd == "check":
-        fresh = source_fresh and embed_fresh
         if not args.quiet:
-            print(f"{out_path}: {'fresh' if fresh else 'stale or missing'}")
-        return 0 if fresh else 1
-    if args.cmd == "build" and args.if_stale and source_fresh:
-        if args.embed and not embed_fresh:
-            embed_digest(root / "CLAUDE.md", current_digest)
-            if not args.quiet:
-                print("CLAUDE.md: digest block refreshed")
-            return 0
-        if not args.embed and remove_embedded_digest(root / "CLAUDE.md"):
-            if not args.quiet:
-                print("CLAUDE.md: digest block removed")
-            return 0
+            for t in targets:
+                mark = "stale or missing" if t in stale else "fresh"
+                print(f"{t.relative_to(root)}: {mark}")
+        return 1 if stale else 0
+    if args.cmd == "build" and args.if_stale and not stale:
         if not args.quiet:
-            print(f"{out_path}: fresh, skipping rebuild")
+            print("fresh, skipping rebuild")
         return 0
 
     files = scan_files(root)
@@ -2968,17 +2988,13 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "init":
-        _install_hooks(root, args.quiet, langs, embed=args.embed)
+        _install_hooks(root, args.quiet, langs)
     digest = build_digest(root, langs=langs)
-    out_path.write_text(digest)
+    for t in targets:
+        embed_digest(t, digest)
     if not args.quiet:
-        print(f"{out_path} written: {estimate_tokens(digest)} tokens")
-    if args.embed:
-        tier = embed_digest(root / "CLAUDE.md", digest)
-        if not args.quiet:
-            print(f"CLAUDE.md: digest embedded ({tier})")
-    elif remove_embedded_digest(root / "CLAUDE.md") and not args.quiet:
-        print("CLAUDE.md: digest block removed")
+        names = ", ".join(str(t.relative_to(root)) for t in targets)
+        print(f"hologram: {estimate_tokens(digest)} tokens embedded in {names}")
     return 0
 
 

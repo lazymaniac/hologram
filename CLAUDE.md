@@ -23,17 +23,17 @@ Run from the repo root; tests insert the root on `sys.path` themselves. Plain `p
 works too — tests for languages whose tree-sitter grammar isn't installed skip via
 `unittest.skipUnless(hologram.has_parser(...))`.
 
-Self-hosting (this repo's own map lives in `PROJECT_DIGEST.md`, gitignored, and in the
-generated block at the bottom of this file):
+Self-hosting (this repo's own map is the generated block at the bottom of this file —
+embedding is the only delivery mode; there is no digest file):
 
 ```bash
-python3 hologram.py build --root .            # rebuild file + embedded block
+python3 hologram.py build --root .            # rebuild the embedded block
 python3 hologram.py check --root .            # exit 0 fresh / 1 stale
 python3 hologram.py diff HEAD~1 --root .      # API drift vs a revision
 ```
 
-Git hooks (post-commit/merge/checkout) rebuild both copies automatically, so a digest
-change shows up as part of the next commit's diff.
+Git hooks (post-commit/merge/checkout) rebuild the block automatically, so a map change
+shows up as part of the next commit's diff.
 
 Benchmark (costs real money — headless `claude -p` sessions):
 
@@ -65,12 +65,13 @@ One pipeline, three stages, all in `hologram.py`:
 Consequences worth knowing before editing:
 
 - **The state hash includes the tool's own bytes** (`_generator_fingerprint`). Any edit
-  to `hologram.py` makes every previously generated digest stale everywhere — that's
+  to `hologram.py` makes every previously generated map stale everywhere — that's
   deliberate (extraction/rendering changes must invalidate old maps), but it means the
-  post-commit hook rewrites `PROJECT_DIGEST.md` and this file's block on every commit
-  that touches the tool. `_state_hash` recomputes the same value without parsing, which
-  is what makes `check` and `--if-stale` cheap; it must stay byte-identical in method to
-  the hash `_gather` accumulates.
+  post-commit hook rewrites this file's block on every commit that touches the tool.
+  `_state_hash` recomputes the same value without parsing, which is what makes `check`
+  and `--if-stale` cheap; it must stay byte-identical in method to the hash `_gather`
+  accumulates. Freshness is read back out of the embedded block by `embedded_digest` +
+  `_digest_state` — CLAUDE.md is the only place a generated map is stored.
 - **Determinism is the contract.** No LLM, no timestamps, no set iteration leaking into
   output. Same sources → same digest, so a digest diff always means the code changed.
 - **Output size is a representation decision, never truncation.** When adding a fact to
@@ -80,18 +81,28 @@ Consequences worth knowing before editing:
 - **Language depth varies on purpose** — see the README table. Don't promise a language
   more than its extractor delivers.
 
-### Embedding into CLAUDE.md
+### Embedding into agent context files
 
-`embed_digest` splices the map between the managed `hologram:start` / `hologram:end`
-HTML-comment markers, preserving everything outside them. Hand-written guidance in this
-file (i.e. everything above the block) survives rebuilds; the block itself is generated —
-edit `hologram.py` or the sources, not the block. `--no-embed` removes it via
-`remove_embedded_digest`.
+`context_targets` detects which agents a repo already uses: every entry of
+`CONTEXT_FILES` that exists as a file (CLAUDE.md, AGENTS.md, GEMINI.md, QWEN.md,
+`.clinerules`, `.cursorrules`, `.windsurfrules`, `.roorules`, `.rules`,
+`.github/copilot-instructions.md`) plus one managed file inside each rule *directory* in
+`CONTEXT_DIRS` (`.cursor/rules/hologram.mdc`, `.clinerules/hologram.md`, …). Existing
+files are never created speculatively — only attached to; a repo with none of them gets
+CLAUDE.md. New rule files that need front matter to be loaded get it from `_SEEDS` via
+`_seed_content`.
 
-Never write either marker literally in prose above the block: `embed_digest` splits on
-the *first* end marker in the file, so a literal mention before the real block makes the
-next rebuild duplicate content. Refer to them as `hologram:start` / `hologram:end`, as
-above.
+`embed_digest` splices the map into each target between the managed `hologram:start` /
+`hologram:end` HTML-comment markers, preserving everything outside them, and
+`embedded_digest` reads it back. `_block_span` locates the end marker *after* the start
+one, so prose that mentions a marker before the block no longer duplicates the block on
+rebuild. The block opens with `_EMBED_NOTE`, a short in-band explanation of what the map
+is for the agent reading it.
+
+`check` is stale if *any* target lags, so all of a repo's agents move together.
+Hand-written guidance in a context file (everything outside the block) survives
+rebuilds; the block itself is generated — edit `hologram.py` or the sources, not the
+block.
 
 ### Parser bootstrap
 
@@ -118,25 +129,28 @@ from above it.
 
 ## Benchmark conditions
 
-`bench.py` builds a detached worktree per run: **A** = digest on disk plus query
-instructions (pull model), **B** = control, **C** = digest embedded in CLAUDE.md (push
-model). Results published in-repo cover public corpora only; the private-corpus numbers
-stay out of tracked files — keep it that way when editing `README.md` or
-`benchmark/*.md`.
+`bench.py` builds a detached worktree per run: **A** = map embedded in the workspace's
+`CLAUDE.md`, **B** = control. The pull model (map as a file the agent chooses to grep)
+was measured false and is gone from the tool, the harness, and the docs — don't
+reintroduce it. Private-corpus numbers stay out of tracked files; keep it that way when
+editing `README.md` or `benchmark/*.md`.
 
 <!-- hologram:start — generated, do not edit; refreshed by git hooks -->
+This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
+
 ```
-# hologram · 5,097 LOC · state a050fef13513
+# hologram · 5,139 LOC · state bcd45736afb1
 · C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb
 build_digest(root,langs):str ✓ > _gather,_dep_lines,render_simple,_zero_usage_names
+context_targets(root):list[Path] ✓
 detect_language(path):str | None
-embed_digest(claude_path,digest):str ✓ > _embed_block
+embed_digest(path,digest) ✓ > _embed_block,_block_span,_seed_content
+embedded_digest(path):str ✓ > _block_span
 estimate_tokens(text):int
 extract_file(path,root,text):list[Symbol] ✓ !SystemExit > detect_language,has_parser,_grammar_pkgs
 has_parser(lang):bool ✓
-remove_embedded_digest(claude_path):bool
 render_simple(root,symbols,files,state,deps,zero_usage):str ⋮192 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_private_lines,_is_test_path,_strip_exc
-run_cli(argv):int ⋮105 ✓ !SystemExit > scan_files,_missing_parser_langs,build_digest,_digest_state,_state_hash,_embedded_digest_matches,_bootstrap_or_die,_install_hooks,embed_digest,remove_embedded_digest,estimate_tokens
+run_cli(argv):int ⋮81 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_bootstrap_or_die,_install_hooks,embed_digest,_digest_state,embedded_digest,estimate_tokens
 scan_files(root):list[Path] > detect_language
 split_params(raw):list[str] > _split_top_commas,tight_type
 strip_comments_and_strings(text):str
@@ -155,7 +169,7 @@ Symbol(C{name,kind,file,line,signature,params,param_names,returns,visibility,con
                _py_{param_facts,calls,raises,bindings,fn_symbol},_generator_fingerprint,_new_state_hash,_gather,
                _state_hash,_digest_state,_zero_usage_names,_is_test_path,_tree_lines,_strip_exc,_dep_lines,_total_loc,
                _symbol_identity,_target_descriptions,_resolved_project_calls,_factored_name_tokens,_factored_names,
-               _private_lines,_braced_lines,_test_index_lines,_embed_block,_embedded_digest_matches,_venv_python,
+               _private_lines,_braced_lines,_test_index_lines,_embed_block,_block_span,_seed_content,_venv_python,
                _missing_parser_langs,_venv_has_grammars,_bootstrap_or_die,_hook_python,_managed_hook_line,_install_hooks
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -164,7 +178,7 @@ benchmark
  load_tasks(path):Config ✓ !SystemExit > Config,Task
  main(argv):int ⋮44 ✓ > load_tasks,report,run_one
  make_workspace(corpus,ws,condition):Path ✓
- parse_transcript(text):dict ⋮42 ✓
+ parse_transcript(text):dict ✓
  report(rows):str ✓
  run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner):dict ✓ > make_workspace,_digest_of,judge_reuse,parse_transcript,drop_workspace
  Config(C{corpus,tasks,model,max_turns})
@@ -175,7 +189,7 @@ benchmark
  test_cli.py{CliBuildTest,InitHooksTest,InitLangTest,BootstrapTest,HookPythonSelectionTest}
  test_extract_langs.py{PythonExtractTest,TypeScriptExtractTest,ArrowFunctionTest}
  test_freshness_and_markers.py{StateAndCheckTest,TestedMarkerTest,SizeMarkerTest,TestIndexTest,DepsMapTest,EmbedTest,
-                               DiffCommandTest}
+                               ContextTargetsTest,DiffCommandTest}
  test_more_langs.py{GoExtractTest,RustExtractTest,CSharpExtractTest,CExtractTest,CppExtractTest,LuaExtractTest,
                     HtmlExtractTest,HelmExtractTest,KotlinExtractTest,TsGapsTest,TsxExtractTest,SfcExtractTest}
  test_simple_mode.py{CallExtractionTest,SimpleDigestTest,SameShapeGroupingTest,RenderUnitTest,EnumValuesTest,

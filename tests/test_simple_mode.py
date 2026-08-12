@@ -219,13 +219,16 @@ class LanguageFilterTest(unittest.TestCase):
             self.assertIn("PricingEngine", java_only)
 
     def test_cli_lang_flag(self):
-        from hologram import run_cli
+        import shutil
+
+        from hologram import embedded_digest, run_cli
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "d.md"
-            code = run_cli(["build", "--root", str(JAVAMINI), "--out", str(out),
-                            "--lang", "java", "--no-embed", "--quiet"])
+            proj = Path(tmp) / "proj"
+            shutil.copytree(JAVAMINI, proj)
+            code = run_cli(["build", "--root", str(proj),
+                            "--lang", "java", "--quiet"])
             self.assertEqual(code, 0)
-            self.assertIn("PricingEngine", out.read_text())
+            self.assertIn("PricingEngine", embedded_digest(proj / "CLAUDE.md"))
 
 
 @needs_java
