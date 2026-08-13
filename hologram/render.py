@@ -388,6 +388,46 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path) -> l
     return ["? tests", *(" " + line for line in _tree_lines(payloads))]
 
 
+def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
+    """Legend restricted to notation the rendered body actually uses.
+
+    Needles must never miss real usage (a clause too many wastes a few tokens,
+    a clause too few leaves notation unexplained); brace detection strips the
+    always-explained type-header form `(K{` first so only factored/expansion
+    braces trigger the `p{a,b}` clause."""
+    first = "C/R/I{fields}"
+    if "(E{" in text or "(E)" in text:
+        first += " E{values}"
+    if "(T:" in text:
+        first += " T:target"
+    items = [first, "f(args):Ret > project calls"]
+    if has_priv:
+        items.append("-=private")
+    if has_tests:
+        items.append("?=tests")
+    if "×0" in text:
+        items.append("×0=no static use")
+    if "✓" in text:
+        items.append("✓=tested")
+    if "⋮" in text:
+        items.append("⋮N=lines")
+    if re.search(r" !\S", text):
+        items.append("!E=throws")
+    if "{" in re.sub(r"\([CRIE]\{", "", text):
+        items.append("p{a,b}=pa,pb")
+    if " : " in text:
+        items.append(":T=supers")
+    if "sealed:" in text:
+        items.append("sealed:A|B")
+    if "»" in text:
+        items.append("»=re-exports")
+    if "⟨X⟩" in text:
+        items.append("⟨X⟩=own name")
+    if "· deps " in text:
+        items.append("deps a→b=a uses b")
+    return "· " + " · ".join(items)
+
+
 def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   state: str = "",
                   deps: list[str] | None = None,
@@ -570,16 +610,14 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     loc = _total_loc(files)
     state_part = f" · state {state}" if state else ""
-    header = (f"# hologram · {loc:,} LOC{state_part}\n"
-              "· C/R/I{fields} E{values} T:target · f(args):Ret > project calls · "
-              "-=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · "
-              "!E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · »=re-exports · "
-              "⟨X⟩=own name · deps a→b=a uses b\n")
     dep_part = ("\n".join(deps) + "\n") if deps else ""
     body = _tree_lines(payload_by_dir)
     tests = _test_index_lines(files, symbols, root)
     if tests:
         body.extend(tests)
+    has_priv = bool(priv_top_by_file or priv_methods_by_owner)
+    legend = _legend_line(dep_part + "\n".join(body), has_priv, bool(tests))
+    header = f"# hologram · {loc:,} LOC{state_part}\n{legend}\n"
     return header + dep_part + "\n".join(body) + "\n"
 
 
