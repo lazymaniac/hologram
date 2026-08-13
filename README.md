@@ -108,8 +108,14 @@ any LLM:
 - **Private members** always appear as names. Repeated prefixes and suffixes
   factor losslessly: `_extract_{java,python,typescript}` and
   `{TaskLoader,Workspace}Test` each mean those exact identifiers.
-- **Tests** list every detected test file and its classes. Test functions are omitted
-  because their names cost tokens without improving placement guidance.
+- **Tests** list every detected test file and its classes, each class carrying a
+  coverage edge to the first non-obvious production symbol it exercises
+  (`{WorkspaceTest>make_workspace+1,…}`; `+N` = more targets). Test functions are
+  omitted because their names cost tokens without improving placement guidance.
+- **Test helpers** — reusable drivers/builders/shared bases — render with a `*`
+  sigil and, when referenced by other test files, their full public signatures:
+  the reuse targets agents otherwise re-invent. Helpers living under directories
+  named `fixtures`, `testdata`, or `resources` are never scanned (denylist).
 - **`· deps a→b`** = module `a` uses types from module `b`: the import architecture
   without reading imports.
 - **`state`** hashes the exact sources plus the generator, so source or extraction/
