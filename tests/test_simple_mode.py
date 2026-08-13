@@ -64,6 +64,11 @@ class SimpleDigestTest(unittest.TestCase):
         self.assertIn("> ", ev)
         self.assertIn("UnknownItemException", ev)
 
+    def test_public_ctor_rendered_without_return_type(self):
+        self.assertIn("PricingEngine(basePrices)", self.out)
+        self.assertNotIn("PricingEngine(basePrices):PricingEngine", self.out)
+        self.assertIn("UnknownItemException(item)", self.out)
+
     def test_no_docs_no_sections(self):
         self.assertNotIn("Rule-tree", self.out)
         self.assertNotIn("## MODULES", self.out)
