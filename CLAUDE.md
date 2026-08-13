@@ -163,8 +163,8 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,356 LOC · state 032addf55891
-· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · @=route/annotation · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
+# hologram · 7,362 LOC · state 3b5c23f25abe
+· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
  drop_workspace(corpus,ws) ✓
@@ -175,8 +175,8 @@ benchmark
  parse_transcript(text):dict ✓
  report(rows):str ✓
  run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner):dict ✓ > make_workspace,_digest_of,judge_reuse,parse_transcript,drop_workspace
- Config(C{corpus,tasks,model,max_turns}) @dataclass
- Task(C{id,kind,prompt,accept_cmd,expect_reuse}) @dataclass
+ Config(R{corpus,tasks,model,max_turns})
+ Task(R{id,kind,prompt,accept_cmd,expect_reuse})
  - bench.py: _sig_lines,_fn_name,_chain,_digest_of,_dry_runner
 hologram
  build_digest(root,langs):str ✓ > _gather,_dep_lines,render_simple,_zero_usage_names
@@ -193,7 +193,7 @@ hologram
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
  tight_type(t):str
- Symbol(C{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,decorators,size}) @dataclass
+ Symbol(R{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,decorators,size})
  = cli.py: HOOK_NAMES
  = embed.py: CONTEXT_FILES,CONTEXT_DIRS
  = render.py: KIND_LETTER
