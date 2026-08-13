@@ -61,7 +61,7 @@ class InitHooksTest(unittest.TestCase):
     def test_init_replaces_hook_line_from_older_versions(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp))
-            script = Path(hologram.__file__).resolve()
+            script = Path(hologram.__file__).resolve().parent.parent / "hologram.py"
             hook = repo / ".git" / "hooks" / "post-commit"
             old = (f'python3 "{script}" build --root "{repo.resolve()}" '
                    f'--no-embed --quiet || true')
@@ -75,7 +75,7 @@ class InitHooksTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp))
             hook = repo / ".git" / "hooks" / "post-commit"
-            script = Path(hologram.__file__).resolve()
+            script = Path(hologram.__file__).resolve().parent.parent / "hologram.py"
             custom = (f'[ -f /tmp/run-hologram ] && python3 "{script}" build '
                       f'--root "{repo.resolve()}" --quiet || true')
             hook.write_text("#!/bin/sh\n" + custom + "\n")
