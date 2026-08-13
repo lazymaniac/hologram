@@ -564,6 +564,8 @@ class ZeroUsageMarkerTest(unittest.TestCase):
                     if line.strip().startswith("used()"))
         self.assertNotIn("×0", used)
 
+    @unittest.skipUnless(hologram.has_parser("html"),
+                         "tree-sitter-html not installed")
     def test_html_selectors_are_not_code_usage_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

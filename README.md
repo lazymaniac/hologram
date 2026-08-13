@@ -6,7 +6,8 @@ files/classes that cover the project — directly into the context files your co
 agents already read. The map is in context from turn zero, before any exploration
 begins.
 
-It's a single Python file. It installs its own parsers the first time it needs them,
+It ships as a pip package and as a single runnable file (`hologram.pyz`). It
+installs its own parsers the first time it needs them,
 and git hooks keep the map up to date after every commit. Generation is fully
 deterministic — no LLM involved — so the same code always produces the same map,
 and a map diff always means the code changed.
@@ -127,11 +128,12 @@ pip install "hologram-map[grammars]"
 hologram init --root /path/to/repo
 ```
 
-Or skip installation entirely — it's a single file. Clone it anywhere and point it
-at a repo:
+Or skip installation entirely — download the single-file `hologram.pyz` from the
+[latest release](https://github.com/lazymaniac/hologram/releases) (or clone the
+repo and use `hologram.py`) and point it at a repo:
 
 ```bash
-python3 ~/workspace/hologram/hologram.py init --root /path/to/repo
+python3 hologram.pyz init --root /path/to/repo
 ```
 
 That installs git hooks and embeds the map in every agent context file the repo
@@ -147,12 +149,17 @@ standard library is enough.
 Everything it can do:
 
 ```bash
-hologram.py build --root .                    # refresh the embedded map
-hologram.py build --root . --lang java        # limit to one or more languages
-hologram.py build --root . --if-stale         # rebuild only if the code changed
-hologram.py check --root .                    # is every context file current? exit 0 yes / 1 no
-hologram.py diff HEAD~3 --root .              # how did the API change since then?
+hologram build --root .                    # refresh the embedded map
+hologram build --root . --lang java        # limit to one or more languages
+hologram build --root . --if-stale         # rebuild only if the code changed
+hologram check --root .                    # is every context file current? exit 0 yes / 1 no
+hologram diff HEAD~3 --root .              # how did the API change since then?
+hologram print --root .                    # write the map to stdout, touch nothing
+hologram uninstall --root .                # remove the hooks and embedded blocks
 ```
+
+(Substitute `python3 hologram.pyz` or `python3 hologram.py` for `hologram` when
+running the single-file form.)
 
 A successful build prints the map's token cost and where it went:
 
@@ -168,14 +175,19 @@ one — the same map, everywhere, so Claude Code and Codex and Cursor can't drif
 | Agent | File it reads |
 |---|---|
 | Claude Code | `CLAUDE.md` |
-| Codex, opencode, Amp, Jules, Zed | `AGENTS.md` |
+| Codex, opencode, Jules, Zed | `AGENTS.md` |
+| Amp | `AGENT.md` |
 | Gemini CLI | `GEMINI.md` |
 | Qwen Code | `QWEN.md` |
+| Aider | `CONVENTIONS.md` |
 | GitHub Copilot | `.github/copilot-instructions.md`, `.github/instructions/` |
 | Cline | `.clinerules` (file or directory) |
 | Cursor | `.cursorrules`, `.cursor/rules/` |
 | Windsurf | `.windsurfrules`, `.windsurf/rules/` |
 | Roo Code | `.roorules`, `.roo/rules/` |
+| JetBrains Junie | `.junie/guidelines.md` |
+| Continue | `.continue/rules/` |
+| Kiro | `.kiro/steering/` |
 
 Existing files are attached to, never invented: hologram only writes a context file
 that already exists. Rule *directories* get one managed file of hologram's own
