@@ -12,8 +12,12 @@ from .java import _extract_java
 from .kotlin import _extract_kotlin
 from .misc import (_extract_bash, _extract_css, _extract_helm, _extract_html,
                    _extract_lua)
+from .php import _extract_php
 from .python import _extract_python
+from .ruby import _extract_ruby
 from .rust import _extract_rust
+from .scala import _extract_scala
+from .swift import _extract_swift
 from .ts import _extract_sfc, _extract_ts, _extract_tsx
 
 
@@ -36,6 +40,10 @@ EXTRACTORS = {
     "helm": _extract_helm,
     "bash": _extract_bash,
     "css": _extract_css,
+    "ruby": _extract_ruby,
+    "php": _extract_php,
+    "swift": _extract_swift,
+    "scala": _extract_scala,
 }
 
 

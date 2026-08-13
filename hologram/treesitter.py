@@ -40,6 +40,10 @@ _GRAMMAR_MODULES = {
     "html": ("tree_sitter_html", "tree-sitter-html"),
     "bash": ("tree_sitter_bash", "tree-sitter-bash"),
     "css": ("tree_sitter_css", "tree-sitter-css"),
+    "ruby": ("tree_sitter_ruby", "tree-sitter-ruby"),
+    "php": ("tree_sitter_php", "tree-sitter-php"),
+    "swift": ("tree_sitter_swift", "tree-sitter-swift"),
+    "scala": ("tree_sitter_scala", "tree-sitter-scala"),
 }
 
 _PARSERS = {
@@ -56,6 +60,10 @@ _PARSERS = {
     "html": _load_parser("tree_sitter_html"),
     "bash": _load_parser("tree_sitter_bash"),
     "css": _load_parser("tree_sitter_css"),
+    "ruby": _load_parser("tree_sitter_ruby"),
+    "php": _load_parser("tree_sitter_php", "language_php"),
+    "swift": _load_parser("tree_sitter_swift"),
+    "scala": _load_parser("tree_sitter_scala"),
 }
 _PARSERS["javascript"] = _PARSERS["typescript"]
 _PARSERS["vue"] = _PARSERS["svelte"] = _PARSERS["typescript"]

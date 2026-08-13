@@ -102,8 +102,12 @@ any LLM:
 |---|---|
 | Java, C#, TypeScript/JS, TSX/JSX | types with named fields, name-based signatures, relations, resolved calls, privates, aliases, object APIs, re-exports |
 | Python | same, via the standard library's `ast` — zero dependencies |
-| Kotlin | classes, data classes, enums, interfaces, named fields, supers, calls |
-| Go, Rust, C, C++ | types, traits, structs, signatures, calls, receiver bindings |
+| Kotlin | classes, data classes, enums, interfaces, named fields, supers, calls, local-variable receiver bindings, `@Throws`/throw extraction |
+| Go, Rust, C, C++ | types, traits (with supertraits), structs, signatures, calls, receiver bindings; C++ additionally throw extraction |
+| PHP | classes, interfaces, traits, enums, typed params, fields, supers, `$x = new T()` bindings, throw extraction |
+| Swift | classes, structs, enums, protocols, inheritance, typed params, fields, `let x = T()` bindings |
+| Scala | classes, case classes, traits, objects, extends, typed params, fields, `val x = new T()` bindings |
+| Ruby | classes, modules, methods with param names and call chains; `private`/`protected` sections respected (untyped — no receiver resolution) |
 | Vue, Svelte | the component plus everything in its `<script>` block |
 | Lua | functions and methods with call chains (params by name — it's untyped) |
 | Bash/zsh (`.sh`, `.bash`, `.zsh`) | functions (both definition forms) with command-call chains; `_name` = private |

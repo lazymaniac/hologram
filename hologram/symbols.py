@@ -37,6 +37,11 @@ LANG_EXTENSIONS = {
     ".sh": "bash",
     ".bash": "bash",
     ".zsh": "bash",
+    ".rb": "ruby",
+    ".php": "php",
+    ".swift": "swift",
+    ".scala": "scala",
+    ".sc": "scala",
 }
 
 DENYLIST_DIRS = {
