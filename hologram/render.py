@@ -290,14 +290,14 @@ _FIRST_STRING_RE = re.compile(r"""['"]([^'"]+)['"]""")
 _METHODS_VERB_RE = re.compile(r"""['"](GET|POST|PUT|DELETE|PATCH)['"]""")
 
 
-def _decorator_notes(decorators: list[str]) -> list[str]:
+def _decorator_notes(decorators: list[str], lang: str = "") -> list[str]:
     """Displayable atoms from a symbol's decorators, allowlist-filtered.
 
     Routes collapse to VERB/path (JAX-RS pairs a verb annotation with @Path;
     Flask recovers the verb from methods=[...]; Spring's method= is read from
-    RequestMethod.X). Angular @Component yields its selector. Markers render
-    bare. Everything else is dropped — conservative: on parse doubt emit the
-    marker form, never a wrong path."""
+    RequestMethod.X; Symfony's from methods: [...]). Angular @Component yields
+    its selector. Markers render bare. Everything else is dropped —
+    conservative: on parse doubt emit the marker form, never a wrong path."""
     notes: list[str] = []
     verb_pending: str | None = None
     path_pending: str | None = None
@@ -314,17 +314,19 @@ def _decorator_notes(decorators: list[str]) -> list[str]:
                 notes.append(m.group(1))
             continue
         # lowercase route names (route/get/post/…) only match as dotted tails
-        # (app.route, router.get); bare lowercase identifiers stay unmatched
-        if tail in ROUTE_DECORATORS and (dotted or not tail.islower()):
+        # (app.route, router.get); bare lowercase identifiers stay unmatched —
+        # except in Rust, where they are actix's attribute macros #[get("/x")]
+        if tail in ROUTE_DECORATORS and (dotted or not tail.islower()
+                                         or lang == "rust"):
             verb = ROUTE_DECORATORS[tail]
-            if tail == "route" or tail == "RequestMapping":
+            if tail in ("route", "RequestMapping", "Route"):
                 verbs = _METHODS_VERB_RE.findall(args)
                 m = re.search(r"RequestMethod\.(\w+)", args)
                 if m:
                     verbs.append(m.group(1))
                 if verbs:
                     verb = "|".join(dict.fromkeys(verbs))
-                elif tail == "route":
+                elif tail == "route" and lang != "rust":
                     verb = "GET"  # Flask default when methods= is absent
             path = first.group(1) if first is not None else None
             if path is not None and not path.startswith("/"):
@@ -595,7 +597,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     def _sig_line(sym: Symbol, own: str, grouped: bool,
                   display_name: str | None = None) -> str:
         sig = _display_signature(sym, display_name)
-        for note in _decorator_notes(sym.decorators):
+        for note in _decorator_notes(sym.decorators, sym.lang):
             sig = f"{sig} @{note}"
         if sym.size >= 40:
             sig = f"{sig} ~{sym.size}"
@@ -642,7 +644,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                      if t.kind == "interface" else ())
             group_key = (t.lang, t.kind, t.visibility, tuple(components),
                          shown_supers, tuple(t.permits), impls, unused,
-                         bool(t.fields), tuple(_decorator_notes(t.decorators)))
+                         bool(t.fields),
+                         tuple(_decorator_notes(t.decorators, t.lang)))
             groups.setdefault(group_key, []).append(t)
         for (_, kind, vis, components, supers, permits, impls, unused,
              named_fields, deco_notes), members in groups.items():

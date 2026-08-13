@@ -475,6 +475,40 @@ class RouteRenderTest(unittest.TestCase):
                    signature="plain()", visibility="pub", lang="python"))
         self.assertNotIn("@=route/annotation", out)
 
+    def test_symfony_route_with_methods_array(self):
+        out = self._render(
+            Symbol(name="list", kind="method", file="C.php", line=2,
+                   container="OrderController", signature="list()",
+                   visibility="pub", lang="php",
+                   decorators=["Route('/orders', methods: ['GET'])"]),
+            Symbol(name="OrderController", kind="class", file="C.php", line=1,
+                   visibility="pub", lang="php"))
+        self.assertIn("list() @GET/orders", out)
+
+    def test_aspnet_class_prefix_and_verb_attribute(self):
+        out = self._render(
+            Symbol(name="OrdersController", kind="class", file="O.cs", line=1,
+                   visibility="pub", lang="csharp",
+                   decorators=["ApiController", 'Route("api/orders")']),
+            Symbol(name="Find", kind="method", file="O.cs", line=2,
+                   container="OrdersController", signature="Find(long):Order",
+                   returns="Order", visibility="pub", lang="csharp",
+                   decorators=['HttpGet("{id}")']))
+        self.assertIn("OrdersController(C) @ApiController @/api/orders", out)
+        self.assertIn("Find():Order @GET/{id}", out)
+
+    def test_rust_bare_verb_allowed_python_still_suppressed(self):
+        out = self._render(
+            Symbol(name="list_orders", kind="fn", file="m.rs", line=1,
+                   signature="list_orders()", visibility="pub", lang="rust",
+                   decorators=['get("/orders")']))
+        self.assertIn("list_orders() @GET/orders", out)
+        out = self._render(
+            Symbol(name="not_a_route", kind="fn", file="a.py", line=1,
+                   signature="not_a_route()", visibility="pub", lang="python",
+                   decorators=['get("/orders")']))
+        self.assertNotIn("@GET", out)
+
 
 class ThrowsTest(unittest.TestCase):
     @needs_java
@@ -734,6 +768,17 @@ class ZeroUsageMarkerTest(unittest.TestCase):
         self.assertIn("plain_dead()×0", out.replace(" ×0", "×0"))
         self.assertNotIn("orders()×0", out.replace(" ×0", "×0"))
         self.assertIn("@GET/orders", out)
+
+    def test_rust_route_handler_not_marked_dead(self):
+        from hologram.gather import _framework_invoked
+        rust = Symbol(name="list_orders", kind="fn", file="m.rs", line=1,
+                      visibility="pub", lang="rust",
+                      decorators=['get("/orders")'])
+        py = Symbol(name="get_helper", kind="fn", file="a.py", line=1,
+                    visibility="pub", lang="python",
+                    decorators=['get("/orders")'])
+        self.assertTrue(_framework_invoked(rust))
+        self.assertFalse(_framework_invoked(py))
 
     def test_marks_only_unreferenced_functions_and_classes(self):
         calls = "\n".join(f"    missing{i}()" for i in range(12))

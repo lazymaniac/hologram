@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,705 LOC · state b05fd27a1442
+# hologram · 7,759 LOC · state 88d5fe6b225f
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -190,7 +190,7 @@ hologram
  estimate_tokens(text):int
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
- render_simple(root,symbols,files,state,deps,zero_usage,langs):str ~230 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
+ render_simple(root,symbols,files,state,deps,zero_usage,langs):str ~231 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
  run_cli(argv):int ~124 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_digest_langs,embedded_digest,_digest_state,estimate_tokens
  scan_files(root):list[Path] > detect_language
  split_params(raw):list[str] > _split_top_commas,tight_type
