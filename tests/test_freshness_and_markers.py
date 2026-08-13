@@ -278,6 +278,33 @@ class ContextTargetsTest(unittest.TestCase):
         })
         self.assertNotIn("CLAUDE.md", targets)   # absent file isn't created
 
+    def test_detects_new_agent_files_and_rule_dirs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            (root / "AGENT.md").write_text("# amp\n")
+            (root / "CONVENTIONS.md").write_text("# aider\n")
+            (root / ".junie").mkdir()
+            (root / ".continue" / "rules").mkdir(parents=True)
+            (root / ".kiro" / "steering").mkdir(parents=True)
+            targets = {str(t.relative_to(root))
+                       for t in hologram.context_targets(root)}
+        self.assertEqual(targets, {
+            "AGENT.md", "CONVENTIONS.md", ".junie/guidelines.md",
+            ".continue/rules/hologram.md", ".kiro/steering/hologram.md",
+        })
+
+    def test_continue_rule_seeded_with_front_matter_clinerules_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            (root / ".continue" / "rules").mkdir(parents=True)
+            (root / ".clinerules").mkdir()
+            run_cli(["build", "--root", str(root), "--quiet"])
+            cont = (root / ".continue" / "rules" / "hologram.md").read_text()
+            cline = (root / ".clinerules" / "hologram.md").read_text()
+        self.assertTrue(cont.startswith("---\n"))
+        self.assertIn("alwaysApply: true", cont)
+        self.assertFalse(cline.startswith("---\n"))  # same basename, no seed
+
     def test_build_embeds_into_every_present_context_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
