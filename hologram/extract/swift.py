@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from ..symbols import Symbol, _base_type, tight_type
-from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field,
-                          _ast_text, _body_lines)
+from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_text,
+                          _body_lines)
 
 # ---------------------------------------------------------------------------
 # Swift extraction (class/struct/enum share class_declaration; protocols,

@@ -4,9 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-`hologram.py` — one self-contained Python file (no runtime deps beyond optional
-tree-sitter grammars) that compresses a codebase into a compact markdown map for LLM
-context. `benchmark/bench.py` — a headless-agent harness that measures whether the map
+`hologram/` — a Python package (no runtime deps beyond optional tree-sitter
+grammars) that compresses a codebase into a compact markdown map for LLM context.
+`hologram.py` at the repo root is a two-line shim kept so checkout-installed git
+hooks and `python3 hologram.py …` keep working; never put logic in it. Releases
+also ship the package as a single-file zipapp (`hologram.pyz`).
+`benchmark/bench.py` — a headless-agent harness that measures whether the map
 actually helps. `tests/` — unittest suites over fixture corpora.
 
 Read `README.md` for the output notation (the digest legend) before changing rendering.
@@ -44,16 +47,25 @@ Benchmark (costs real money — headless `claude -p` sessions):
 
 ## Architecture
 
-One pipeline, three stages, all in `hologram.py`:
+One pipeline, three stages. Module map: `symbols.py` (registry + `Symbol` +
+text utils) ← `treesitter.py` (grammar/parser registry, AST helpers) ←
+`extract/<lang>.py` ← `gather.py` (scan + state hash) ← `render.py`;
+`embed.py` and `bootstrap.py` are side branches; `cli.py` imports everything.
+`__init__.py` re-exports the public API plus the private names tests and CI
+reach — `_PARSERS` must stay re-exported *by reference* (modules import the
+dict and mutate it, never rebind) because tests monkeypatch entries through
+`hologram._PARSERS`.
 
-1. **scan** — `scan_files` returns git-tracked source files when the root is a repo
-   (so `.gitignore` prunes vendored trees), else a denylist-pruned walk. Order is
-   deterministic; everything downstream depends on that.
+1. **scan** — `scan_files` (in `gather.py`) returns git-tracked source files when
+   the root is a repo (so `.gitignore` prunes vendored trees), else a
+   denylist-pruned walk. Order is deterministic; everything downstream depends on
+   that.
 2. **extract** — `extract_file` dispatches on extension via `LANG_EXTENSIONS` →
-   `EXTRACTORS` → `_extract_<lang>`. Each extractor is independent and emits the same
-   language-neutral `Symbol` dataclass (name/kind/signature/params/calls/supers/
-   raises/`bindings`/`size`). Python uses stdlib `ast`; everything else uses
-   tree-sitter; Helm uses a narrow template scanner.
+   `EXTRACTORS` → `extract/<lang>.py:_extract_<lang>`. Each extractor is
+   independent and emits the same language-neutral `Symbol` dataclass
+   (name/kind/signature/params/calls/supers/raises/`bindings`/`size`). Python uses
+   stdlib `ast`; everything else uses tree-sitter; Helm uses a narrow template
+   scanner.
 3. **render** — `render_simple` owns *all* layout: the directory trie, same-shape type
    grouping, receiver resolution through `bindings`, transitive reduction of call
    chains, prefix-factored private names, the test index, markers (`✓ ×0 ⋮N !E`).
@@ -64,8 +76,10 @@ One pipeline, three stages, all in `hologram.py`:
 
 Consequences worth knowing before editing:
 
-- **The state hash includes the tool's own bytes** (`_generator_fingerprint`). Any edit
-  to `hologram.py` makes every previously generated map stale everywhere — that's
+- **The state hash includes the tool's own bytes** (`_generator_fingerprint` hashes
+  every `.py` in the package via `importlib.resources`, so checkout/wheel/zipapp
+  agree). Any edit to the package makes every previously generated map stale
+  everywhere — that's
   deliberate (extraction/rendering changes must invalidate old maps), but it means the
   post-commit hook rewrites this file's block on every commit that touches the tool.
   `_state_hash` recomputes the same value without parsing, which is what makes `check`
@@ -84,13 +98,16 @@ Consequences worth knowing before editing:
 ### Embedding into agent context files
 
 `context_targets` detects which agents a repo already uses: every entry of
-`CONTEXT_FILES` that exists as a file (CLAUDE.md, AGENTS.md, GEMINI.md, QWEN.md,
-`.clinerules`, `.cursorrules`, `.windsurfrules`, `.roorules`, `.rules`,
-`.github/copilot-instructions.md`) plus one managed file inside each rule *directory* in
-`CONTEXT_DIRS` (`.cursor/rules/hologram.mdc`, `.clinerules/hologram.md`, …). Existing
-files are never created speculatively — only attached to; a repo with none of them gets
-CLAUDE.md. New rule files that need front matter to be loaded get it from `_SEEDS` via
-`_seed_content`.
+`CONTEXT_FILES` that exists as a file (CLAUDE.md, AGENTS.md, AGENT.md, GEMINI.md,
+QWEN.md, CONVENTIONS.md, `.clinerules`, `.cursorrules`, `.windsurfrules`,
+`.roorules`, `.rules`, `.github/copilot-instructions.md`) plus one managed file
+inside each rule *directory* in `CONTEXT_DIRS` (`.cursor/rules/hologram.mdc`,
+`.clinerules/hologram.md`, `.junie/guidelines.md`, `.continue/rules/hologram.md`,
+`.kiro/steering/hologram.md`, …). Existing files are never created speculatively —
+only attached to; a repo with none of them gets CLAUDE.md. New rule files that need
+front matter to be loaded get it from `_seed_content` — path-tail seeds
+(`_DIR_SEEDS`) first, suffix seeds (`_SEEDS`) as fallback, so Continue's
+`hologram.md` is seeded while `.clinerules/hologram.md` stays bare.
 
 `embed_digest` splices the map into each target between the managed `hologram:start` /
 `hologram:end` HTML-comment markers, preserving everything outside them, and
@@ -107,17 +124,24 @@ block.
 ### Parser bootstrap
 
 When a scanned language needs a tree-sitter grammar that isn't importable,
-`_bootstrap_or_die` re-execs into `.venv` next to `hologram.py` if that venv has the
-grammars, else offers (interactive only) to create it and pip-install them, guarded by
-`HOLOGRAM_BOOTSTRAPPED` against exec loops. `_install_hooks` writes hook lines using
-that venv's python when it exists, and `_managed_hook_line` recognizes hook lines from
-older versions so reinstalls replace rather than duplicate.
+`_bootstrap_or_die` re-execs into the `.venv` next to `_tool_anchor()` (the package's
+parent, or the `.pyz`'s directory when zipped) if that venv has the grammars, else
+offers (interactive only) to create it and pip-install them, guarded by
+`HOLOGRAM_BOOTSTRAPPED` against exec loops. `_install_hooks` writes hook lines via
+`_tool_invocation()` — checkout shim path, `-m hologram` for pip installs, or the
+`.pyz` path — and `_managed_hook_line` recognizes all forms including v0.1 lines so
+reinstalls replace rather than duplicate; `build`/`init` warn when a managed line
+points at a script that no longer exists.
 
 ## Adding a language
 
-Register in four places, then test: `LANG_EXTENSIONS` (extension → lang),
-`_GRAMMAR_MODULES` + `_PARSERS` (tree-sitter module/pip package), `EXTRACTORS`
-(lang → `_extract_<lang>`). The extractor's only job is producing `Symbol`s —
+Register in four places, then test: `LANG_EXTENSIONS` in `symbols.py`
+(extension → lang), `_GRAMMAR_MODULES` + `_PARSERS` in `treesitter.py`
+(tree-sitter module/pip package), `EXTRACTORS` in `extract/__init__.py`
+(lang → `_extract_<lang>`, one new module under `extract/`), plus the
+`[grammars]` extra in `pyproject.toml`. Dump the fixture's tree before writing
+the extractor — don't trust node names from memory. The extractor's only job is
+producing `Symbol`s —
 visibility, `bindings` (var/param/field → declared type, which is what turns
 `engine.evaluate` into `PricingEngine.evaluate`), and `size`. Add a fixture under
 `tests/fixtures/polyglot/` and a test in `tests/test_more_langs.py` guarded by a
@@ -139,7 +163,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
 
 ```
-# hologram · 6,087 LOC · state 400e03044424
+# hologram · 6,697 LOC · state 24f1e187ae6a
 · C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · »=re-exports · ⟨X⟩=own name · deps a→b=a uses b
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -189,8 +213,12 @@ hologram
              _java_{param_names,call_entry,calls,param_bindings,class_bindings,local_bindings,method_symbol},_extract_java
   - kotlin.py: _kt_{vis,params,param_names,return,call_entry,raises,local_bindings,fn_symbol},_extract_kotlin
   - misc.py: _lua_call_entry,_extract_{lua,bash,css,html,helm},_bash_call_entry,_css_symbols
+  - php.py: _php_{vis,var_name,params,return,call_entry,local_bindings,raises,fn_symbol},_extract_php
   - python.py: _py_{param_facts,calls,raises,bindings,fn_symbol},_extract_python
+  - ruby.py: _rb_{call_entry,params,method_symbol,walk},_extract_ruby
   - rust.py: _rs_{vis,params,param_names,call_entry,local_bindings,fn_symbol},_extract_rust
+  - scala.py: _sc_{vis,params,return,call_entry,local_bindings,fn_symbol},_extract_scala
+  - swift.py: _sw_{vis,params,return,call_entry,local_bindings,fn_symbol},_extract_swift
   - ts.py: _ts_{exported,params,param_names,return,call_entry,calls,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,top_level_arrows,aliases_and_reexports},
            _extract_{ts,tsx,sfc}
 ? tests
