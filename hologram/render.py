@@ -1,6 +1,7 @@
 """All digest layout: render_simple owns every formatting decision."""
 from __future__ import annotations
 
+import os
 import re
 from collections import Counter
 from pathlib import Path
@@ -189,12 +190,40 @@ def _resolved_project_calls(symbols: list[Symbol]
     def one(items: list[Symbol] | None) -> Symbol | None:
         return items[0] if items is not None and len(items) == 1 else None
 
+    # Angular selector → component class; a selector claimed twice is
+    # ambiguous and resolves to nothing (same contract as one()).
+    selector_class: dict[str, Symbol | None] = {}
+    for s in production:
+        if s.kind in TYPE_KINDS and s.lang == "typescript":
+            for d in s.decorators:
+                if d.startswith("Component(") and "selector" in d:
+                    m = re.search(r"""selector\s*:\s*['"]([^'"]+)['"]""", d)
+                    if m:
+                        sel = m.group(1)
+                        selector_class[sel] = (None if sel in selector_class
+                                               else s)
+    # templateUrl: elements of the referenced html file count as the
+    # component's own template usage
+    html_tags_by_file: dict[str, list[str]] = {}
+    for s in production:
+        if s.lang == "html" and "-" in s.name:
+            html_tags_by_file.setdefault(s.file, []).append(s.name)
+    extra_calls: dict[int, list[str]] = {}
+    for s in production:
+        url = (s.bindings.get("__templateUrl__")
+               if s.kind in TYPE_KINDS else None)
+        if url:
+            ref = os.path.normpath(str(Path(s.file).parent / url))
+            extra_calls[id(s)] = html_tags_by_file.get(ref, [])
+
     same_container_languages = {
         "java", "typescript", "javascript", "tsx", "vue", "svelte",
         "csharp", "kotlin", "cpp", "rust",
     }
 
     def resolve(caller: Symbol, raw: str) -> Symbol | None:
+        if "-" in raw and caller.lang in ("typescript", "html"):
+            return selector_class.get(raw)
         receiver, dot, name = raw.rpartition(".")
         if not dot:
             name = raw
@@ -225,7 +254,7 @@ def _resolved_project_calls(symbols: list[Symbol]
     for caller in symbols:
         found: list[Symbol] = []
         seen: set[tuple[str, str, str, str, int]] = set()
-        for raw in caller.calls:
+        for raw in caller.calls + extra_calls.get(id(caller), []):
             target = resolve(caller, raw)
             if target is None:
                 continue
@@ -645,10 +674,11 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             group_key = (t.lang, t.kind, t.visibility, tuple(components),
                          shown_supers, tuple(t.permits), impls, unused,
                          bool(t.fields),
-                         tuple(_decorator_notes(t.decorators, t.lang)))
+                         tuple(_decorator_notes(t.decorators, t.lang)),
+                         tuple(resolved_calls.get(id(t), ())))
             groups.setdefault(group_key, []).append(t)
         for (_, kind, vis, components, supers, permits, impls, unused,
-             named_fields, deco_notes), members in groups.items():
+             named_fields, deco_notes, type_calls), members in groups.items():
             members.sort(key=lambda s: s.name)
             names = ",".join(_top_display(m) for m in members)
             letter = KIND_LETTER.get(kind, "?")
@@ -665,8 +695,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                            f" ←{'|'.join(impls)}")
             hot_suffix = " ×0" if unused else ""
             deco_suffix = "".join(f" @{n}" for n in deco_notes)
+            call_suffix = f" > {','.join(type_calls)}" if type_calls else ""
             payload.append(f"{names}({inner}){deco_suffix}{rel_suffix}"
-                           f"{permit_suffix}{impl_suffix}{hot_suffix}")
+                           f"{permit_suffix}{impl_suffix}{hot_suffix}{call_suffix}")
             # Methods shared by every member print once (Self-normalized); each
             # member's remaining methods print on its own `Name: …` line.
             member_methods = {id(m): methods_by_owner.get((d, m.name, m.lang), [])

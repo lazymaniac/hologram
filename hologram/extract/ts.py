@@ -190,6 +190,10 @@ _CONST_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
 
 _TS_HOCS = {"memo", "React.memo", "forwardRef", "React.forwardRef", "observer"}
 
+_NG_TEMPLATE_RE = re.compile(r"template\s*:\s*(['\"`])(.*?)\1", re.S)
+_NG_TEMPLATE_URL_RE = re.compile(r"""templateUrl\s*:\s*['"]([^'"]+)['"]""")
+_NG_CUSTOM_EL_RE = re.compile(r"<([a-z][\w]*-[\w-]+)")
+
 _TS_FC_RE = re.compile(r"(?:React\.)?(?:FC|FunctionComponent)<(.+)>$")
 
 
@@ -369,6 +373,18 @@ def _extract_ts(text: str, rel: str, lang: str = "typescript") -> list[Symbol]:
             visibility="pub" if _ts_exported(tn) else "priv", lang="typescript",
             decorators=_ts_decorators(tn),
         ))
+        # Angular: custom elements in the component's template become call
+        # edges (the render joins them to selectors), mirroring JSX-as-calls
+        comp_dec = next((d for d in symbols[-1].decorators
+                         if d.startswith("Component(")), None)
+        if comp_dec is not None:
+            tm = _NG_TEMPLATE_RE.search(comp_dec)
+            if tm:
+                symbols[-1].calls.extend(
+                    dict.fromkeys(_NG_CUSTOM_EL_RE.findall(tm.group(2))))
+            um = _NG_TEMPLATE_URL_RE.search(comp_dec)
+            if um:
+                symbols[-1].bindings["__templateUrl__"] = um.group(1)
         if kind == "interface" and body is not None:
             for c in body.children:
                 if c.type == "method_signature":
