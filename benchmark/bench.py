@@ -34,7 +34,10 @@ class Task:
     accept_cmd: str           # shell; {ws} is replaced with the workspace path
     expect_reuse: list[str] = field(default_factory=list)
     expect_answer: list[str] = field(default_factory=list)  # regexes vs result text
+    expect_in_new_code: list[str] = field(default_factory=list)  # names required in added lines
+    scope_in_tests: bool = False  # restrict scope match to added lines in test files
     max_turns: int | None = None  # per-task override: the session-length dial
+    effort: str | None = None  # per-task reasoning-effort override
 
 
 @dataclass
@@ -44,6 +47,7 @@ class Config:
     model: str = "sonnet"
     max_turns: int = 40
     lang: list[str] = field(default_factory=list)  # map filter for condition A
+    effort: str | None = None  # reasoning effort requested from the CLI
 
 
 def load_tasks(path: Path) -> Config:
@@ -53,14 +57,18 @@ def load_tasks(path: Path) -> Config:
                       accept_cmd=t["accept_cmd"],
                       expect_reuse=t.get("expect_reuse", []),
                       expect_answer=t.get("expect_answer", []),
+                      expect_in_new_code=t.get("expect_in_new_code", []),
+                      scope_in_tests=bool(t.get("scope_in_tests", False)),
                       max_turns=(int(t["max_turns"])
-                                 if "max_turns" in t else None))
+                                 if "max_turns" in t else None),
+                      effort=t.get("effort"))
                  for t in data["tasks"]]
         return Config(corpus=Path(data["corpus"]).expanduser().resolve(),
                       tasks=tasks,
                       model=data.get("model", "sonnet"),
                       max_turns=int(data.get("max_turns", 40)),
-                      lang=list(data.get("lang", [])))
+                      lang=list(data.get("lang", [])),
+                      effort=data.get("effort"))
     except KeyError as e:
         raise SystemExit(f"task file {path}: missing field {e}")
 
@@ -164,6 +172,54 @@ def judge_reuse(before: str, after: str, expect_reuse: list[str]) -> dict:
             "duplicated": sorted(set(duplicated))}
 
 
+def _added_lines(ws: Path, test_only: bool = False) -> list[str]:
+    """Lines the agent added, from `git diff` against the setup commit —
+    robust where transcripts are not (Edit payloads are fragments and
+    Bash-written files never appear as tool payloads at all)."""
+    out = subprocess.run(["git", "-C", str(ws), "diff", "--unified=0"],
+                         capture_output=True, text=True).stdout
+    added: list[str] = []
+    current: str | None = None
+    for line in out.splitlines():
+        if line.startswith("+++ b/"):
+            current = line[len("+++ b/"):]
+        elif line.startswith("+") and not line.startswith("+++"):
+            if test_only and (current is None
+                              or not hologram._is_test_path(current)):
+                continue
+            added.append(line[1:])
+    return added
+
+
+def judge_scope(ws: Path, expect: list[str], test_only: bool = False) -> bool | None:
+    """Did every expected collaborator name appear in newly written code?"""
+    if not expect:
+        return None
+    joined = "\n".join(_added_lines(ws, test_only))
+    return all(re.search(rf"\b{re.escape(name)}\b", joined) for name in expect)
+
+
+_EFFORT_TOKENS = {"low": "4096", "medium": "16384", "high": "63999"}
+_CLI_HAS_EFFORT: bool | None = None
+
+
+def _effort_invocation(effort: str | None) -> tuple[list[str], dict[str, str]]:
+    """Extra argv/env to request a reasoning-effort level; no-op when the
+    installed CLI supports neither mechanism."""
+    global _CLI_HAS_EFFORT
+    if not effort:
+        return [], {}
+    if _CLI_HAS_EFFORT is None:
+        help_text = subprocess.run(["claude", "--help"],
+                                   capture_output=True, text=True).stdout
+        _CLI_HAS_EFFORT = "--effort" in help_text
+    if _CLI_HAS_EFFORT:
+        return ["--effort", effort], {}
+    if effort in _EFFORT_TOKENS:
+        return [], {"MAX_THINKING_TOKENS": _EFFORT_TOKENS[effort]}
+    return [], {}
+
+
 _BASE_CLAUDE_MD = """# Working notes
 
 Complete the requested task directly. Keep changes minimal and idiomatic.
@@ -214,14 +270,18 @@ def drop_workspace(corpus: Path, ws: Path) -> None:
     shutil.rmtree(ws, ignore_errors=True)
 
 
-def claude_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
+def claude_runner(prompt: str, ws: Path, model: str, max_turns: int,
+                  effort: str | None = None) -> str:
     """The only function that spends tokens. Runs claude headless in the
     workspace; returns the raw stream-json transcript."""
+    import os
+    extra_args, extra_env = _effort_invocation(effort)
     r = subprocess.run(
         ["claude", "-p", prompt, "--output-format", "stream-json", "--verbose",
          "--max-turns", str(max_turns), "--model", model,
-         "--dangerously-skip-permissions"],
-        cwd=ws, capture_output=True, text=True, timeout=1800)
+         "--dangerously-skip-permissions", *extra_args],
+        cwd=ws, capture_output=True, text=True, timeout=1800,
+        env={**os.environ, **extra_env} if extra_env else None)
     return r.stdout
 
 
@@ -231,13 +291,14 @@ def _digest_of(ws: Path) -> str:
 
 def run_one(corpus: Path, task: Task, condition: str, rep: int,
             results_dir: Path, model: str, max_turns: int,
-            runner=claude_runner, lang: list[str] | None = None) -> dict:
+            runner=claude_runner, lang: list[str] | None = None,
+            effort: str | None = None) -> dict:
     results_dir.mkdir(parents=True, exist_ok=True)
     ws = results_dir / f"ws-{task.id}-{condition}-{rep}"
     make_workspace(corpus, ws, condition, lang=lang)
     try:
         before = _digest_of(ws)
-        transcript = runner(task.prompt, ws, model, max_turns)
+        transcript = runner(task.prompt, ws, model, max_turns, effort)
         (results_dir / f"{task.id}-{condition}-{rep}.jsonl").write_text(transcript)
         after = _digest_of(ws)
         verdict = judge_reuse(before, after, task.expect_reuse)
@@ -247,14 +308,16 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
         accepted = subprocess.run(
             task.accept_cmd.format(ws=ws), shell=True,
             capture_output=True).returncode == 0
+        scope_ok = judge_scope(ws, task.expect_in_new_code, task.scope_in_tests)
         metrics = parse_transcript(transcript)
         result_text = metrics.pop("result_text")
         answer_ok = (all(re.search(rx, result_text, re.I | re.S)
                          for rx in task.expect_answer)
                      if task.expect_answer else None)
         return {"task": task.id, "kind": task.kind, "condition": condition,
-                "rep": rep, "model": model,
+                "rep": rep, "model": model, "effort": effort,
                 "accepted": accepted, "answer_ok": answer_ok,
+                "scope_ok": scope_ok,
                 "reused": verdict["reused"], "duplicated": verdict["duplicated"],
                 "new_lines": len(verdict["new_lines"]), **metrics}
     finally:
@@ -267,10 +330,10 @@ def report(rows: list[dict], anon: bool = False) -> str:
     shared without leaking code details."""
     if not rows:
         return "no runs recorded\n"
-    lines = ["| condition | kind | runs | accepted | answer ok | "
+    lines = ["| condition | kind | runs | accepted | answer ok | scope ok | "
              "duplication | reads | files | searches | turns | "
              "tokens in | tokens out |",
-             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     groups = sorted({(r["condition"], r["kind"]) for r in rows})
     for cond, kind in groups:
         rs = [r for r in rows if r["condition"] == cond and r["kind"] == kind]
@@ -280,12 +343,15 @@ def report(rows: list[dict], anon: bool = False) -> str:
         answered = [r for r in rs if r.get("answer_ok") is not None]
         ans = (f"{100 * sum(1 for r in answered if r['answer_ok']) / len(answered):.0f}%"
                if answered else "—")
+        scoped = [r for r in rs if r.get("scope_ok") is not None]
+        scp = (f"{100 * sum(1 for r in scoped if r['scope_ok']) / len(scoped):.0f}%"
+               if scoped else "—")
 
         def mean(key, rows=rs):
             return statistics.fmean(r.get(key, 0) for r in rows)
 
         lines.append(
-            f"| {cond} | {kind} | {len(rs)} | {acc:.0f}% | {ans} | "
+            f"| {cond} | {kind} | {len(rs)} | {acc:.0f}% | {ans} | {scp} | "
             f"{dup_rate:.0f}% | {mean('reads'):.1f} | {mean('files_read'):.1f} | "
             f"{mean('searches'):.1f} | {mean('turns'):.1f} | "
             f"{mean('tokens_in'):,.0f} | {mean('tokens_out'):,.0f} |")
@@ -304,7 +370,9 @@ def report(rows: list[dict], anon: bool = False) -> str:
         for r in sorted(rows,
                         key=lambda r: (r["task"], r["condition"], r["rep"])):
             verdict = ("dup" if r["duplicated"] else
+                       "scope-miss" if r.get("scope_ok") is False else
                        "reused" if r["reused"] else
+                       "scoped" if r.get("scope_ok") else
                        "ok" if r.get("answer_ok") else
                        "miss" if r.get("answer_ok") is False else "—")
             lines.append(f"- {r['task']} [{r['condition']}#{r['rep']}] "
@@ -312,7 +380,8 @@ def report(rows: list[dict], anon: bool = False) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _dry_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
+def _dry_runner(prompt: str, ws: Path, model: str, max_turns: int,
+                effort: str | None = None) -> str:
     """Zero-cost runner for harness testing: touches nothing, returns a
     minimal valid transcript."""
     return json.dumps({"type": "result", "num_turns": 0,
@@ -334,6 +403,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="exercise the harness without calling claude")
     p_run.add_argument("--model", default=None,
                        help="override the task file's model")
+    p_run.add_argument("--effort", default=None,
+                       choices=("low", "medium", "high"),
+                       help="override the task file's reasoning effort")
     p_rep = sub.add_parser("report")
     p_rep.add_argument("--results", type=Path,
                        default=Path(__file__).parent / "results")
@@ -354,6 +426,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_tasks(args.taskfile)
     if args.model:
         cfg.model = args.model
+    if args.effort:
+        cfg.effort = args.effort
     runner = _dry_runner if args.dry_run else claude_runner
     runs_path = args.results / "runs.jsonl"
     args.results.mkdir(parents=True, exist_ok=True)
@@ -367,7 +441,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[{done}/{total}] {task.id} {cond} rep{rep}", flush=True)
                 row = run_one(cfg.corpus, task, cond, rep, args.results,
                               cfg.model, task.max_turns or cfg.max_turns,
-                              runner=runner, lang=cfg.lang or None)
+                              runner=runner, lang=cfg.lang or None,
+                              effort=task.effort or cfg.effort)
                 with runs_path.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
     return 0

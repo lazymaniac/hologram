@@ -165,21 +165,22 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 8,608 LOC · state f9f1932ecb68
+# hologram · 8,731 LOC · state dde8353382e2
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
- claude_runner(prompt,ws,model,max_turns):str
+ claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
  drop_workspace(corpus,ws) ✓
  judge_reuse(before,after,expect_reuse):dict ✓ > _sig_lines,_fn_name,_chain
+ judge_scope(ws,expect,test_only):bool | None ✓ > _added_lines
  load_tasks(path):Config ✓ !SystemExit > Config,Task
- bench.py:main(argv):int ~52 ✓ > load_tasks,report,run_one
+ bench.py:main(argv):int ~58 ✓ > load_tasks,report,run_one
  make_workspace(corpus,ws,condition,lang):Path ✓ > _block_span
  parse_transcript(text):dict ~45 ✓
- report(rows,anon):str ~49 ✓
- run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang):dict ✓ > make_workspace,_digest_of,judge_reuse,parse_transcript,drop_workspace
- Config(R{corpus,tasks,model,max_turns,lang})
- Task(R{id,kind,prompt,accept_cmd,expect_reuse,expect_answer,max_turns})
- - bench.py: _sig_lines,_fn_name,_chain,_digest_of,_dry_runner
+ report(rows,anon):str ~54 ✓
+ run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,effort):dict ✓ > make_workspace,_digest_of,judge_reuse,judge_scope,parse_transcript,drop_workspace
+ Config(R{corpus,tasks,model,max_turns,lang,effort})
+ Task(R{id,kind,prompt,accept_cmd,expect_reuse,expect_answer,expect_in_new_code,scope_in_tests,max_turns,effort})
+ - bench.py: _sig_lines,_fn_name,_chain,_added_lines,_effort_invocation,_digest_of,_dry_runner
 hologram
  build_digest(root,langs,targets):str ✓ > _gather,_dep_lines,render_simple,_zero_usage_names
  const_signature(name,value_text):str ✓
@@ -242,6 +243,7 @@ tools
   DuplicationDetectorTest > judge_reuse
   WorkspaceTest > make_workspace,drop_workspace
   RunOneTest > run_one
+  ScopeJudgeTest > judge_scope
   ReportTest > report
   CliTest > bench.main
  test_cli.py
