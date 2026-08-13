@@ -407,3 +407,139 @@ class SfcExtractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@_needs("ruby")
+class RubyExtractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(POLY / "sample.rb", POLY)
+
+    def test_module_class_and_methods(self):
+        eng = next(s for s in self.syms if s.name == "PricingEngine"
+                   and s.kind == "class")
+        self.assertEqual(eng.lang, "ruby")
+        quote = next(s for s in self.syms if s.name == "quote")
+        self.assertEqual(quote.container, "PricingEngine")
+        self.assertEqual(quote.param_names, ["id"])
+        self.assertIn("compute", quote.calls)
+
+    def test_private_section_toggles_visibility(self):
+        comp = next(s for s in self.syms if s.name == "compute")
+        self.assertEqual(comp.visibility, "priv")
+        quote = next(s for s in self.syms if s.name == "quote")
+        self.assertEqual(quote.visibility, "pub")
+
+    def test_initialize_becomes_ctor_top_level_def_becomes_fn(self):
+        ctor = next(s for s in self.syms if s.kind == "ctor")
+        self.assertEqual(ctor.name, "PricingEngine")
+        self.assertEqual(ctor.param_names, ["prices"])
+        fn = next(s for s in self.syms if s.name == "normalize")
+        self.assertEqual(fn.kind, "fn")
+
+
+@_needs("php")
+class PhpExtractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(POLY / "sample.php", POLY)
+
+    def test_interface_class_supers_fields(self):
+        pricer = next(s for s in self.syms if s.name == "Pricer")
+        self.assertEqual(pricer.kind, "interface")
+        eng = next(s for s in self.syms if s.name == "PricingEngine"
+                   and s.kind == "class")
+        self.assertEqual(eng.supers, ["Pricer"])
+        self.assertEqual(eng.fields, ["prices"])
+
+    def test_methods_visibility_typed_params_returns(self):
+        quote = next(s for s in self.syms if s.name == "quote"
+                     and s.container == "PricingEngine")
+        self.assertEqual(quote.visibility, "pub")
+        self.assertEqual(quote.params, ["OrderId"])
+        self.assertEqual(quote.param_names, ["id"])
+        self.assertEqual(quote.returns, "int")
+        comp = next(s for s in self.syms if s.name == "compute")
+        self.assertEqual(comp.visibility, "priv")
+
+    def test_ctor_bindings_calls_throws(self):
+        ctor = next(s for s in self.syms if s.kind == "ctor")
+        self.assertEqual(ctor.name, "PricingEngine")
+        quote = next(s for s in self.syms if s.name == "quote"
+                     and s.container == "PricingEngine")
+        self.assertIn("this.compute", quote.calls)
+        self.assertEqual(quote.bindings.get("this"), "PricingEngine")
+        self.assertEqual(quote.raises, ["UnknownOrderException"])
+        demo = next(s for s in self.syms if s.name == "demo")
+        self.assertEqual(demo.bindings.get("engine"), "PricingEngine")
+        self.assertIn("engine.quote", demo.calls)
+
+
+@_needs("swift")
+class SwiftExtractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(POLY / "sample.swift", POLY)
+
+    def test_protocol_class_struct_kinds_and_supers(self):
+        pricer = next(s for s in self.syms if s.name == "Pricer")
+        self.assertEqual(pricer.kind, "interface")
+        eng = next(s for s in self.syms if s.name == "PricingEngine"
+                   and s.kind == "class")
+        self.assertEqual(eng.supers, ["Pricer"])
+        self.assertEqual(eng.fields, ["prices"])
+        oid = next(s for s in self.syms if s.name == "OrderId")
+        self.assertEqual(oid.kind, "record")  # struct
+        self.assertEqual(oid.fields, ["value"])
+
+    def test_methods_visibility_init_ctor(self):
+        quote = next(s for s in self.syms if s.name == "quote"
+                     and s.container == "PricingEngine")
+        self.assertEqual(quote.visibility, "pub")
+        self.assertEqual(quote.param_names, ["id"])
+        self.assertEqual(quote.returns, "Int")
+        self.assertIn("compute", quote.calls)
+        comp = next(s for s in self.syms if s.name == "compute"
+                    and s.container == "PricingEngine")
+        self.assertEqual(comp.visibility, "priv")
+        ctor = next(s for s in self.syms if s.kind == "ctor")
+        self.assertEqual(ctor.name, "PricingEngine")
+
+    def test_local_binding_resolves_receiver(self):
+        demo = next(s for s in self.syms if s.name == "demo")
+        self.assertEqual(demo.bindings.get("engine"), "PricingEngine")
+        self.assertIn("engine.quote", demo.calls)
+
+
+@_needs("scala")
+class ScalaExtractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(POLY / "sample.scala", POLY)
+
+    def test_case_class_trait_object_kinds(self):
+        oid = next(s for s in self.syms if s.name == "OrderId")
+        self.assertEqual(oid.kind, "record")
+        self.assertEqual(oid.fields, ["value"])
+        pricer = next(s for s in self.syms if s.name == "Pricer")
+        self.assertEqual(pricer.kind, "interface")
+        reg = next(s for s in self.syms if s.name == "Registry")
+        self.assertEqual(reg.kind, "class")  # object singleton
+
+    def test_class_supers_methods_visibility(self):
+        eng = next(s for s in self.syms if s.name == "PricingEngine"
+                   and s.kind == "class")
+        self.assertEqual(eng.supers, ["Pricer"])
+        self.assertEqual(eng.params, ["Map[String,Long]"])
+        quote = next(s for s in self.syms if s.name == "quote"
+                     and s.container == "PricingEngine")
+        self.assertEqual(quote.returns, "Long")
+        self.assertIn("compute", quote.calls)
+        comp = next(s for s in self.syms if s.name == "compute"
+                    and s.container == "PricingEngine")
+        self.assertEqual(comp.visibility, "priv")
+
+    def test_local_binding_resolves_receiver(self):
+        demo = next(s for s in self.syms if s.name == "demo")
+        self.assertEqual(demo.bindings.get("engine"), "PricingEngine")
+        self.assertIn("engine.quote", demo.calls)

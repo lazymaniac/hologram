@@ -139,7 +139,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
 
 ```
-# hologram · 5,605 LOC · state c0f430e49014
+# hologram · 6,087 LOC · state 400e03044424
 · C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · »=re-exports · ⟨X⟩=own name · deps a→b=a uses b
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -164,14 +164,14 @@ hologram
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
  render_simple(root,symbols,files,state,deps,zero_usage):str ⋮193 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_private_lines,_is_test_path,_strip_exc
- run_cli(argv):int ⋮93 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_digest_state,embedded_digest,estimate_tokens
+ run_cli(argv):int ⋮112 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_digest_state,embedded_digest,estimate_tokens
  scan_files(root):list[Path] > detect_language
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
  tight_type(t):str
  Symbol(C{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,size})
  - bootstrap.py: _pyz_path,_tool_anchor,_venv_python,_missing_parser_langs,_venv_has_grammars,_bootstrap_or_die
- - cli.py: _hook_python,_tool_invocation,_managed_hook_line,_dead_hook_scripts,_install_hooks
+ - cli.py: _hook_python,_tool_invocation,_managed_hook_line,_dead_hook_scripts,_install_hooks,_uninstall,_warn_if_large
  - embed.py: _embed_block,_block_span,_seed_content
  - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_state,_zero_usage_names
  - render.py: _is_test_path,_tree_lines,_strip_exc,_dep_lines,_total_loc,_symbol_identity,_target_descriptions,
@@ -181,12 +181,13 @@ hologram
  - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
  extract
   extract_file(path,root,text):list[Symbol] ✓ !SystemExit > detect_language,has_parser,_grammar_pkgs
-  - c_cpp.py: _c_{fn_declarator,params,param_names,field_names,call_entry,static,enum_symbol},_extract_c,_extract_cpp
-  - csharp.py: _cs_{vis,params,param_names,call_entry,local_bindings},_extract_cs
+  - c_cpp.py: _c_{fn_declarator,params,param_names,field_names,call_entry,static,enum_symbol},_extract_c,_cpp_raises,
+              _extract_cpp
+  - csharp.py: _cs_{vis,params,param_names,call_entry,local_bindings,raises},_extract_cs
   - go.py: _go_{vis,type_text,params,param_names,result,call_entry,local_bindings},_extract_go
   - java.py: _ast_{modifiers,param_types,vis},
              _java_{param_names,call_entry,calls,param_bindings,class_bindings,local_bindings,method_symbol},_extract_java
-  - kotlin.py: _kt_{vis,params,param_names,return,call_entry,fn_symbol},_extract_kotlin
+  - kotlin.py: _kt_{vis,params,param_names,return,call_entry,raises,local_bindings,fn_symbol},_extract_kotlin
   - misc.py: _lua_call_entry,_extract_{lua,bash,css,html,helm},_bash_call_entry,_css_symbols
   - python.py: _py_{param_facts,calls,raises,bindings,fn_symbol},_extract_python
   - rust.py: _rs_{vis,params,param_names,call_entry,local_bindings,fn_symbol},_extract_rust
@@ -194,13 +195,15 @@ hologram
            _extract_{ts,tsx,sfc}
 ? tests
  test_bench.py{TaskLoaderTest,TranscriptMetricsTest,DuplicationDetectorTest,WorkspaceTest,RunOneTest,ReportTest,CliTest}
- test_cli.py{CliBuildTest,InitHooksTest,InitLangTest,BootstrapTest,HookPythonSelectionTest}
+ test_cli.py{CliBuildTest,InitHooksTest,InitLangTest,BootstrapTest,PrintCommandTest,UninstallTest,SizeWarningTest,
+             HookPythonSelectionTest}
  test_extract_langs.py{PythonExtractTest,TypeScriptExtractTest,ArrowFunctionTest}
  test_freshness_and_markers.py{StateAndCheckTest,TestedMarkerTest,SizeMarkerTest,TestIndexTest,DepsMapTest,EmbedTest,
                                ContextTargetsTest,DiffCommandTest}
  test_more_langs.py{GoExtractTest,RustExtractTest,CSharpExtractTest,CExtractTest,CppExtractTest,BashExtractTest,
                     LuaExtractTest,CssExtractTest,HtmlNestedBlocksTest,HtmlExtractTest,HelmExtractTest,KotlinExtractTest,
-                    TsGapsTest,TsxExtractTest,SfcExtractTest}
+                    TsGapsTest,TsxExtractTest,SfcExtractTest,RubyExtractTest,PhpExtractTest,SwiftExtractTest,
+                    ScalaExtractTest}
  test_simple_mode.py{CallExtractionTest,SimpleDigestTest,SameShapeGroupingTest,RenderUnitTest,EnumValuesTest,
                      InterfaceMethodTest,QualifiedCallTest,FieldNamesTest,ReconstructablePathTest,LanguageFilterTest,
                      RelationsTest,LegendTest,ThrowsTest,TransitiveReductionTest,VoidOmissionTest,GroupExtrasTest,

@@ -39,7 +39,11 @@ grammars = [
     "tree-sitter-java",
     "tree-sitter-kotlin",
     "tree-sitter-lua",
+    "tree-sitter-php",
+    "tree-sitter-ruby",
     "tree-sitter-rust",
+    "tree-sitter-scala",
+    "tree-sitter-swift",
     "tree-sitter-typescript",
 ]
 
