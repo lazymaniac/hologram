@@ -33,6 +33,8 @@ class Task:
     prompt: str
     accept_cmd: str           # shell; {ws} is replaced with the workspace path
     expect_reuse: list[str] = field(default_factory=list)
+    expect_answer: list[str] = field(default_factory=list)  # regexes vs result text
+    max_turns: int | None = None  # per-task override: the session-length dial
 
 
 @dataclass
@@ -48,7 +50,10 @@ def load_tasks(path: Path) -> Config:
     try:
         tasks = [Task(id=t["id"], kind=t["kind"], prompt=t["prompt"],
                       accept_cmd=t["accept_cmd"],
-                      expect_reuse=t.get("expect_reuse", []))
+                      expect_reuse=t.get("expect_reuse", []),
+                      expect_answer=t.get("expect_answer", []),
+                      max_turns=(int(t["max_turns"])
+                                 if "max_turns" in t else None))
                  for t in data["tasks"]]
         return Config(corpus=Path(data["corpus"]).expanduser().resolve(),
                       tasks=tasks,
@@ -72,7 +77,9 @@ def parse_transcript(text: str) -> dict:
     creation + cache reads — the actual context consumption. Tolerant of
     non-JSON noise lines."""
     m = {"reads": 0, "searches": 0, "edits": 0,
-         "turns": 0, "tokens_in": 0, "tokens_out": 0}
+         "turns": 0, "tokens_in": 0, "tokens_out": 0,
+         "files_read": 0, "result_text": ""}
+    read_paths: set[str] = set()
     for line in text.splitlines():
         try:
             ev = json.loads(line)
@@ -85,6 +92,9 @@ def parse_transcript(text: str) -> dict:
                 name = block.get("name", "")
                 if name in _READ_TOOLS:
                     m["reads"] += 1
+                    fp = (block.get("input") or {}).get("file_path")
+                    if fp:
+                        read_paths.add(fp)
                 elif name in _SEARCH_TOOLS:
                     m["searches"] += 1
                 elif name in _EDIT_TOOLS:
@@ -102,6 +112,8 @@ def parse_transcript(text: str) -> dict:
                               + int(usage.get("cache_creation_input_tokens", 0))
                               + int(usage.get("cache_read_input_tokens", 0)))
             m["tokens_out"] = int(usage.get("output_tokens", 0))
+            m["result_text"] = str(ev.get("result", ""))
+    m["files_read"] = len(read_paths)
     return m
 
 
@@ -219,42 +231,66 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
             task.accept_cmd.format(ws=ws), shell=True,
             capture_output=True).returncode == 0
         metrics = parse_transcript(transcript)
+        result_text = metrics.pop("result_text")
+        answer_ok = (all(re.search(rx, result_text, re.I | re.S)
+                         for rx in task.expect_answer)
+                     if task.expect_answer else None)
         return {"task": task.id, "kind": task.kind, "condition": condition,
-                "rep": rep, "accepted": accepted,
+                "rep": rep, "accepted": accepted, "answer_ok": answer_ok,
                 "reused": verdict["reused"], "duplicated": verdict["duplicated"],
                 "new_lines": len(verdict["new_lines"]), **metrics}
     finally:
         drop_workspace(corpus, ws)
 
 
-def report(rows: list[dict]) -> str:
+def report(rows: list[dict], anon: bool = False) -> str:
+    """Aggregate by (condition, kind). `anon` prints only ids, conditions and
+    numeric metrics — no symbol names — so results over private corpora can be
+    shared without leaking code details."""
     if not rows:
         return "no runs recorded\n"
-    lines = ["| condition | runs | accepted | duplication (reuse tasks) | "
-             "reads | searches | turns | tokens in | tokens out |",
-             "|---|---|---|---|---|---|---|---|---|"]
-    for cond in sorted({r["condition"] for r in rows}):
-        rs = [r for r in rows if r["condition"] == cond]
-        reuse = [r for r in rs if r["kind"] == "reuse"]
-        dup_rate = (100 * sum(1 for r in reuse if r["duplicated"]) / len(reuse)
-                    if reuse else 0)
+    lines = ["| condition | kind | runs | accepted | answer ok | "
+             "duplication | reads | files | searches | turns | "
+             "tokens in | tokens out |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    groups = sorted({(r["condition"], r["kind"]) for r in rows})
+    for cond, kind in groups:
+        rs = [r for r in rows if r["condition"] == cond and r["kind"] == kind]
+        dup_rate = (100 * sum(1 for r in rs if r["duplicated"]) / len(rs)
+                    if kind == "reuse" else 0)
         acc = 100 * sum(1 for r in rs if r["accepted"]) / len(rs)
+        answered = [r for r in rs if r.get("answer_ok") is not None]
+        ans = (f"{100 * sum(1 for r in answered if r['answer_ok']) / len(answered):.0f}%"
+               if answered else "—")
 
         def mean(key, rows=rs):
-            return statistics.fmean(r[key] for r in rows)
+            return statistics.fmean(r.get(key, 0) for r in rows)
 
         lines.append(
-            f"| {cond} | {len(rs)} | {acc:.0f}% | {dup_rate:.0f}% | "
-            f"{mean('reads'):.1f} | {mean('searches'):.1f} | "
-            f"{mean('turns'):.1f} | {mean('tokens_in'):,.0f} | "
-            f"{mean('tokens_out'):,.0f} |")
+            f"| {cond} | {kind} | {len(rs)} | {acc:.0f}% | {ans} | "
+            f"{dup_rate:.0f}% | {mean('reads'):.1f} | {mean('files_read'):.1f} | "
+            f"{mean('searches'):.1f} | {mean('turns'):.1f} | "
+            f"{mean('tokens_in'):,.0f} | {mean('tokens_out'):,.0f} |")
     lines.append("")
-    lines.append("Per-task duplication (reuse tasks):")
-    for r in sorted(rows, key=lambda r: (r["task"], r["condition"], r["rep"])):
-        if r["kind"] == "reuse":
-            mark = "DUP:" + ",".join(r["duplicated"]) if r["duplicated"] \
-                else ("reused:" + ",".join(r["reused"]) if r["reused"] else "—")
-            lines.append(f"- {r['task']} [{r['condition']}#{r['rep']}] {mark}")
+    if not anon:
+        lines.append("Per-task duplication (reuse tasks):")
+        for r in sorted(rows,
+                        key=lambda r: (r["task"], r["condition"], r["rep"])):
+            if r["kind"] == "reuse":
+                mark = "DUP:" + ",".join(r["duplicated"]) if r["duplicated"] \
+                    else ("reused:" + ",".join(r["reused"])
+                          if r["reused"] else "—")
+                lines.append(f"- {r['task']} [{r['condition']}#{r['rep']}] {mark}")
+    else:
+        lines.append("Per-task verdicts:")
+        for r in sorted(rows,
+                        key=lambda r: (r["task"], r["condition"], r["rep"])):
+            verdict = ("dup" if r["duplicated"] else
+                       "reused" if r["reused"] else
+                       "ok" if r.get("answer_ok") else
+                       "miss" if r.get("answer_ok") is False else "—")
+            lines.append(f"- {r['task']} [{r['condition']}#{r['rep']}] "
+                         f"{verdict} turns={r['turns']} reads={r['reads']}")
     return "\n".join(lines) + "\n"
 
 
@@ -281,6 +317,9 @@ def main(argv: list[str] | None = None) -> int:
     p_rep = sub.add_parser("report")
     p_rep.add_argument("--results", type=Path,
                        default=Path(__file__).parent / "results")
+    p_rep.add_argument("--anon", action="store_true",
+                       help="numeric metrics and ids only — safe to share "
+                            "for runs over private corpora")
     args = parser.parse_args(argv)
 
     if args.cmd == "report":
@@ -288,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
         rows = [json.loads(l) for l in runs.read_text().splitlines()] \
             if runs.exists() else []
         out = args.results / "report.md"
-        out.write_text(report(rows))
+        out.write_text(report(rows, anon=args.anon))
         print(out.read_text())
         return 0
 
@@ -305,7 +344,8 @@ def main(argv: list[str] | None = None) -> int:
                 done += 1
                 print(f"[{done}/{total}] {task.id} {cond} rep{rep}", flush=True)
                 row = run_one(cfg.corpus, task, cond, rep, args.results,
-                              cfg.model, cfg.max_turns, runner=runner)
+                              cfg.model, task.max_turns or cfg.max_turns,
+                              runner=runner)
                 with runs_path.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
     return 0

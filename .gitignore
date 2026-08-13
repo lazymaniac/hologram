@@ -5,3 +5,4 @@ build/
 *.egg-info/
 benchmark/results/
 benchmark/archive/
+benchmark/tasks/local-*.json

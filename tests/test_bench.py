@@ -24,7 +24,9 @@ class TaskLoaderTest(unittest.TestCase):
                 {"id": "find-lifecycle", "kind": "navigate",
                  "prompt": "Where is record lifecycle handled?",
                  "accept_cmd": "true",
-                 "expect_reuse": []},
+                 "expect_reuse": [],
+                 "expect_answer": ["LifecycleManager", r"records\.py"],
+                 "max_turns": 8},
             ],
         }))
         return p
@@ -37,6 +39,11 @@ class TaskLoaderTest(unittest.TestCase):
         self.assertEqual(len(cfg.tasks), 2)
         self.assertEqual(cfg.tasks[0].id, "weighted-avg")
         self.assertEqual(cfg.tasks[0].expect_reuse, ["normalize", "add"])
+        self.assertEqual(cfg.tasks[0].expect_answer, [])
+        self.assertIsNone(cfg.tasks[0].max_turns)
+        self.assertEqual(cfg.tasks[1].expect_answer,
+                         ["LifecycleManager", r"records\.py"])
+        self.assertEqual(cfg.tasks[1].max_turns, 8)  # session-length dial
         self.assertTrue(str(cfg.corpus).startswith("/"))  # ~ expanded
 
     def test_missing_required_field_raises(self):
@@ -91,7 +98,28 @@ class TranscriptMetricsTest(unittest.TestCase):
     def test_empty_transcript_gives_zeroes(self):
         m = bench.parse_transcript("")
         self.assertEqual(m, {"reads": 0, "searches": 0, "edits": 0,
-                             "turns": 0, "tokens_in": 0, "tokens_out": 0})
+                             "turns": 0, "tokens_in": 0, "tokens_out": 0,
+                             "files_read": 0, "result_text": ""})
+
+    def test_result_text_and_distinct_files_read(self):
+        lines = [
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": "/a.py"}}]}}),
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": "/a.py"}}]}}),
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Read",
+                 "input": {"file_path": "/b.py"}}]}}),
+            json.dumps({"type": "result", "num_turns": 3,
+                        "result": "The value is 42.",
+                        "usage": {"input_tokens": 1, "output_tokens": 2}}),
+        ]
+        m = bench.parse_transcript("\n".join(lines))
+        self.assertEqual(m["reads"], 3)
+        self.assertEqual(m["files_read"], 2)   # distinct paths
+        self.assertEqual(m["result_text"], "The value is 42.")
 
 
 BEFORE_DIGEST = """# hologram · 100 LOC · state aaa
@@ -279,6 +307,45 @@ class ReportTest(unittest.TestCase):
 
     def test_empty_rows(self):
         self.assertIn("no runs", bench.report([]))
+
+    def test_kind_split_and_answer_column(self):
+        rows = [
+            {"task": "nav-t1", "kind": "navigate", "condition": "A", "rep": 0,
+             "accepted": True, "answer_ok": True, "reused": [],
+             "duplicated": [], "new_lines": 0, "reads": 0, "searches": 0,
+             "edits": 0, "turns": 2, "tokens_in": 10, "tokens_out": 1,
+             "files_read": 0},
+            {"task": "nav-t1", "kind": "navigate", "condition": "B", "rep": 0,
+             "accepted": True, "answer_ok": False, "reused": [],
+             "duplicated": [], "new_lines": 0, "reads": 6, "searches": 4,
+             "edits": 0, "turns": 9, "tokens_in": 90, "tokens_out": 9,
+             "files_read": 5},
+            {"task": "t2", "kind": "reuse", "condition": "A", "rep": 0,
+             "accepted": True, "answer_ok": None, "reused": ["x"],
+             "duplicated": [], "new_lines": 1, "reads": 3, "searches": 1,
+             "edits": 2, "turns": 8, "tokens_in": 50, "tokens_out": 5,
+             "files_read": 3},
+        ]
+        md = bench.report(rows)
+        self.assertIn("| A | navigate |", md)
+        self.assertIn("| B | navigate |", md)
+        self.assertIn("| A | reuse |", md)
+        self.assertIn("100%", md)   # A navigate answers
+        self.assertIn("0%", md)     # B navigate answers
+
+    def test_anon_report_has_no_symbol_names(self):
+        rows = [
+            {"task": "t2", "kind": "reuse", "condition": "A", "rep": 0,
+             "accepted": True, "answer_ok": None,
+             "reused": ["SecretPricingEngine.evaluate"],
+             "duplicated": [], "new_lines": 1, "reads": 3, "searches": 1,
+             "edits": 2, "turns": 8, "tokens_in": 50, "tokens_out": 5,
+             "files_read": 3},
+        ]
+        md = bench.report(rows, anon=True)
+        self.assertNotIn("SecretPricingEngine", md)
+        self.assertIn("t2", md)
+        self.assertIn("reused", md)
 
 
 class CliTest(unittest.TestCase):
