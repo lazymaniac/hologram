@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-
-from ..symbols import Symbol, _base_type, tight_type
+from ..symbols import Symbol, _base_type, const_signature, tight_type
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text, _body_lines)
 
 # ---------------------------------------------------------------------------
@@ -20,6 +19,17 @@ _CS_TYPE_NODE_KINDS = {
 def _cs_vis(node) -> str:
     mods = [_ast_text(c) for c in node.children if c.type == "modifier"]
     return "priv" if any(m in ("private", "protected") for m in mods) else "pub"
+
+
+def _cs_attributes(node) -> list[str]:
+    """[Attr] / [Attr(args)] lists preceding the declaration's modifiers."""
+    return [_ast_text(a)
+            for al in node.children if al.type == "attribute_list"
+            for a in al.children if a.type == "attribute"]
+
+
+def _cs_modifier_names(node) -> set[str]:
+    return {_ast_text(c) for c in node.children if c.type == "modifier"}
 
 
 def _cs_params(plist) -> tuple[list[str], dict[str, str]]:
@@ -136,14 +146,41 @@ def _extract_cs(text: str, rel: str) -> list[Symbol]:
                 field_name = _ast_field(member, "name")
                 if field_name is not None:
                     type_fields.append(_ast_text(field_name))
-        symbols.append(Symbol(
+        type_sym = Symbol(
             name=name, kind=kind, file=rel, line=tn.start_point[0] + 1,
             signature=f"{kind} {name}", params=params, fields=list(dict.fromkeys(type_fields)),
             supers=supers,
             visibility=_cs_vis(tn), lang="csharp",
-        ))
+            decorators=_cs_attributes(tn),
+        )
+        symbols.append(type_sym)
         if body is None:
             continue
+        const_names: set[str] = set()
+        for f in body.children:
+            if f.type != "field_declaration":
+                continue
+            fmods = _cs_modifier_names(f)
+            if "const" not in fmods and not {"static", "readonly"} <= fmods:
+                continue
+            for dec in _ast_collect(f, ("variable_declarator",)):
+                cname = _ast_text(_ast_field(dec, "name"))
+                val = next((c for c in dec.children
+                            if c.type.endswith("_literal")
+                            or c.type in ("true", "false",
+                                          "initializer_expression")), None)
+                if not cname or val is None:
+                    continue
+                value = (None if val.type == "initializer_expression"
+                         else _ast_text(val))
+                const_names.add(cname)
+                symbols.append(Symbol(
+                    name=cname, kind="const", file=rel,
+                    line=dec.start_point[0] + 1,
+                    signature=const_signature(cname, value),
+                    visibility=_cs_vis(f), lang="csharp"))
+        # consts carry their own `=` line; don't restate them as fields
+        type_sym.fields = [f for f in type_sym.fields if f not in const_names]
         class_binds: dict[str, str] = {}
         for f in body.children:
             if f.type == "field_declaration":
@@ -167,6 +204,7 @@ def _extract_cs(text: str, rel: str) -> list[Symbol]:
                     returns=mname,
                     visibility=_cs_vis(m), container=name, lang="csharp",
                     calls=calls, bindings=binds,
+                    decorators=_cs_attributes(m),
                 ))
                 continue
             returns = tight_type(_ast_text(_ast_field(m, "returns")))
@@ -180,6 +218,7 @@ def _extract_cs(text: str, rel: str) -> list[Symbol]:
                 visibility=_cs_vis(m), container=name, lang="csharp",
                 calls=calls, bindings=binds, size=_body_lines(mbody),
                 raises=_cs_raises(mbody),
+                decorators=_cs_attributes(m),
             ))
     return symbols
 

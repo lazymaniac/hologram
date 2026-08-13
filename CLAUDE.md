@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,759 LOC · state 88d5fe6b225f
+# hologram · 7,807 LOC · state 4d8d0e687d6c
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -216,7 +216,7 @@ hologram
   = __init__.py: EXTRACTORS
   - c_cpp.py: _c_{fn_declarator,params,param_names,field_names,call_entry,static,enum_symbol},_extract_c,_cpp_raises,
               _extract_cpp
-  - csharp.py: _cs_{vis,params,param_names,call_entry,local_bindings,raises},_extract_cs
+  - csharp.py: _cs_{vis,attributes,modifier_names,params,param_names,call_entry,local_bindings,raises},_extract_cs
   - go.py: _go_{vis,type_text,params,param_names,result,call_entry,local_bindings},_extract_go
   - java.py: _ast_{modifiers,param_types,vis},
              _java_{annotations,param_names,call_entry,calls,param_bindings,class_bindings,local_bindings,method_symbol},

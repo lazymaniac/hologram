@@ -111,6 +111,15 @@ class CSharpExtractTest(unittest.TestCase):
                   if s.name == "Evaluate" and s.container == "PricingEngine")
         self.assertEqual(ev.raises, ["UnknownOrderException"])
 
+    def test_attributes_routes_and_consts(self):
+        ctrl = next(s for s in self.syms if s.name == "OrdersController")
+        self.assertEqual(ctrl.decorators, ["ApiController", 'Route("api/orders")'])
+        find = next(s for s in self.syms if s.name == "Find")
+        self.assertEqual(find.decorators, ['HttpGet("{id}")'])
+        const = next(s for s in self.syms if s.kind == "const")
+        self.assertEqual(const.signature, "MaxItems=10")
+        self.assertNotIn("MaxItems", ctrl.fields)
+
 
 @_needs("c")
 class CExtractTest(unittest.TestCase):
