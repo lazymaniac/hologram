@@ -501,6 +501,8 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
         items.append(":T=supers")
     if "sealed:" in text:
         items.append("sealed:A|B")
+    if "←" in text:
+        items.append("←A|B=implementors")
     if "»" in text:
         items.append("»=re-exports")
     if "Self" in text:
@@ -608,6 +610,18 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             sig = _norm(sig, own)
         return f"{sig} > {','.join(kept)}" if kept else sig
 
+    # Interface relations stated once, on the interface: `I ←Impl|Impl` replaces
+    # each implementor's `: I` suffix (sealed permits already carry the list).
+    iface_index = {(s.lang, s.name) for s in prod if s.kind == "interface"}
+    impls_of: dict[tuple[str, str], list[str]] = {}
+    for s in prod:
+        if s.kind in TYPE_KINDS and s.container is None:
+            for sup in s.supers:
+                if (s.lang, sup) in iface_index:
+                    entries = impls_of.setdefault((s.lang, sup), [])
+                    if s.name not in entries:
+                        entries.append(s.name)
+
     payload_by_dir: dict[str, list[str]] = {}
     for d, types in sorted(types_by_dir.items()):
         payload = payload_by_dir.setdefault(d, [])
@@ -620,12 +634,17 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                           t.params[:1] if t.kind == "type" and not t.fields else
                           t.fields or t.params)
             unused = t.kind == "class" and t.name in zero_usage
-            group_key = (t.lang, t.kind, t.visibility, tuple(components), tuple(t.supers),
-                         tuple(t.permits), unused, bool(t.fields),
-                         tuple(_decorator_notes(t.decorators)))
+            shown_supers = tuple(sup for sup in t.supers
+                                 if (t.lang, sup) not in iface_index)
+            impls = (tuple(n for n in impls_of.get((t.lang, t.name), ())
+                           if n not in t.permits)
+                     if t.kind == "interface" else ())
+            group_key = (t.lang, t.kind, t.visibility, tuple(components),
+                         shown_supers, tuple(t.permits), impls, unused,
+                         bool(t.fields), tuple(_decorator_notes(t.decorators)))
             groups.setdefault(group_key, []).append(t)
-        for (_, kind, vis, components, supers, permits, unused, named_fields,
-             deco_notes), members in groups.items():
+        for (_, kind, vis, components, supers, permits, impls, unused,
+             named_fields, deco_notes), members in groups.items():
             members.sort(key=lambda s: s.name)
             names = ",".join(_top_display(m) for m in members)
             letter = KIND_LETTER.get(kind, "?")
@@ -637,10 +656,13 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 inner = letter
             permit_suffix = f" sealed:{'|'.join(permits)}" if permits else ""
             rel_suffix = f" : {','.join(supers)}" if supers else ""
+            impl_suffix = ("" if not impls else
+                           f" ←{len(impls)} impls" if len(impls) > 6 else
+                           f" ←{'|'.join(impls)}")
             hot_suffix = " ×0" if unused else ""
             deco_suffix = "".join(f" @{n}" for n in deco_notes)
-            payload.append(
-                f"{names}({inner}){deco_suffix}{rel_suffix}{permit_suffix}{hot_suffix}")
+            payload.append(f"{names}({inner}){deco_suffix}{rel_suffix}"
+                           f"{permit_suffix}{impl_suffix}{hot_suffix}")
             # Methods shared by every member print once (Self-normalized); each
             # member's remaining methods print on its own `Name: …` line.
             member_methods = {id(m): methods_by_owner.get((d, m.name, m.lang), [])
