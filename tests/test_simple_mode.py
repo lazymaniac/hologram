@@ -256,6 +256,14 @@ class RelationsTest(unittest.TestCase):
         t = next(s for s in syms if s.name == "DeltaOp")
         self.assertEqual(t.permits, ["AddOp", "RemoveOp"])
 
+    def test_generic_supers_not_split_on_type_args(self):
+        from hologram.symbols import _heritage
+        supers, _ = _heritage(
+            "extends React.Component<WidgetProps, WidgetState> implements OnInit")
+        self.assertEqual(supers, ["Component", "OnInit"])
+        supers, _ = _heritage("extends AbstractMap<K, V> implements Map<K, V>")
+        self.assertEqual(supers, ["AbstractMap", "Map"])
+
     def test_relations_rendered(self):
         out = build_digest(JAVAMINI)
         self.assertIn("PricingEngine(C{basePrices}) : PricePort", out)
