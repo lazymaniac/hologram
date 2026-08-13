@@ -234,7 +234,8 @@ class RunOneTest(unittest.TestCase):
                 accept_cmd="grep -q average {ws}/svc.py",
                 expect_reuse=["normalize"])
 
-            def fake_runner(prompt: str, ws: Path, model: str, max_turns: int) -> str:
+            def fake_runner(prompt: str, ws: Path, model: str, max_turns: int,
+                            effort: str | None = None) -> str:
                 # the "agent" appends a function that calls normalize
                 (ws / "svc.py").write_text(
                     (ws / "svc.py").read_text()
@@ -263,7 +264,7 @@ class RunOneTest(unittest.TestCase):
                 accept_cmd="git -C {ws} diff --stat | grep -q .",
                 expect_reuse=[])
 
-            def fake_runner(prompt, ws, model, max_turns):
+            def fake_runner(prompt, ws, model, max_turns, effort=None):
                 (ws / "helper.py").write_text("def helper() -> int:\n    return 1\n")
                 return TRANSCRIPT
 
@@ -282,6 +283,53 @@ class RunOneTest(unittest.TestCase):
                           model="sonnet", max_turns=40,
                           runner=lambda *a, **k: TRANSCRIPT)
             self.assertTrue((results / "noop-B-1.jsonl").exists())
+
+
+class ScopeJudgeTest(unittest.TestCase):
+    def _repo(self, tmp: Path) -> Path:
+        import subprocess
+        repo = tmp / "ws"
+        repo.mkdir()
+        (repo / "base.py").write_text("class NeutralDriver:\n    pass\n")
+        for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-qm", "setup"]):
+            subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+        return repo
+
+    def test_name_in_new_file_matches(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+            (repo / "tests").mkdir()
+            (repo / "tests" / "test_new.py").write_text(
+                "def test_x():\n    NeutralDriver()\n")
+            subprocess.run(["git", "add", "-N", "."], cwd=repo,
+                           capture_output=True)
+            self.assertTrue(bench.judge_scope(repo, ["NeutralDriver"]))
+            self.assertTrue(bench.judge_scope(repo, ["NeutralDriver"],
+                                              test_only=True))
+
+    def test_unchanged_line_does_not_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+            self.assertFalse(bench.judge_scope(repo, ["NeutralDriver"]))
+
+    def test_empty_expectation_is_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+            self.assertIsNone(bench.judge_scope(repo, []))
+
+    def test_test_only_excludes_prod_additions(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._repo(Path(tmp))
+            (repo / "prod_new.py").write_text("NeutralDriver()\n")
+            subprocess.run(["git", "add", "-N", "."], cwd=repo,
+                           capture_output=True)
+            self.assertTrue(bench.judge_scope(repo, ["NeutralDriver"]))
+            self.assertFalse(bench.judge_scope(repo, ["NeutralDriver"],
+                                               test_only=True))
 
 
 class ReportTest(unittest.TestCase):
