@@ -121,9 +121,9 @@ class SizeMarkerTest(unittest.TestCase):
             (root / "a.py").write_text(big + "\ndef small() -> int:\n    return 1\n")
             out = build_digest(root)
         big_line = next(ln for ln in out.splitlines() if "big()" in ln)
-        self.assertIn("⋮", big_line)
+        self.assertRegex(big_line, r" ~\d")
         small_line = next(ln for ln in out.splitlines() if "small()" in ln)
-        self.assertNotIn("⋮", small_line)
+        self.assertNotRegex(small_line, r" ~\d")
 
 
 class TestIndexTest(unittest.TestCase):

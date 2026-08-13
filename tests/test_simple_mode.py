@@ -56,7 +56,7 @@ class SimpleDigestTest(unittest.TestCase):
 
     def test_signatures_present(self):
         self.assertIn("evaluate(order,items):Quote", self.out)
-        self.assertIn("of(raw):⟨X⟩", self.out)
+        self.assertIn("of(raw):Self", self.out)
 
     def test_calls_follow_signature_inline(self):
         lines = self.out.splitlines()
@@ -88,7 +88,7 @@ class SameShapeGroupingTest(unittest.TestCase):
     def test_identical_types_grouped_with_hole_notation(self):
         out = build_digest(JAVAMINI)
         self.assertIn("ItemId,OrderId,UserId(R{value})", out)
-        self.assertEqual(out.count("of(raw):⟨X⟩"), 1)
+        self.assertEqual(out.count("of(raw):Self"), 1)
         self.assertNotIn("of(raw):UserId", out)
 
 
@@ -278,9 +278,9 @@ class LegendTest(unittest.TestCase):
         body = "\n".join(digest.splitlines()[2:])
         # notation → legend clause; clause present exactly when notation occurs
         for notation, clause in ((" : ", ":T=supers"), ("sealed:", "sealed:A|B"),
-                                 ("»", "»=re-exports"), ("⟨X⟩", "⟨X⟩=own name"),
+                                 ("»", "»=re-exports"), ("Self", "Self=own type"),
                                  ("· deps", "a→b=a uses b"), ("✓", "✓=tested"),
-                                 ("×0", "×0=no static use"), ("⋮", "⋮N=lines")):
+                                 ("×0", "×0=no static use"), (" ~", "~N=lines")):
             if notation in body:
                 self.assertIn(clause, second)
             else:
@@ -398,7 +398,7 @@ class GroupExtrasTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), syms, [])
         self.assertIn("AId,BId(R{value})", out)          # grouped despite extra method
-        self.assertEqual(out.count("of(raw):⟨X⟩"), 1)  # shared shown once
+        self.assertEqual(out.count("of(raw):Self"), 1)  # shared shown once
         self.assertIn("BId: extra():int", out)            # divergence kept -> no coverage loss
 
 

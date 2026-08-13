@@ -419,8 +419,8 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
         items.append("×0=no static use")
     if "✓" in text:
         items.append("✓=tested")
-    if "⋮" in text:
-        items.append("⋮N=lines")
+    if re.search(r" ~\d", text):
+        items.append("~N=lines")
     if re.search(r" !\S", text):
         items.append("!E=throws")
     if "{" in re.sub(r"\([CRIE]\{", "", text):
@@ -433,8 +433,8 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
         items.append("sealed:A|B")
     if "»" in text:
         items.append("»=re-exports")
-    if "⟨X⟩" in text:
-        items.append("⟨X⟩=own name")
+    if "Self" in text:
+        items.append("Self=own type")
     if "· deps " in text:
         items.append("deps a→b=a uses b")
     return "· " + " · ".join(items)
@@ -485,7 +485,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             priv_top_by_file.setdefault(file_key, []).append(name)
 
     def _norm(text: str, own: str) -> str:
-        return re.sub(rf"\b{re.escape(own)}\b", "⟨X⟩", text)
+        return re.sub(rf"\b{re.escape(own)}\b", "Self", text)
 
     def _argument_names(sym: Symbol) -> list[str]:
         return [sym.param_names[index] if index < len(sym.param_names)
@@ -523,7 +523,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   display_name: str | None = None) -> str:
         sig = _display_signature(sym, display_name)
         if sym.size >= 40:
-            sig = f"{sig} ⋮{sym.size}"
+            sig = f"{sig} ~{sym.size}"
         if id(sym) in tested:
             sig = f"{sig} ✓"
         if sym.kind in ("fn", "method") and sym.name in zero_usage:
@@ -566,7 +566,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             rel_suffix = f" : {','.join(supers)}" if supers else ""
             hot_suffix = " ×0" if unused else ""
             payload.append(f"{names}({inner}){rel_suffix}{permit_suffix}{hot_suffix}")
-            # Methods shared by every member print once (⟨X⟩-normalized); each
+            # Methods shared by every member print once (Self-normalized); each
             # member's remaining methods print on its own `Name: …` line.
             member_methods = {id(m): methods_by_owner.get((d, m.name, m.lang), [])
                               for m in members}
