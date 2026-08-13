@@ -310,6 +310,39 @@ class LegendTest(unittest.TestCase):
         self.assertNotIn("grep", out)
 
 
+class ConstExtractTest(unittest.TestCase):
+    def test_python_module_constants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.py").write_text(
+                "MAX_RETRIES = 3\n"
+                "BASE_URL = 'https://api.example.com/v1/orders'\n"
+                "TIERS = {'gold': 0.2}\n"
+                "_HIDDEN = 1\n"
+                "app = object()\n"
+                "LOGGER = make()\n")
+            out = build_digest(root)
+        self.assertIn("= config.py: MAX_RETRIES=3,BASE_URL,TIERS", out)
+        self.assertIn("= consts", out.splitlines()[1])
+        self.assertNotIn("_HIDDEN", out)
+        self.assertNotIn("LOGGER", out)      # call RHS: not a literal
+        self.assertNotIn("example.com", out)  # >24 chars renders name-only
+
+    @needs_java
+    def test_java_static_final_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "C.java").write_text(
+                "public class C {\n"
+                "  public static final int MAX_PAGE = 100;\n"
+                "  static final String TOPIC = \"orders.created\";\n"
+                "  private int state = 1;\n"
+                "}\n")
+            out = build_digest(root)
+        self.assertIn('MAX_PAGE=100,TOPIC="orders.created"', out)
+        self.assertNotIn("C{MAX_PAGE", out)  # not restated as fields
+
+
 class RouteRenderTest(unittest.TestCase):
     def _render(self, *syms):
         with tempfile.TemporaryDirectory() as tmp:

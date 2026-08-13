@@ -491,6 +491,8 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
         items.append("!E=throws")
     if " @" in text:
         items.append("@=route/annotation")
+    if re.search(r"(?m)^\s*= ", text):
+        items.append("= consts")
     if "{" in re.sub(r"\([CRIE]\{| @\S+", "", text):
         items.append("p{a,b}=pa,pb")
     if re.search(r"\}[\w-]", text):
@@ -672,6 +674,17 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                                    + "; ".join(_sig_line(ms, m.name, False)
                                                for ms in extras))
                 payload.extend(_priv_lines(m, f"{m.name} "))
+
+    consts_by_file: dict[tuple[str, str], list[str]] = {}
+    for s in prod:
+        if s.kind == "const" and s.visibility == "pub":
+            const_key = (str(Path(s.file).parent), Path(s.file).name)
+            vals = consts_by_file.setdefault(const_key, [])
+            if (s.signature or s.name) not in vals:
+                vals.append(s.signature or s.name)
+    for (d, fname), vals in sorted(consts_by_file.items()):
+        payload_by_dir.setdefault(d, []).extend(
+            _private_lines(f"= {fname}: ", vals))
 
     for (d, stem), names_only in sorted(priv_top_by_file.items()):
         payload_by_dir.setdefault(d, []).extend(

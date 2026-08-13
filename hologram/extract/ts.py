@@ -176,6 +176,8 @@ def _ts_fn_symbol(node, rel: str, container: str | None, visibility: str,
 
 _TS_FN_VALUES = ("arrow_function", "function_expression")
 
+_CONST_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
 
 def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
     """Module-scope `const f = (…) => …` plus object-literal APIs
@@ -199,6 +201,18 @@ def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
                     symbols.append(_ts_fn_symbol(
                         d, rel, None, "pub" if exported else "priv",
                         name=name, fn_node=val))
+                elif _CONST_NAME_RE.fullmatch(name) and val.type in (
+                        "string", "number", "true", "false", "array", "object"):
+                    if val.type in ("array", "object"):
+                        csig = name  # container consts: name only
+                    else:
+                        text = _ast_text(val)
+                        csig = f"{name}={text}" if len(text) <= 24 else name
+                    symbols.append(Symbol(
+                        name=name, kind="const", file=rel,
+                        line=d.start_point[0] + 1, signature=csig,
+                        visibility="pub" if exported else "priv",
+                        lang="typescript"))
                 elif val.type == "object":
                     fns = []
                     for c in val.children:

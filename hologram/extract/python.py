@@ -9,6 +9,8 @@ from ..symbols import Symbol, _base_type, tight_type
 # Python extraction (stdlib ast — precise and dependency-free)
 # ---------------------------------------------------------------------------
 
+_CONST_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
 def _py_param_facts(node: ast.FunctionDef | ast.AsyncFunctionDef
                     ) -> tuple[list[str], list[str]]:
     types: list[str] = []
@@ -143,5 +145,22 @@ def _extract_python(text: str, rel: str) -> list[Symbol]:
                     symbols.append(_py_fn_symbol(sub, rel, node.name))
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             symbols.append(_py_fn_symbol(node, rel, None))
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            target = (node.targets[0]
+                      if isinstance(node, ast.Assign) and len(node.targets) == 1
+                      else getattr(node, "target", None))
+            if not (isinstance(target, ast.Name) and _CONST_NAME_RE.fullmatch(target.id)):
+                continue
+            value = node.value
+            if isinstance(value, ast.Constant):
+                text = tight_type(ast.unparse(value))
+                sig = f"{target.id}={text}" if len(text) <= 24 else target.id
+            elif isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
+                sig = target.id  # container consts: name only, values stay in code
+            else:
+                continue
+            symbols.append(Symbol(
+                name=target.id, kind="const", file=rel, line=node.lineno,
+                signature=sig, visibility="pub", lang="python"))
     return symbols
 

@@ -10,6 +10,8 @@ from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_t
 # Java extraction
 # ---------------------------------------------------------------------------
 
+_CONST_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
 _JAVA_TYPE_NODE_KINDS = {
     "class_declaration": "class",
     "interface_declaration": "interface",
@@ -183,6 +185,35 @@ def _extract_java(text: str, rel: str) -> list[Symbol]:
         ))
         if body is None:
             continue
+        type_sym = symbols[-1]
+        const_names: set[str] = set()
+        for f in body.children:
+            if f.type != "field_declaration":
+                continue
+            fmods = _ast_modifiers(f)
+            if "static" not in fmods or "final" not in fmods:
+                continue
+            for dec in f.children:
+                if dec.type != "variable_declarator":
+                    continue
+                cname = _ast_text(_ast_field(dec, "name"))
+                val = _ast_field(dec, "value")
+                if not _CONST_NAME_RE.fullmatch(cname) or val is None:
+                    continue
+                if val.type.endswith("_literal") or val.type in ("true", "false"):
+                    text = _ast_text(val)
+                    csig = f"{cname}={text}" if len(text) <= 24 else cname
+                elif val.type == "array_initializer":
+                    csig = cname
+                else:
+                    continue
+                const_names.add(cname)
+                symbols.append(Symbol(
+                    name=cname, kind="const", file=rel,
+                    line=dec.start_point[0] + 1, signature=csig,
+                    visibility=_ast_vis(fmods), lang="java"))
+        # consts already carry their own `=` line; don't restate them as fields
+        type_sym.fields = [f for f in type_sym.fields if f not in const_names]
         class_binds = _java_class_bindings(tn)
         containers = list(body.children)
         if kind == "enum":
