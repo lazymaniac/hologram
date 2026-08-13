@@ -12,7 +12,7 @@ from pathlib import Path
 from ._version import __version__
 from .bootstrap import (_bootstrap_or_die, _missing_parser_langs, _pyz_path,
                         _venv_python)
-from .embed import context_targets, embed_digest, embedded_digest
+from .embed import _block_span, context_targets, embed_digest, embedded_digest
 from .extract import EXTRACTORS
 from .gather import _digest_state, _state_hash, scan_files
 from .render import build_digest, estimate_tokens
@@ -103,6 +103,58 @@ def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None) -> No
         print(f"hooks installed: {', '.join(HOOK_NAMES)}")
 
 
+_MANAGED_BASENAMES = ("hologram.md", "hologram.mdc", "hologram.instructions.md")
+
+
+def _uninstall(root: Path, keep_blocks: bool, quiet: bool) -> None:
+    """Remove managed hook lines (deleting a hook file left with only its shebang)
+    and, unless keep_blocks, strip embedded map blocks — deleting outright the rule
+    files hologram itself created inside rule directories."""
+    removed: list[str] = []
+    hooks_dir = root / ".git" / "hooks"
+    for name in HOOK_NAMES:
+        hook = hooks_dir / name
+        if not hook.is_file():
+            continue
+        lines = hook.read_text().splitlines()
+        kept = [l for l in lines if not _managed_hook_line(l, root)]
+        if len(kept) == len(lines):
+            continue
+        if all(not l.strip() or l.startswith("#!") for l in kept):
+            hook.unlink()
+            removed.append(f".git/hooks/{name} (deleted)")
+        else:
+            hook.write_text("\n".join(kept) + "\n")
+            removed.append(f".git/hooks/{name}")
+    if not keep_blocks:
+        for t in context_targets(root):
+            if not t.is_file():
+                continue
+            if t.name in _MANAGED_BASENAMES:
+                t.unlink()
+                removed.append(f"{t.relative_to(root)} (deleted)")
+                continue
+            existing = t.read_text()
+            span = _block_span(existing)
+            if span is None:
+                continue
+            cleaned = (existing[:span[0]] + existing[span[1]:]).strip("\n")
+            t.write_text(cleaned + "\n" if cleaned else "")
+            removed.append(str(t.relative_to(root)))
+    if not quiet:
+        print("removed: " + (", ".join(removed) if removed else "nothing"))
+
+
+def _warn_if_large(digest: str, threshold: int) -> None:
+    tokens = estimate_tokens(digest)
+    if threshold and tokens > threshold:
+        print(f"hologram: warning: the map is ~{tokens:,} tokens "
+              f"(threshold {threshold:,}) — that is a lot of always-loaded "
+              f"context. Consider --lang filters to narrow it. The map was "
+              f"still written exactly; raise or disable with --warn-tokens.",
+              file=sys.stderr)
+
+
 def run_cli(argv: list[str] | None = None) -> int:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--root", type=Path, default=Path.cwd())
@@ -110,6 +162,9 @@ def run_cli(argv: list[str] | None = None) -> int:
                         help="restrict to language(s), repeatable or comma-separated "
                              "(java, python, typescript, javascript)")
     common.add_argument("--quiet", action="store_true")
+    common.add_argument("--warn-tokens", type=int, default=25000, metavar="N",
+                        help="warn on stderr when the map exceeds N estimated "
+                             "tokens (0 disables; the map is still written exactly)")
 
     parser = argparse.ArgumentParser(prog="hologram", description=__doc__)
     parser.add_argument("--version", action="version",
@@ -127,6 +182,12 @@ def run_cli(argv: list[str] | None = None) -> int:
     p_diff = sub.add_parser("diff", parents=[common],
                             help="diff the map against another git revision")
     p_diff.add_argument("rev", nargs="?", default="HEAD~1")
+    sub.add_parser("print", parents=[common],
+                   help="write the map to stdout without touching any file")
+    p_un = sub.add_parser("uninstall", parents=[common],
+                          help="remove managed hook lines and embedded map blocks")
+    p_un.add_argument("--keep-blocks", action="store_true",
+                      help="remove only the git hooks, leave embedded maps in place")
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
@@ -149,6 +210,9 @@ def run_cli(argv: list[str] | None = None) -> int:
                 mark = "stale or missing" if t in stale else "fresh"
                 print(f"{t.relative_to(root)}: {mark}")
         return 1 if stale else 0
+    if args.cmd == "uninstall":
+        _uninstall(root, args.keep_blocks, args.quiet)
+        return 0
     if args.cmd == "build" and args.if_stale and not stale:
         if not args.quiet:
             print("fresh, skipping rebuild")
@@ -183,6 +247,12 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(ln)
         return 0
 
+    if args.cmd == "print":
+        digest = build_digest(root, langs=langs)
+        _warn_if_large(digest, args.warn_tokens)
+        print(digest, end="")
+        return 0
+
     if args.cmd == "init":
         _install_hooks(root, args.quiet, langs)
     for script in sorted(_dead_hook_scripts(root)):
@@ -190,6 +260,7 @@ def run_cli(argv: list[str] | None = None) -> int:
               f"longer exists — run `hologram init --root {root}` to repair it",
               file=sys.stderr)
     digest = build_digest(root, langs=langs)
+    _warn_if_large(digest, args.warn_tokens)
     for t in targets:
         embed_digest(t, digest)
     if not args.quiet:

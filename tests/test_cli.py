@@ -134,6 +134,101 @@ class BootstrapTest(unittest.TestCase):
             del os.environ["HOLOGRAM_BOOTSTRAPPED"]
 
 
+@needs_java
+class PrintCommandTest(unittest.TestCase):
+    def test_print_writes_digest_to_stdout_and_touches_nothing(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "proj"
+            shutil.copytree(JAVAMINI, proj)
+            before = sorted(p.relative_to(proj) for p in proj.rglob("*"))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = run_cli(["print", "--root", str(proj), "--quiet"])
+            self.assertEqual(code, 0)
+            self.assertIn("PricingEngine", out.getvalue())
+            self.assertIn("# hologram ·", out.getvalue())
+            after = sorted(p.relative_to(proj) for p in proj.rglob("*"))
+            self.assertEqual(before, after)  # no CLAUDE.md created, nothing embedded
+
+
+@needs_java
+class UninstallTest(unittest.TestCase):
+    def test_uninstall_removes_hooks_and_blocks_preserving_prose(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            claude = repo / "CLAUDE.md"
+            claude.write_text("# My notes\n\nHand-written guidance.\n")
+            run_cli(["init", "--root", str(repo), "--quiet"])
+            self.assertIn("hologram:start", claude.read_text())
+            self.assertTrue((repo / ".git" / "hooks" / "post-commit").exists())
+            run_cli(["uninstall", "--root", str(repo), "--quiet"])
+            content = claude.read_text()
+            self.assertNotIn("hologram:start", content)
+            self.assertIn("Hand-written guidance.", content)
+            self.assertFalse((repo / ".git" / "hooks" / "post-commit").exists())
+
+    def test_uninstall_keeps_foreign_hook_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            hook = repo / ".git" / "hooks" / "post-commit"
+            hook.write_text("#!/bin/sh\necho existing\n")
+            run_cli(["init", "--root", str(repo), "--quiet"])
+            run_cli(["uninstall", "--root", str(repo), "--quiet"])
+            content = hook.read_text()
+            self.assertIn("echo existing", content)
+            self.assertNotIn("hologram:managed", content)
+
+    def test_uninstall_deletes_managed_rule_dir_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            (repo / ".cursor" / "rules").mkdir(parents=True)
+            run_cli(["build", "--root", str(repo), "--quiet"])
+            managed = repo / ".cursor" / "rules" / "hologram.mdc"
+            self.assertTrue(managed.exists())
+            run_cli(["uninstall", "--root", str(repo), "--quiet"])
+            self.assertFalse(managed.exists())
+
+    def test_keep_blocks_limits_to_hooks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            run_cli(["init", "--root", str(repo), "--quiet"])
+            run_cli(["uninstall", "--root", str(repo), "--keep-blocks", "--quiet"])
+            self.assertIn("hologram:start", (repo / "CLAUDE.md").read_text())
+            self.assertFalse((repo / ".git" / "hooks" / "post-commit").exists())
+
+
+@needs_java
+class SizeWarningTest(unittest.TestCase):
+    def test_warns_over_threshold_but_embeds_exactly(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "proj"
+            shutil.copytree(JAVAMINI, proj)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                run_cli(["build", "--root", str(proj), "--warn-tokens", "10",
+                         "--quiet"])
+            self.assertIn("warning", err.getvalue())
+            self.assertIn("--lang", err.getvalue())
+            embedded = hologram.embedded_digest(proj / "CLAUDE.md")
+            self.assertIn("PricingEngine", embedded)  # embedded exactly, not cut
+
+    def test_zero_disables_warning(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "proj"
+            shutil.copytree(JAVAMINI, proj)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                run_cli(["build", "--root", str(proj), "--warn-tokens", "0",
+                         "--quiet"])
+            self.assertEqual(err.getvalue(), "")
+
+
 class HookPythonSelectionTest(unittest.TestCase):
     def test_hook_uses_tool_venv_python_when_present(self):
         from hologram import _hook_python
