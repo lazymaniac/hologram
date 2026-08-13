@@ -477,50 +477,81 @@ def _braced_lines(label: str, names: list[str], width: int = 120) -> list[str]:
 
 
 def _helper_class_ids(symbols: list[Symbol],
-                      file_tokens: dict[str, set[str]] | None) -> set[int]:
-    """Test-support classes worth full signatures: reusable drivers, builders,
-    and shared bases that agents otherwise re-invent. A class qualifies when
+                      file_tokens: dict[str, set[str]] | None) -> dict[int, bool]:
+    """Test-support classes worth surfacing: reusable drivers, builders, and
+    shared bases that agents otherwise re-invent. A class qualifies when
     (a) it lives on a test path only through its directory — the file isn't
     test-named and neither is the class — or (b) two or more *other* test
-    files reference it by name."""
-    ids: set[int] = set()
+    files reference it by name. The value says whether the class earns full
+    method signatures: only helpers actually referenced from another test
+    file do; unreferenced ones render name-only."""
+    ids: dict[int, bool] = {}
     ref_counts: dict[str, int] = {}
-    if file_tokens:
-        test_files = [f for f in sorted(file_tokens) if _is_test_path(f)]
+    test_files: list[str] = ([f for f in sorted(file_tokens) if _is_test_path(f)]
+                             if file_tokens else [])
+
+    def refs(name: str, own_file: str) -> int:
+        if not file_tokens:
+            return 1  # no reference data: keep full signatures
+        if name not in ref_counts:
+            ref_counts[name] = sum(1 for f in test_files
+                                   if f != own_file and name in file_tokens[f])
+        return ref_counts[name]
+
     for s in symbols:
         if s.kind != "class" or not _is_test_path(s.file):
             continue
         stem_ok = not _test_stem(Path(s.file).stem)
         name_ok = not s.name.endswith(("Test", "Tests", "Spec", "IT"))
         if stem_ok and name_ok:
-            ids.add(id(s))
+            ids[id(s)] = refs(s.name, s.file) >= 1
             continue
         # (b) has no name gate on purpose: shared Base*Test classes are the
         # most common Java helper shape and are exactly what (a) misses
-        if file_tokens:
-            if s.name not in ref_counts:
-                ref_counts[s.name] = sum(
-                    1 for f in test_files
-                    if f != s.file and s.name in file_tokens[f])
-            if ref_counts[s.name] >= 2:
-                ids.add(id(s))
+        if file_tokens and refs(s.name, s.file) >= 2:
+            ids[id(s)] = True
     return ids
 
 
-_EDGE_CAP = 3  # coverage-edge targets shown per test class; rest summarize to +N
+_EDGE_CAP = 1  # coverage-edge targets shown per test class; rest summarize to +N
 
 
-def _edge_suffix(targets: list[str]) -> str:
+def _informative_targets(owner: str, targets: list[str]) -> list[str]:
+    """Coverage targets not already guessable from the test's own name:
+    `TaskLoaderTest > load_tasks` says nothing, so it renders as `+1`;
+    surprising targets keep their names."""
+    flat_owner = re.sub(r"[_./-]", "", owner).casefold()
+    out = []
+    for t in targets:
+        base = re.sub(r"[_./-]", "", t.rsplit(".", 1)[-1]).casefold()
+        if base and base in flat_owner:
+            continue
+        out.append(t)
+    return out
+
+
+def _edge_suffix(owner: str, targets: list[str], braced: bool = False) -> str:
+    """`>headline+N` coverage note. Inside braces it glues to the member name
+    with no spaces so the comma stays the member separator."""
     if not targets:
         return ""
-    shown = targets[:_EDGE_CAP]
+    informative = _informative_targets(owner, targets)
+    shown = informative[:_EDGE_CAP]
     more = len(targets) - len(shown)
+    if braced:
+        if not shown:
+            # every target was guessable from the name; a bare +1/+2 says
+            # nearly nothing, so only larger surfaces earn the marker
+            return f"+{more}" if more > 2 else ""
+        return f">{shown[0]}" + (f"+{more}" if more else "")
+    if not shown:
+        return f" +{more}" if more > 2 else ""
     return f" > {','.join(shown)}" + (f" +{more}" if more else "")
 
 
 def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       resolved_calls: dict[int, list[str]] | None = None,
-                      helper_ids: set[int] | None = None,
+                      helper_ids: dict[int, bool] | None = None,
                       sig_line=None) -> list[str]:
     test_paths = sorted(str(path.relative_to(root)) for path in files
                         if _is_test_path(str(path.relative_to(root))))
@@ -545,7 +576,7 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     first_parts = {Path(path).parts[0] for path in test_paths if Path(path).parts}
     strip_first = (len(first_parts) == 1
                    and next(iter(first_parts)).casefold() in ("test", "tests", "__tests__"))
-    helper_ids = helper_ids or set()
+    helper_ids = helper_ids or {}
     helpers: dict[str, list[Symbol]] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
         if id(symbol) in helper_ids:
@@ -555,20 +586,18 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     payloads: dict[str, list[str]] = {}
     for path in test_paths:
         display = Path(*Path(path).parts[1:]) if strip_first else Path(path)
-        in_braces = [n for n in classes.get(path, [])
-                     if not edges.get((path, n))
-                     and (path, n) not in helper_names]
-        file_line = _braced_lines(display.name, in_braces)
-        file_line[-1] += _edge_suffix(edges.get((path, ""), []))
-        own_lines = [f" {n}{_edge_suffix(edges[(path, n)])}"
+        in_braces = [n + _edge_suffix(n, edges.get((path, n), []), braced=True)
                      for n in classes.get(path, [])
-                     if edges.get((path, n)) and (path, n) not in helper_names]
+                     if (path, n) not in helper_names]
+        file_line = _braced_lines(display.name, in_braces)
+        file_line[-1] += _edge_suffix(Path(path).stem, edges.get((path, ""), []))
+        own_lines: list[str] = []
         helper_lines: list[str] = []
         for h in helpers.get(path, []):
-            components = h.fields or h.params
-            letter = KIND_LETTER.get(h.kind, "C")
-            inner = f"{letter}{{{','.join(components)}}}" if components else letter
-            helper_lines.append(f" *{h.name}({inner})")
+            # helper fields are internals; the public methods are the API
+            helper_lines.append(f" *{h.name}({KIND_LETTER.get(h.kind, 'C')})")
+            if not helper_ids.get(id(h), False):
+                continue  # unreferenced helper: name it, skip its signatures
             for ms in sorted(symbols, key=lambda s: (s.line, s.name)):
                 if (ms.file == path and ms.container == h.name
                         and ms.kind in ("method", "ctor")
@@ -615,7 +644,7 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
         items.append("p{a,b}=pa,pb")
     if re.search(r"\}[\w-]", text):
         items.append("{a,b}s=as,bs")
-    if re.search(r" \+\d+\b", text):
+    if re.search(r"\+\d+\b", text):
         items.append("+N=more")
     if " : " in text:
         items.append(":T=supers")
