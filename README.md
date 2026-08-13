@@ -27,7 +27,7 @@ whole. Token cost stays low by choosing compact facts instead of truncating them
 - **Refactoring** — `×0` flags functions and classes with no statically observed
   project references, and the `· deps` lines show which modules are coupled, before
   you start pulling threads.
-- **Debugging** — call chains, private-name lists, and `⋮N` body-size marks point at
+- **Debugging** — call chains, private-name lists, and `~N` body-size marks point at
   the right file before you open a single one.
 - **Onboarding** — a new teammate, human or agent, reads one block and knows the
   territory: the modules, the vocabulary, the patterns.
@@ -37,32 +37,34 @@ whole. Token cost stays low by choosing compact facts instead of truncating them
 The map of a small Java fixture:
 
 ```
-# hologram · 186 LOC · state 817a0445a77f
-· C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb
+# hologram · 186 LOC · state de55ba22cc9d
+· C/R/I{fields} E{values} · f(args):Ret > project calls · ?=tests · ×0=no static use · !E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · ←A|B=implementors · Self=own type · deps a→b=a uses b
 · deps .→ids | engine→ids
 src
  App(C) ×0
   main(args) ×0 > PricingEngine,evaluate,OrderId.of,ItemId.of
  delta
-  AddOp,RemoveOp(R{nodeId}) : DeltaOp
+  AddOp,RemoveOp(R{nodeId})
    weight():int ×0
   DeltaOp(I) sealed:AddOp|RemoveOp
    weight():int ×0
  engine
   OrderStatus(E{NEW,PAID,SHIPPED})
    isTerminal():boolean ×0
-  PricePort(I)
+  PricePort(I) ←PricingEngine
    quoteFor(order):Quote ×0
    supports(order):boolean ×0
-  PricingEngine(C{basePrices}) : PricePort
+  PricingEngine(C{basePrices})
+   PricingEngine(basePrices)
    quoteFor(order):Quote ×0 > evaluate
    supports(order):boolean ×0
    evaluate(order,items):Quote !UnknownItem > UnknownItemException,Quote
   Quote(R{order,totalCents})
   UnknownItemException(C) : RuntimeException
+   UnknownItemException(item)
  ids
   ItemId,OrderId,UserId(R{value})
-   of(raw):⟨X⟩ > ⟨X⟩
+   of(raw):Self > Self
 ? tests
  src/test
   PricingEngineTest.java{PricingEngineTest,BulkDiscounts}
@@ -72,24 +74,40 @@ Reading it is easier than it looks, and the legend on line 2 teaches the notatio
 any LLM:
 
 - **The tree** mirrors your directory layout, shared path prefixes stated once.
+- **The legend on line 2 lists only the notation this particular map uses**, so
+  small maps carry a small legend.
 - **Types** expose field names rather than redundant field types.
-  `PricingEngine(C{basePrices}) : PricePort` is a class with a `basePrices` field
-  implementing `PricePort`. Records/interfaces use the same braces, enums list
-  values, aliases retain their target, and sealed interfaces retain permitted types.
+  `PricingEngine(C{basePrices})` is a class with a `basePrices` field.
+  Records/interfaces use the same braces, enums list values, aliases retain their
+  target, and sealed interfaces retain permitted types. Python `@dataclass`
+  renders as a record (`R`).
+- **Interface relations are stated once, on the interface**:
+  `PricePort(I) ←PricingEngine` names the implementors, so the domain's
+  variation points read off one line. Non-interface supers keep the `: T` suffix.
 - **Functions** show parameter names and return types: `evaluate(order,items):Quote`.
   Types appear beside names only when overloads would otherwise collide.
+- **Routes and annotations** that carry business meaning render after the
+  signature: `find(id):User @GET/users/{id}` (Spring, JAX-RS, Flask/FastAPI,
+  NestJS), `@app-user-list` (Angular selector), `@Transactional`-style markers.
+  Noise annotations (`@Override`, Lombok, …) never appear. Angular route configs
+  render as `routes=/users→UserListComponent` lines; in React/TSX, JSX usage
+  becomes call edges, so the component render tree is the call graph.
+- **Constants are business rules**: `= config.py: MAX_RETRIES=3,BASE_URL` lists
+  UPPER_SNAKE/static-final constants, with scalar literal values inline.
 - **Call chains** follow the `>`: what a function calls, in order. Variables resolve
   to their declared types (`PricingEngine.evaluate`, not `engine.evaluate`), standard
   library calls are dropped, and chains are transitively reduced — if `a > b` and
   `b > c`, then `a`'s line doesn't repeat `c`.
 - **Same-shape types group.** `ItemId,OrderId,UserId(R{value})` is a family in one
-  entry; `⟨X⟩` stands for each member's own name in the methods they share.
-- **Markers**: `✓` = resolved call from a test · `⋮120` = the body is 120 lines ·
-  `×0` = no statically observed project reference to a function/class/method ·
-  `!UnknownItem` = throws (`Exception` suffix implied) · no `:Ret` = returns void ·
-  `» index.ts: A,B` = barrel re-exports.
-- **Private members** always appear as names. Repeated prefixes factor losslessly:
-  `_extract_{java,python,typescript}` means those three exact identifiers.
+  entry; `Self` stands for each member's own name in the methods they share.
+- **Markers**: `✓` = resolved call from a test · `~120` = the body is 120 lines ·
+  `×0` = no statically observed project reference to a function/class/method
+  (framework entry points — route handlers, schedulers, listeners, Angular
+  lifecycle hooks — are exempt) · `!UnknownItem` = throws (`Exception` suffix
+  implied) · no `:Ret` = returns void · `» index.ts: A,B` = barrel re-exports.
+- **Private members** always appear as names. Repeated prefixes and suffixes
+  factor losslessly: `_extract_{java,python,typescript}` and
+  `{TaskLoader,Workspace}Test` each mean those exact identifiers.
 - **Tests** list every detected test file and its classes. Test functions are omitted
   because their names cost tokens without improving placement guidance.
 - **`· deps a→b`** = module `a` uses types from module `b`: the import architecture
@@ -101,8 +119,10 @@ any LLM:
 
 | Language | What you get |
 |---|---|
-| Java, C#, TypeScript/JS, TSX/JSX | types with named fields, name-based signatures, relations, resolved calls, privates, aliases, object APIs, re-exports |
-| Python | same, via the standard library's `ast` — zero dependencies |
+| Java, C#, TypeScript/JS, TSX/JSX | types with named fields, name-based signatures, relations, resolved calls, privates, aliases, object APIs, re-exports; Java additionally annotations/routes and static-final constants |
+| TypeScript (Angular) | `@Component` selectors, `@Injectable`, constructor DI receiver resolution, `@Input`/`@Output` fields, route configs (`routes=/path→Component`) |
+| TSX/JSX (React) | JSX usage as call edges (the render tree is the call graph), `memo`/`forwardRef`-wrapped components, `React.FC<Props>` prop types |
+| Python | same as Java tier, via the standard library's `ast` — zero dependencies; decorators/routes (Flask, FastAPI), module constants, `@dataclass` as record |
 | Kotlin | classes, data classes, enums, interfaces, named fields, supers, calls, local-variable receiver bindings, `@Throws`/throw extraction |
 | Go, Rust, C, C++ | types, traits (with supertraits), structs, signatures, calls, receiver bindings; C++ additionally throw extraction |
 | PHP | classes, interfaces, traits, enums, typed params, fields, supers, `$x = new T()` bindings, throw extraction |

@@ -143,7 +143,9 @@ Register in four places, then test: `LANG_EXTENSIONS` in `symbols.py`
 the extractor — don't trust node names from memory. The extractor's only job is
 producing `Symbol`s —
 visibility, `bindings` (var/param/field → declared type, which is what turns
-`engine.evaluate` into `PricingEngine.evaluate`), and `size`. Add a fixture under
+`engine.evaluate` into `PricingEngine.evaluate`), `decorators` (verbatim,
+sigil-stripped — the render layer's allowlists in `symbols.py` decide what
+earns tokens), and `size`. Add a fixture under
 `tests/fixtures/polyglot/` and a test in `tests/test_more_langs.py` guarded by a
 `skipUnless(hologram.has_parser(...))` decorator.
 
@@ -163,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,537 LOC · state eb7bb726f5fd
+# hologram · 7,537 LOC · state 48af4152f1ed
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
