@@ -44,6 +44,11 @@ much more (the pymini fixture: −42%).
   states the relation once on the interface instead of `: PricePort` on every
   implementor; >6 implementors summarize to a count. Sealed hierarchies keep
   `sealed:A|B`.
+- **`--lang` filters persist** — the filter is stamped into the map header
+  (`· langs java`) and recalled by every later `build`/`check`/`print`/`diff`
+  that doesn't pass `--lang`, so hooks and manual rebuilds keep a narrowed
+  map narrowed; `--lang all` clears it. Staleness is scoped too: edits to
+  out-of-filter files don't stale the map.
 - **`tools/measure_tokens.py`** — dev-only o200k measurement harness (tiktoken
   in a scratch venv; the runtime stays dependency-free).
 

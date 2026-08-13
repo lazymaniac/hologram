@@ -145,6 +145,13 @@ def _digest_state(digest: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _digest_langs(digest: str) -> set[str] | None:
+    """The `langs` filter recorded in a digest's header line, if any — how a
+    `--lang`-restricted map remembers its own scope across rebuilds."""
+    m = re.search(r"· langs ([\w,]+)", digest.split("\n", 1)[0])
+    return set(m.group(1).split(",")) if m else None
+
+
 def _framework_invoked(sym: Symbol) -> bool:
     """Bearers of route/scheduler/listener decorators are called by the
     framework, so zero static use is expected, not evidence of dead code."""
