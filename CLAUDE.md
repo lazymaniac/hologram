@@ -163,7 +163,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,164 LOC · state b3288f36afaf
+# hologram · 7,191 LOC · state 84f3e686c953
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · @=route/annotation · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -197,7 +197,8 @@ hologram
  - bootstrap.py: _pyz_path,_tool_anchor,_venv_python,_missing_parser_langs,_venv_has_grammars,_bootstrap_or_die
  - cli.py: _hook_python,_tool_invocation,_managed_hook_line,_dead_hook_scripts,_install_hooks,_uninstall,_warn_if_large
  - embed.py: _embed_block,_block_span,_seed_content
- - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_state,_zero_usage_names
+ - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_state,_framework_invoked,
+              _zero_usage_names
  - render.py: _is_test_path,{_tree,_dep,_private,_braced,_test_index}_lines,_strip_exc,_total_loc,_symbol_identity,
               _target_descriptions,_resolved_project_calls,_decorator_notes,_factored_name_tokens,_legend_line
  - symbols.py: _parse_throws,_split_top_commas,_base_type,_heritage

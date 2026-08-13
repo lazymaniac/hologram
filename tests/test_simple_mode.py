@@ -613,6 +613,18 @@ class TightFormatTest(unittest.TestCase):
 
 
 class ZeroUsageMarkerTest(unittest.TestCase):
+    def test_framework_entry_points_not_marked_dead(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "api.py").write_text(
+                '@app.route("/orders")\n'
+                "def orders():\n    pass\n\n"
+                "def plain_dead():\n    pass\n")
+            out = build_digest(root)
+        self.assertIn("plain_dead()×0", out.replace(" ×0", "×0"))
+        self.assertNotIn("orders()×0", out.replace(" ×0", "×0"))
+        self.assertIn("@GET/orders", out)
+
     def test_marks_only_unreferenced_functions_and_classes(self):
         calls = "\n".join(f"    missing{i}()" for i in range(12))
         with tempfile.TemporaryDirectory() as tmp:

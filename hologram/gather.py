@@ -10,8 +10,8 @@ from collections import Counter
 from pathlib import Path
 
 from .extract import extract_file
-from .symbols import (DENYLIST_DIRS, Symbol, _IDENT_RE, detect_language,
-                      strip_comments_and_strings)
+from .symbols import (DENYLIST_DIRS, ENTRYPOINT_DECORATORS, Symbol, _IDENT_RE,
+                      detect_language, strip_comments_and_strings)
 
 
 def scan_files(root: Path) -> list[Path]:
@@ -145,6 +145,18 @@ def _digest_state(digest: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _framework_invoked(sym: Symbol) -> bool:
+    """Bearers of route/scheduler/listener decorators are called by the
+    framework, so zero static use is expected, not evidence of dead code."""
+    web_verbs = ("route", "get", "post", "put", "delete", "patch")
+    for d in sym.decorators:
+        base = d.split("(", 1)[0].strip()
+        tail = base.split(".")[-1]
+        if tail in ENTRYPOINT_DECORATORS and ("." in base or tail not in web_verbs):
+            return True
+    return False
+
+
 def _zero_usage_names(symbols: list[Symbol], usage_tokens: Counter[str]) -> set[str]:
     """Code functions/classes with no statically observed project reference."""
     declarations = Counter(s.name for s in symbols if s.kind != "reexport")
@@ -153,6 +165,7 @@ def _zero_usage_names(symbols: list[Symbol], usage_tokens: Counter[str]) -> set[
         if s.kind in ("fn", "method", "class")
         and s.lang not in ("html", "helm")
         and not (s.name.startswith("__") and s.name.endswith("__"))
+        and not _framework_invoked(s)
         and usage_tokens[s.name] <= declarations[s.name]
     }
 
