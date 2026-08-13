@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hologram-map"
+dynamic = ["version"]
+description = "Compress a codebase into a compact, deterministic markdown map embedded in your coding agent's context files"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Sebastian Fabisz" }]
+requires-python = ">=3.11"
+keywords = ["llm", "agent", "context", "codebase-map", "tree-sitter", "claude", "digest"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+]
+dependencies = []
+
+[project.optional-dependencies]
+grammars = [
+    "tree-sitter",
+    "tree-sitter-bash",
+    "tree-sitter-c",
+    "tree-sitter-c-sharp",
+    "tree-sitter-cpp",
+    "tree-sitter-css",
+    "tree-sitter-go",
+    "tree-sitter-html",
+    "tree-sitter-java",
+    "tree-sitter-kotlin",
+    "tree-sitter-lua",
+    "tree-sitter-rust",
+    "tree-sitter-typescript",
+]
+
+[project.scripts]
+hologram = "hologram:run_cli"
+
+[project.urls]
+Homepage = "https://github.com/lazymaniac/hologram"
+Repository = "https://github.com/lazymaniac/hologram"
+Changelog = "https://github.com/lazymaniac/hologram/blob/main/CHANGELOG.md"
+Issues = "https://github.com/lazymaniac/hologram/issues"
+
+[tool.setuptools]
+py-modules = ["hologram"]
+
+[tool.setuptools.dynamic]
+version = { attr = "hologram.__version__" }

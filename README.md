@@ -113,7 +113,18 @@ any LLM:
 
 ## Getting started
 
-Clone it anywhere and point it at a repo:
+Install from PyPI (the `grammars` extra pulls in every tree-sitter parser up front):
+
+```bash
+pip install "hologram-map[grammars]"
+```
+
+```bash
+hologram init --root /path/to/repo
+```
+
+Or skip installation entirely — it's a single file. Clone it anywhere and point it
+at a repo:
 
 ```bash
 python3 ~/workspace/hologram/hologram.py init --root /path/to/repo
