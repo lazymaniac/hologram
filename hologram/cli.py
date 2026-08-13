@@ -13,6 +13,7 @@ from ._version import __version__
 from .bootstrap import (_bootstrap_or_die, _missing_parser_langs, _pyz_path,
                         _venv_python)
 from .embed import context_targets, embed_digest, embedded_digest
+from .extract import EXTRACTORS
 from .gather import _digest_state, _state_hash, scan_files
 from .render import build_digest, estimate_tokens
 from .symbols import detect_language
@@ -132,6 +133,12 @@ def run_cli(argv: list[str] | None = None) -> int:
     langs = None
     if getattr(args, "lang", None):
         langs = {l.strip() for arg in args.lang for l in arg.split(",") if l.strip()}
+        unknown = langs - set(EXTRACTORS)
+        if unknown:
+            raise SystemExit(
+                f"unknown language{'s' if len(unknown) > 1 else ''}: "
+                f"{', '.join(sorted(unknown))}\n"
+                f"known: {', '.join(sorted(EXTRACTORS))}")
     targets = context_targets(root)
     state = _state_hash(root, langs)
     stale = [t for t in targets if _digest_state(embedded_digest(t)) != state]
