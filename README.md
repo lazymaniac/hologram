@@ -119,19 +119,21 @@ any LLM:
 
 | Language | What you get |
 |---|---|
-| Java, C#, TypeScript/JS, TSX/JSX | types with named fields, name-based signatures, relations, resolved calls, privates, aliases, object APIs, re-exports; Java additionally annotations/routes and static-final constants |
-| TypeScript (Angular) | `@Component` selectors, `@Injectable`, constructor DI receiver resolution, `@Input`/`@Output` fields, route configs (`routes=/path→Component`) |
+| Java, C#, TypeScript/JS, TSX/JSX | types with named fields, name-based signatures, relations, resolved calls, privates, aliases, object APIs, re-exports; Java additionally annotations/routes and static-final constants; C# additionally attributes/routes (ASP.NET) and constants |
+| TypeScript (Angular) | `@Component` selectors, `@Injectable`, constructor DI receiver resolution, `@Input`/`@Output` fields, route configs (`routes=/path→Component`), template→component usage edges (inline `template:` and `templateUrl`) |
 | TSX/JSX (React) | JSX usage as call edges (the render tree is the call graph), `memo`/`forwardRef`-wrapped components, `React.FC<Props>` prop types |
 | Python | same as Java tier, via the standard library's `ast` — zero dependencies; decorators/routes (Flask, FastAPI), module constants, `@dataclass` as record |
-| Kotlin | classes, data classes, enums, interfaces, named fields, supers, calls, local-variable receiver bindings, `@Throws`/throw extraction |
-| Go, Rust, C, C++ | types, traits (with supertraits), structs, signatures, calls, receiver bindings; C++ additionally throw extraction |
-| PHP | classes, interfaces, traits, enums, typed params, fields, supers, `$x = new T()` bindings, throw extraction |
-| Swift | classes, structs, enums, protocols, inheritance, typed params, fields, `let x = T()` bindings |
-| Scala | classes, case classes, traits, objects, extends, typed params, fields, `val x = new T()` bindings |
-| Ruby | classes, modules, methods with param names and call chains; `private`/`protected` sections respected (untyped — no receiver resolution) |
+| Kotlin | classes, data classes, enums, interfaces, named fields, supers, calls, local-variable receiver bindings, `@Throws`/throw extraction, annotations/routes (Spring), `const val` constants |
+| Go | structs, interfaces, signatures, calls, receiver bindings, constants |
+| Rust | structs, traits (with supertraits), enums, signatures, calls, receiver bindings, attribute macros/routes (actix), constants |
+| C, C++ | types, structs, signatures, calls, receiver bindings; C++ additionally throw extraction |
+| PHP | classes, interfaces, traits, enums, typed params, fields, supers, `$x = new T()` bindings, throw extraction, PHP 8 attributes/routes (Symfony), class constants |
+| Swift | classes, structs, enums, protocols, inheritance, typed params, fields, `let x = T()` bindings, throw extraction |
+| Scala | classes, case classes, traits, objects, extends, typed params, fields, `val x = new T()` bindings, throw extraction |
+| Ruby | classes, modules, methods with param names and call chains, `attr_*`/`@ivar` fields; `private`/`protected` sections respected (untyped — no receiver resolution) |
 | Vue, Svelte | the component plus everything in its `<script>` block |
 | Lua | functions and methods with call chains (params by name — it's untyped) |
-| Bash/zsh (`.sh`, `.bash`, `.zsh`) | functions (both definition forms) with command-call chains; `_name` = private |
+| Bash/zsh (`.sh`, `.bash`, `.zsh`) | one node per script with its functions nested under it, command-call chains, variables with literal values (secret-redacted); `_name` = private |
 | HTML | element ids and custom-element tags, plus nested `<script>`/`<style>` blocks run through the JS/CSS extractors (when those grammars are installed) |
 | CSS | class/id selectors, custom properties (`--x`), `@keyframes` names — names only |
 | Helm | template `define` names, `values.yaml` keys, chart name |
