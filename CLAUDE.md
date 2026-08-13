@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,914 LOC · state 7d0ad84bc168
+# hologram · 7,954 LOC · state 1203afcf2e68
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -227,7 +227,7 @@ hologram
   - php.py: _php_{vis,var_name,params,return,call_entry,local_bindings,raises,attributes,fn_symbol},_extract_php
   - python.py: _py_{param_facts,calls,raises,bindings,decorators,fn_symbol},_extract_python
   - ruby.py: _rb_{call_entry,params,method_symbol,walk},_extract_ruby
-  - rust.py: _rs_{vis,params,param_names,call_entry,local_bindings,fn_symbol},_extract_rust
+  - rust.py: _rs_{vis,params,param_names,call_entry,local_bindings,attributes,fn_symbol},_extract_rust
   - scala.py: _sc_{vis,params,return,call_entry,local_bindings,fn_symbol},_extract_scala
   - swift.py: _sw_{vis,params,return,call_entry,local_bindings,fn_symbol},_extract_swift
   - ts.py: _ts_{exported,params,param_names,return,call_entry,calls,decorators,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,unwrap_hoc,fc_props,route_entries,top_level_arrows,aliases_and_reexports},
