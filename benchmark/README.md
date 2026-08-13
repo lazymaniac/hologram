@@ -136,3 +136,38 @@ Output quality, reconstructed from every run's Write/Edit payloads:
    (e.g. expected collaborators must appear in new test imports).
 4. Reps matter: single-rep effort numbers from earlier in the round were
    outliers in both directions; n=3 means were stable.
+
+### Validation round — 0.6.0 map features (sonnet + haiku, effort=low, 3 reps)
+
+Four real-world task shapes on the same private corpus, run at pinned low
+reasoning effort against the 0.6.0 map (coverage edges + test helpers):
+
+| model | cond | kind | accepted | answer ok | scope ok | duplication | reads | searches | turns |
+|---|---|---|---|---|---|---|---|---|---|
+| sonnet | A | navigate | 100% | 83% | — | 0% | 0.5 | 1.0 | 2.5 |
+| sonnet | B | navigate | 100% | 67% | — | 0% | 2.3 | 3.0 | 1.8 |
+| haiku | A | reuse | 100% | — | — | **0%** | 7.0 | 2.3 | 13.3 |
+| haiku | B | reuse | 100% | — | — | **33%** | 19.0 | 11.7 | 15.7 |
+| haiku | A | navigate | 100% | 50% | — | 0% | 0.8 | 0.7 | 2.7 |
+| haiku | B | navigate | 100% | 50% | — | 0% | 7.3 | 4.8 | 4.8 |
+
+- **The only duplication event of the entire measurement program landed in
+  haiku-control**: one run re-invented an existing value helper the map
+  names; all map-condition runs reused it. At the weakest tier and lowest
+  effort — where context must do the work reasoning can't — the map is the
+  difference between reuse and re-invention.
+- **Coverage-awareness converged**: a well-posed "ensure coverage exists"
+  task was answered correctly by both conditions (existing test cited, no
+  duplicate written). An earlier, imperative phrasing of the same task made
+  even map-equipped runs write duplicate tests — task phrasing dominates,
+  and coverage edges name symbols, not behaviors; a behavior-level question
+  still needs a grep.
+- Map condition again halves exploration for haiku (reads 7 vs 19 on reuse,
+  0.8 vs 7.3 on navigate).
+- Harness lesson that cost two restarts, now fixed in the tool: corpora
+  whose conventions make agents commit their own work blank a
+  working-tree diff — all judges now diff against the recorded setup
+  commit.
+
+Cross-round comparisons to the 0.5.0 tables are directional only: these
+runs pinned `--effort low`; the earlier rounds ran at CLI defaults.

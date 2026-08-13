@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 8,763 LOC · state 86de37f19762
+# hologram · 8,773 LOC · state 787b385a8c76
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -177,10 +177,10 @@ benchmark
  make_workspace(corpus,ws,condition,lang):Path ✓ > _block_span
  parse_transcript(text):dict ~45 ✓
  report(rows,anon):str ~54 ✓
- run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,effort):dict ✓ > make_workspace,_digest_of,judge_reuse,judge_scope,parse_transcript,drop_workspace
+ run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,effort):dict ✓ > make_workspace,_digest_of,judge_reuse,judge_scope,parse_transcript,drop_workspace,_setup_sha
  Config(R{corpus,tasks,model,max_turns,lang,effort})
  Task(R{id,kind,prompt,accept_cmd,expect_reuse,expect_answer,expect_in_new_code,scope_in_tests,max_turns,effort})
- - bench.py: _sig_lines,_fn_name,_chain,_added_lines,_effort_invocation,_digest_of,_dry_runner
+ - bench.py: _sig_lines,_fn_name,_chain,_setup_sha,_added_lines,_effort_invocation,_digest_of,_dry_runner
 hologram
  build_digest(root,langs,targets):str ✓ > _gather,_dep_lines,render_simple,_zero_usage_names
  const_signature(name,value_text):str ✓
