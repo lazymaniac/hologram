@@ -76,9 +76,11 @@ def embed_digest(path: Path, digest: str) -> None:
 # none of them, CLAUDE.md is created.
 CONTEXT_FILES = (
     "CLAUDE.md",                        # Claude Code
-    "AGENTS.md",                        # Codex, opencode, Amp, Jules, Zed
+    "AGENTS.md",                        # Codex, opencode, Jules, Zed
+    "AGENT.md",                          # Amp
     "GEMINI.md",                        # Gemini CLI
     "QWEN.md",                          # Qwen Code
+    "CONVENTIONS.md",                    # Aider
     ".clinerules",                       # Cline (single-file form)
     ".cursorrules",                      # Cursor (legacy single-file form)
     ".windsurfrules",                    # Windsurf (legacy single-file form)
@@ -93,7 +95,17 @@ CONTEXT_DIRS = (
     (".roo/rules", "hologram.md"),
     (".windsurf/rules", "hologram.md"),
     (".github/instructions", "hologram.instructions.md"),
+    (".junie", "guidelines.md"),         # JetBrains Junie
+    (".continue/rules", "hologram.md"),  # Continue
+    (".kiro/steering", "hologram.md"),   # Kiro (steering docs load by default)
 )
+
+# Path-tail seeds win over suffix seeds: .continue rules need front matter while
+# the same basename under .clinerules/.roo/.windsurf/.kiro must stay seedless.
+_DIR_SEEDS = {
+    ".continue/rules/hologram.md":
+        "---\nname: hologram project map\nalwaysApply: true\n---\n",
+}
 
 _SEEDS = {
     ".mdc": "---\ndescription: hologram project map\nalwaysApply: true\n---\n",
@@ -103,6 +115,9 @@ _SEEDS = {
 
 def _seed_content(path: Path) -> str:
     """Front matter a newly created rule file needs to be picked up by its agent."""
+    tail = "/".join(path.parts[-3:])
+    if tail in _DIR_SEEDS:
+        return _DIR_SEEDS[tail]
     for suffix, seed in _SEEDS.items():
         if path.name.endswith(suffix):
             return seed
