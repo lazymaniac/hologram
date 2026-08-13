@@ -547,7 +547,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   state: str = "",
                   deps: list[str] | None = None,
                   zero_usage: set[str] | None = None,
-                  langs: set[str] | None = None) -> str:
+                  langs: set[str] | None = None,
+                  targets: list[str] | None = None) -> str:
     """Compact project facts as a package trie.
 
     pkg
@@ -767,6 +768,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     state_part = f" · state {state}" if state else ""
     if langs:
         state_part += f" · langs {','.join(sorted(langs))}"
+    if targets:
+        state_part += f" · targets {','.join(sorted(targets))}"
     dep_part = ("\n".join(deps) + "\n") if deps else ""
     body = _tree_lines(payload_by_dir)
     tests = _test_index_lines(files, symbols, root)
@@ -778,10 +781,11 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     return header + dep_part + "\n".join(body) + "\n"
 
 
-def build_digest(root: Path, langs: set[str] | None = None) -> str:
+def build_digest(root: Path, langs: set[str] | None = None,
+                 targets: list[str] | None = None) -> str:
     files, symbols, file_tokens, usage_tokens, state = _gather(root, langs)
     deps = _dep_lines(symbols, file_tokens)
     return render_simple(root, symbols, files, state=state, deps=deps,
                          zero_usage=_zero_usage_names(symbols, usage_tokens),
-                         langs=langs)
+                         langs=langs, targets=targets)
 

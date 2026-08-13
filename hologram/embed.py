@@ -129,3 +129,9 @@ def context_targets(root: Path) -> list[Path]:
                 if (root / rel).is_dir()]
     return targets or [root / "CLAUDE.md"]
 
+
+def _target_candidates(root: Path) -> list[Path]:
+    """The full universe --target values may name, present on disk or not."""
+    return ([root / rel for rel in CONTEXT_FILES]
+            + [root / rel / name for rel, name in CONTEXT_DIRS])
+

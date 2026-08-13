@@ -152,6 +152,13 @@ def _digest_langs(digest: str) -> set[str] | None:
     return set(m.group(1).split(",")) if m else None
 
 
+def _digest_targets(digest: str) -> list[str] | None:
+    """The `targets` restriction recorded in a digest's header line, if any —
+    which context files carry the map, remembered across rebuilds."""
+    m = re.search(r"· targets ([^·\n]+)", digest.split("\n", 1)[0])
+    return [t.strip() for t in m.group(1).split(",")] if m else None
+
+
 def _framework_invoked(sym: Symbol) -> bool:
     """Bearers of route/scheduler/listener decorators are called by the
     framework, so zero static use is expected, not evidence of dead code."""
