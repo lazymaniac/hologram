@@ -57,6 +57,13 @@ def _ts_return(node) -> str | None:
 
 
 def _ts_call_entry(n) -> tuple[str, str]:
+    if n.type in ("jsx_opening_element", "jsx_self_closing_element"):
+        nm = _ast_field(n, "name")
+        text = _ast_text(nm) if nm is not None else ""
+        # React convention: components are capitalized, intrinsics lowercase
+        if not text.split(".")[-1][:1].isupper():
+            return "", ""
+        return text.split(".")[-1], text
     if n.type == "new_expression":
         entry = re.sub(r"<.*", "", _ast_text(_ast_field(n, "constructor")))
         return entry, entry
@@ -76,7 +83,9 @@ def _ts_call_entry(n) -> tuple[str, str]:
 
 
 def _ts_calls(body, own_name: str) -> list[str]:
-    return _ast_calls(body, own_name, ("call_expression", "new_expression"),
+    return _ast_calls(body, own_name,
+                      ("call_expression", "new_expression",
+                       "jsx_opening_element", "jsx_self_closing_element"),
                       _ts_call_entry)
 
 
@@ -178,6 +187,58 @@ _TS_FN_VALUES = ("arrow_function", "function_expression")
 
 _CONST_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
 
+_TS_HOCS = {"memo", "React.memo", "forwardRef", "React.forwardRef", "observer"}
+
+_TS_FC_RE = re.compile(r"(?:React\.)?(?:FC|FunctionComponent)<(.+)>$")
+
+
+def _ts_unwrap_hoc(val) -> tuple:
+    """(inner_fn_node, hoc_tail) when val is memo(...)/forwardRef(...) around a
+    function; (None, None) otherwise. HOC-wrapped components otherwise produce
+    no symbol at all."""
+    if val is None or val.type != "call_expression":
+        return None, None
+    callee = _ast_text(_ast_field(val, "function"))
+    if callee not in _TS_HOCS:
+        return None, None
+    args = _ast_field(val, "arguments")
+    for a in (args.children if args is not None else ()):
+        if a.type in _TS_FN_VALUES:
+            return a, callee.split(".")[-1]
+    return None, None
+
+
+def _ts_fc_props(decl) -> str | None:
+    """Props type argument from a declarator annotated `: React.FC<Props>`."""
+    t = _ast_field(decl, "type")
+    if t is None:
+        return None
+    m = _TS_FC_RE.search(tight_type(_ast_text(t).lstrip(":").strip()))
+    return m.group(1) if m else None
+
+
+def _ts_route_entries(arr) -> list[str]:
+    """`/path→Component` pairs from an Angular route-config array literal."""
+    entries: list[str] = []
+    for obj in arr.children:
+        if obj.type != "object":
+            continue
+        path = comp = None
+        for pair in obj.children:
+            if pair.type != "pair":
+                continue
+            key = _ast_text(_ast_field(pair, "key"))
+            val = _ast_field(pair, "value")
+            if key == "path" and val is not None and val.type == "string":
+                path = _ast_text(val).strip("'\"")
+            elif key == "component" and val is not None:
+                comp = _ast_text(val)
+        if path is not None and comp:
+            entries.append(f"/{path}→{comp}")
+        elif path is not None:
+            entries.append(f"/{path}")
+    return entries
+
 
 def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
     """Module-scope `const f = (…) => …` plus object-literal APIs
@@ -197,13 +258,36 @@ def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
                 val = _ast_field(d, "value")
                 if val is None:
                     continue
-                if val.type in _TS_FN_VALUES:
-                    symbols.append(_ts_fn_symbol(
+                inner, hoc = _ts_unwrap_hoc(val)
+                if val.type in _TS_FN_VALUES or inner is not None:
+                    sym = _ts_fn_symbol(
                         d, rel, None, "pub" if exported else "priv",
-                        name=name, fn_node=val))
+                        name=name, fn_node=inner if inner is not None else val)
+                    if hoc:
+                        sym.decorators.append(hoc)
+                    props = _ts_fc_props(d)
+                    if props and all(p == "?" for p in sym.params):
+                        sym.params = [props]
+                        sym.signature = f"{name}({props})"
+                    symbols.append(sym)
+                elif val.type == "array":
+                    routes = _ts_route_entries(val)
+                    if routes:
+                        symbols.append(Symbol(
+                            name=name, kind="const", file=rel,
+                            line=d.start_point[0] + 1,
+                            signature=f"{name}={','.join(routes)}",
+                            visibility="pub" if exported else "priv",
+                            lang="typescript"))
+                    elif _CONST_NAME_RE.fullmatch(name):
+                        symbols.append(Symbol(
+                            name=name, kind="const", file=rel,
+                            line=d.start_point[0] + 1, signature=name,
+                            visibility="pub" if exported else "priv",
+                            lang="typescript"))
                 elif _CONST_NAME_RE.fullmatch(name) and val.type in (
-                        "string", "number", "true", "false", "array", "object"):
-                    if val.type in ("array", "object"):
+                        "string", "number", "true", "false", "object"):
+                    if val.type == "object":
                         csig = name  # container consts: name only
                     else:
                         text = _ast_text(val)
@@ -326,6 +410,31 @@ def _extract_ts(text: str, rel: str, lang: str = "typescript") -> list[Symbol]:
             fn, rel, None, "pub" if _ts_exported(fn) else "priv"))
     symbols.extend(_ts_top_level_arrows(tree.root_node, rel))
     symbols.extend(_ts_aliases_and_reexports(tree.root_node, rel))
+    for ex in tree.root_node.children:
+        if ex.type != "export_statement":
+            continue
+        for child in ex.children:
+            inner, hoc = _ts_unwrap_hoc(child)
+            if inner is not None and _ast_field(inner, "name") is not None:
+                sym = _ts_fn_symbol(child, rel, None, "pub",
+                                    name=_ast_text(_ast_field(inner, "name")),
+                                    fn_node=inner)
+                sym.decorators.append(hoc)
+                symbols.append(sym)
+    for call in _ast_collect(tree.root_node, ("call_expression",)):
+        fn_text = _ast_text(_ast_field(call, "function"))
+        if not fn_text.endswith((".forRoot", ".forChild")):
+            continue
+        args = _ast_field(call, "arguments")
+        for a in (args.children if args is not None else ()):
+            if a.type == "array":
+                routes = _ts_route_entries(a)
+                if routes:
+                    symbols.append(Symbol(
+                        name="routes", kind="const", file=rel,
+                        line=call.start_point[0] + 1,
+                        signature=f"routes={','.join(routes)}",
+                        visibility="pub", lang="typescript"))
     return symbols
 
 

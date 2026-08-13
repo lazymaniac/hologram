@@ -163,7 +163,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,362 LOC · state 3b5c23f25abe
+# hologram · 7,537 LOC · state eb7bb726f5fd
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -225,7 +225,7 @@ hologram
   - rust.py: _rs_{vis,params,param_names,call_entry,local_bindings,fn_symbol},_extract_rust
   - scala.py: _sc_{vis,params,return,call_entry,local_bindings,fn_symbol},_extract_scala
   - swift.py: _sw_{vis,params,return,call_entry,local_bindings,fn_symbol},_extract_swift
-  - ts.py: _ts_{exported,params,param_names,return,call_entry,calls,decorators,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,top_level_arrows,aliases_and_reexports},
+  - ts.py: _ts_{exported,params,param_names,return,call_entry,calls,decorators,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,unwrap_hoc,fc_props,route_entries,top_level_arrows,aliases_and_reexports},
            _extract_{ts,tsx,sfc}
 tools
  measure_tokens.py:main(argv):int
@@ -234,8 +234,8 @@ tools
  test_cli.py{{CliBuild,InitHooks,InitLang,Bootstrap,PrintCommand,Uninstall,SizeWarning,HookPythonSelection}Test}
  test_extract_langs.py{{Python,TypeScript,Decorator}ExtractTest,ArrowFunctionTest}
  test_freshness_and_markers.py{{StateAndCheck,TestedMarker,SizeMarker,TestIndex,DepsMap,Embed,ContextTargets,DiffCommand}Test}
- test_more_langs.py{{Go,Rust,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Php,Swift,Scala}ExtractTest,
-                    {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test}
+ test_more_langs.py{{Go,Rust,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Angular,Tsx,Sfc,Ruby,Php,Swift,Scala}ExtractTest,
+                    {CExtract,HtmlNestedBlocks,TsGaps,ReactComponent,TsLossRecovery}Test}
  test_simple_mode.py{{CallExtraction,SimpleDigest,SameShapeGrouping,RenderUnit,EnumValues,InterfaceMethod,QualifiedCall,FieldNames,ReconstructablePath,LanguageFilter,Relations,InterfaceImplementors,Legend,ConstExtract,RouteRender,Throws,TransitiveReduction,VoidOmission,GroupExtras,PrivateMembers,CompactMapContract,TightFormat,ZeroUsageMarker}Test}
  test_treesitter.py{TreeSitterJavaTest,MissingParserErrorTest}
 ```
