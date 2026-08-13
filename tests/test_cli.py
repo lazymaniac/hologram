@@ -105,6 +105,29 @@ class InitLangTest(unittest.TestCase):
             self.assertIn("--lang java", hook)
 
 
+@needs_java
+class HookQuotingTest(unittest.TestCase):
+    def test_dollar_in_repo_path_is_escaped_in_hook_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp) / "x$(touch pwned)"
+            outer.mkdir()
+            repo = _make_repo(outer)
+            run_cli(["init", "--root", str(repo), "--quiet"])
+            hook = (repo / ".git" / "hooks" / "post-commit").read_text()
+        self.assertIn("x\\$(touch pwned)", hook)
+        self.assertNotIn('"' + str(repo) + '"', hook)  # raw form absent
+
+    def test_reinit_replaces_escaped_line_not_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp) / "y$z"
+            outer.mkdir()
+            repo = _make_repo(outer)
+            run_cli(["init", "--root", str(repo), "--quiet"])
+            run_cli(["init", "--root", str(repo), "--quiet"])
+            hook = (repo / ".git" / "hooks" / "post-commit").read_text()
+        self.assertEqual(hook.count("build --root"), 1)
+
+
 class LangFilterPersistenceTest(unittest.TestCase):
     """--lang is stamped into the map header and recalled by later commands."""
 

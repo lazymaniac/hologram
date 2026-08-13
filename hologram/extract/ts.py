@@ -4,7 +4,8 @@ import re
 
 from pathlib import Path
 
-from ..symbols import (Symbol, _IDENT_RE, _base_type, _heritage, _split_top_commas, tight_type)
+from ..symbols import (Symbol, _IDENT_RE, _base_type, _heritage,
+                       _split_top_commas, const_signature, tight_type)
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text, _body_lines)
 
 # ---------------------------------------------------------------------------
@@ -287,11 +288,8 @@ def _ts_top_level_arrows(root_node, rel: str) -> list[Symbol]:
                             lang="typescript"))
                 elif _CONST_NAME_RE.fullmatch(name) and val.type in (
                         "string", "number", "true", "false", "object"):
-                    if val.type == "object":
-                        csig = name  # container consts: name only
-                    else:
-                        text = _ast_text(val)
-                        csig = f"{name}={text}" if len(text) <= 24 else name
+                    csig = const_signature(
+                        name, None if val.type == "object" else _ast_text(val))
                     symbols.append(Symbol(
                         name=name, kind="const", file=rel,
                         line=d.start_point[0] + 1, signature=csig,

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import re
 
-from ..symbols import (Symbol, _base_type, _heritage, _parse_throws, split_params,
-                       tight_type)
+from ..symbols import (Symbol, _base_type, _heritage, _parse_throws,
+                       const_signature, split_params, tight_type)
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text, _body_lines)
 
 # ---------------------------------------------------------------------------
@@ -201,10 +201,9 @@ def _extract_java(text: str, rel: str) -> list[Symbol]:
                 if not _CONST_NAME_RE.fullmatch(cname) or val is None:
                     continue
                 if val.type.endswith("_literal") or val.type in ("true", "false"):
-                    text = _ast_text(val)
-                    csig = f"{cname}={text}" if len(text) <= 24 else cname
+                    csig = const_signature(cname, _ast_text(val))
                 elif val.type == "array_initializer":
-                    csig = cname
+                    csig = const_signature(cname, None)
                 else:
                     continue
                 const_names.add(cname)

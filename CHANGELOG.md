@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Secret-shaped constant values are redacted from the map.** The map is
+  copied into context files that get committed, so constants whose *name*
+  looks secret-bearing (`KEY`/`SECRET`/`TOKEN`/`PASSWORD`/`SALT`/…) or whose
+  *value* matches a known credential prefix (`sk-`, `ghp_`, `AKIA`, `eyJ`,
+  `-----BEGIN`, …) now render name-only. One shared gate
+  (`symbols.const_signature`) is used by every extractor.
+- **Git-hook lines escape shell-active characters** in interpolated paths
+  (`$`, backtick, backslash); a repository path like `x$(cmd)` no longer
+  executes when the hook runs, and paths containing a double quote are
+  refused outright. Re-`init` still recognizes and replaces pre-existing
+  unescaped lines.
+
 ## [0.3.0] - 2026-08-13
 
 Theme: more business-logic semantics for fewer tokens. Every fact added in

@@ -108,6 +108,26 @@ ENTRYPOINT_DECORATORS = (set(ROUTE_DECORATORS) | {
     "Scheduled", "EventListener", "KafkaListener", "fixture", "Component",
 }) - {"Path"}
 
+# Constant values matching either pattern render name-only. The map is copied
+# into context files that get committed, so a secret-shaped value must never
+# survive rendering even though it already sits in the source.
+_SECRET_NAME_RE = re.compile(
+    r"(?i)(?:^|_)(KEY|SECRET|TOKEN|PASSWORD|PASSWD|PWD|CREDENTIALS?|APIKEY|"
+    r"AUTH|BEARER|SALT|NONCE|DSN|SESSION|COOKIE|SIGNATURE)(?:_|$|S(?:_|$))")
+_SECRET_VALUE_RE = re.compile(
+    r"""['"](sk-|pk-|ghp_|gho_|github_pat_|glpat-|AKIA|ASIA|xox[a-z]-|eyJ|"""
+    r"""-----BEGIN|AIza|ya29\.)""")
+
+
+def const_signature(name: str, value_text: str | None) -> str:
+    """Display form of a constant: NAME=value for short scalar literals,
+    name-only for long values, containers, and anything secret-shaped."""
+    if (value_text is None or len(value_text) > 24
+            or _SECRET_NAME_RE.search(name)
+            or _SECRET_VALUE_RE.match(value_text)):
+        return name
+    return f"{name}={value_text}"
+
 
 def detect_language(path: Path) -> str | None:
     return LANG_EXTENSIONS.get(path.suffix)
