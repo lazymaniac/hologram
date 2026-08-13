@@ -253,7 +253,8 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
                          for rx in task.expect_answer)
                      if task.expect_answer else None)
         return {"task": task.id, "kind": task.kind, "condition": condition,
-                "rep": rep, "accepted": accepted, "answer_ok": answer_ok,
+                "rep": rep, "model": model,
+                "accepted": accepted, "answer_ok": answer_ok,
                 "reused": verdict["reused"], "duplicated": verdict["duplicated"],
                 "new_lines": len(verdict["new_lines"]), **metrics}
     finally:
@@ -331,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="task ids to run (default: all)")
     p_run.add_argument("--dry-run", action="store_true",
                        help="exercise the harness without calling claude")
+    p_run.add_argument("--model", default=None,
+                       help="override the task file's model")
     p_rep = sub.add_parser("report")
     p_rep.add_argument("--results", type=Path,
                        default=Path(__file__).parent / "results")
@@ -349,6 +352,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cfg = load_tasks(args.taskfile)
+    if args.model:
+        cfg.model = args.model
     runner = _dry_runner if args.dry_run else claude_runner
     runs_path = args.results / "runs.jsonl"
     args.results.mkdir(parents=True, exist_ok=True)
