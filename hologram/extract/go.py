@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-from ..symbols import Symbol, _base_type, tight_type
+from ..symbols import Symbol, _base_type, const_signature, tight_type
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text, _body_lines)
 
 # ---------------------------------------------------------------------------
@@ -175,5 +175,21 @@ def _extract_go(text: str, rel: str) -> list[Symbol]:
             size=_body_lines(body),
             bindings=binds,
         ))
+    for spec in _ast_collect(tree.root_node, ("const_spec",)):
+        cname = _ast_text(next((c for c in spec.children
+                                if c.type == "identifier"), None))
+        if not cname:
+            continue
+        exprs = next((c for c in spec.children
+                      if c.type == "expression_list"), None)
+        lit = next((c for c in (exprs.children if exprs is not None else ())
+                    if c.type in ("int_literal", "float_literal",
+                                  "interpreted_string_literal",
+                                  "raw_string_literal", "true", "false")), None)
+        symbols.append(Symbol(
+            name=cname, kind="const", file=rel, line=spec.start_point[0] + 1,
+            signature=const_signature(cname,
+                                      _ast_text(lit) if lit is not None else None),
+            visibility=_go_vis(cname), lang="go"))
     return symbols
 

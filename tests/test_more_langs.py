@@ -21,6 +21,14 @@ class GoExtractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.syms = extract_file(POLY / "sample.go", POLY)
 
+    def test_consts(self):
+        consts = {s.name: (s.signature, s.visibility)
+                  for s in self.syms if s.kind == "const"}
+        self.assertEqual(consts["MaxItems"], ("MaxItems=10", "pub"))
+        self.assertEqual(consts["Topic"], ('Topic="items.changed"', "pub"))
+        self.assertEqual(consts["internal"][1], "priv")
+        self.assertEqual(consts["First"][0], "First")  # iota: name only
+
     def test_struct_with_fields_and_interface(self):
         store = next(s for s in self.syms if s.name == "Store")
         self.assertEqual(store.kind, "class")

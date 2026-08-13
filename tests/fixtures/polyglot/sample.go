@@ -20,3 +20,11 @@ func (s *Store) Get(id string) (Item, error) {
 }
 
 func (s *Store) lookup(id string) Item { return s.items[id] }
+
+const MaxItems = 10
+
+const (
+	Topic    = "items.changed"
+	internal = 1
+	First    = iota
+)
