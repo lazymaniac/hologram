@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 
-from ..symbols import Symbol, _IDENT_RE, _base_type, tight_type
+from ..symbols import (Symbol, _IDENT_RE, _base_type, const_signature,
+                       tight_type)
 from ..treesitter import _PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text
 
 # ---------------------------------------------------------------------------
@@ -127,6 +128,54 @@ def _kt_local_bindings(body) -> dict[str, str]:
     return binds
 
 
+_KT_CONST_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
+def _kt_annotations(node) -> list[str]:
+    """@Annotation entries: inside the declaration's `modifiers` in current
+    grammars; older grammar versions hang them off preceding siblings, so walk
+    those too (annotation / annotated_expression shapes), defensively."""
+    decs: list[str] = []
+    sib = node.prev_named_sibling
+    while sib is not None and sib.type in ("annotation", "annotated_expression"):
+        decs[:0] = [tight_type(_ast_text(a).lstrip("@"))
+                    for a in ([sib] if sib.type == "annotation"
+                              else _ast_collect(sib, ("annotation",)))]
+        sib = sib.prev_named_sibling
+    mods = next((c for c in node.children if c.type == "modifiers"), None)
+    decs.extend(tight_type(_ast_text(a).lstrip("@"))
+                for a in (mods.children if mods is not None else ())
+                if a.type == "annotation")
+    return decs
+
+
+def _kt_const_symbols(scope, rel: str) -> list[Symbol]:
+    """`const val NAME = literal` anywhere in scope (top level, object bodies,
+    companion objects) as kind=const symbols."""
+    out: list[Symbol] = []
+    for prop in _ast_collect(scope, ("property_declaration",)):
+        mods = next((c for c in prop.children if c.type == "modifiers"), None)
+        if mods is None or not any(c.type == "property_modifier"
+                                   and _ast_text(c) == "const"
+                                   for c in mods.children):
+            continue
+        decl = next((c for c in prop.children
+                     if c.type == "variable_declaration"), None)
+        ident = next((c for c in (decl.children if decl is not None else ())
+                      if c.type == "identifier"), None)
+        if ident is None or not _KT_CONST_NAME_RE.fullmatch(_ast_text(ident)):
+            continue
+        value = next((_ast_text(c) for c in prop.children
+                      if c.type.endswith("_literal")
+                      or c.type in ("string_literal", "boolean_literal")), None)
+        out.append(Symbol(
+            name=_ast_text(ident), kind="const", file=rel,
+            line=prop.start_point[0] + 1,
+            signature=const_signature(_ast_text(ident), value),
+            visibility=_kt_vis(prop), lang="kotlin"))
+    return out
+
+
 def _kt_fn_symbol(fn, rel: str, container: str | None, vis: str,
                   class_binds: dict[str, str]) -> Symbol:
     name = _ast_text(_ast_field(fn, "name"))
@@ -144,6 +193,7 @@ def _kt_fn_symbol(fn, rel: str, container: str | None, vis: str,
         calls=_ast_calls(body, name, ("call_expression",), _kt_call_entry),
         bindings={**class_binds, **binds, **_kt_local_bindings(body)},
         raises=_kt_raises(fn, body),
+        decorators=_kt_annotations(fn),
         size=(body.end_point[0] - body.start_point[0] + 1) if body is not None else 0,
     )
 
@@ -199,6 +249,7 @@ def _extract_kotlin(text: str, rel: str) -> list[Symbol]:
             signature=f"{kind} {name}", params=cparams,
             fields=[] if is_enum else list(dict.fromkeys(class_fields)), supers=supers,
             visibility=_kt_vis(tn), lang="kotlin",
+            decorators=_kt_annotations(tn),
         ))
         if body is not None:
             for fn in body.children:
@@ -208,5 +259,6 @@ def _extract_kotlin(text: str, rel: str) -> list[Symbol]:
     for fn in tree.root_node.children:
         if fn.type == "function_declaration":
             symbols.append(_kt_fn_symbol(fn, rel, None, _kt_vis(fn), {}))
+    symbols.extend(_kt_const_symbols(tree.root_node, rel))
     return symbols
 
