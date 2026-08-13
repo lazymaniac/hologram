@@ -3,7 +3,7 @@ from __future__ import annotations
 import ast
 import re
 
-from ..symbols import Symbol, _base_type, tight_type
+from ..symbols import Symbol, _base_type, const_signature, tight_type
 
 # ---------------------------------------------------------------------------
 # Python extraction (stdlib ast — precise and dependency-free)
@@ -157,10 +157,9 @@ def _extract_python(text: str, rel: str) -> list[Symbol]:
                 continue
             value = node.value
             if isinstance(value, ast.Constant):
-                text = tight_type(ast.unparse(value))
-                sig = f"{target.id}={text}" if len(text) <= 24 else target.id
+                sig = const_signature(target.id, tight_type(ast.unparse(value)))
             elif isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Dict)):
-                sig = target.id  # container consts: name only, values stay in code
+                sig = const_signature(target.id, None)  # containers: name only
             else:
                 continue
             symbols.append(Symbol(

@@ -376,6 +376,50 @@ class ConstExtractTest(unittest.TestCase):
         self.assertNotIn("C{MAX_PAGE", out)  # not restated as fields
 
 
+class SecretRedactionTest(unittest.TestCase):
+    """Secret-shaped constant values never reach the map — the map is copied
+    into context files that get committed."""
+
+    def test_secret_named_constants_render_name_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.py").write_text(
+                "API_KEY = 'abcd1234'\n"
+                "AUTH_TOKEN = 'tok'\n"
+                "DB_PASSWORD = 'hunter2'\n"
+                "SECRET_SALT = 'x'\n"
+                "SESSION_COOKIE = 'sid'\n"
+                "MAX_RETRIES = 3\n")
+            out = build_digest(root)
+        self.assertIn("API_KEY", out)          # the name stays informative
+        self.assertNotIn("abcd1234", out)
+        self.assertNotIn("hunter2", out)
+        self.assertNotIn("tok", out.replace("AUTH_TOKEN", ""))
+        self.assertNotIn("sid", out.replace("SESSION_COOKIE", ""))
+        self.assertIn("MAX_RETRIES=3", out)    # innocent values still inline
+
+    def test_secret_shaped_values_redacted_regardless_of_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config.py").write_text(
+                "STRIPE = 'sk-live-abc'\n"
+                "GH = 'ghp_zzzzz'\n"
+                "JWT = 'eyJhbGciOi'\n"
+                "AWS = 'AKIAIOSFODNN7'\n")
+            out = build_digest(root)
+        for leaked in ("sk-live", "ghp_", "eyJ", "AKIA"):
+            self.assertNotIn(leaked, out)
+        self.assertIn("STRIPE", out)
+
+    def test_helper_is_the_single_shared_gate(self):
+        from hologram.symbols import const_signature
+        self.assertEqual(const_signature("TIMEOUT", "30"), "TIMEOUT=30")
+        self.assertEqual(const_signature("PRIVATE_KEY_PATH", "'k.pem'"),
+                         "PRIVATE_KEY_PATH")
+        self.assertEqual(const_signature("URL", "'" + "x" * 30 + "'"), "URL")
+        self.assertEqual(const_signature("TIERS", None), "TIERS")
+
+
 class RouteRenderTest(unittest.TestCase):
     def _render(self, *syms):
         with tempfile.TemporaryDirectory() as tmp:

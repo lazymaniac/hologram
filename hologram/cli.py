@@ -33,16 +33,25 @@ def _hook_python() -> str:
     return str(venv_py) if venv_py.exists() else "python3"
 
 
+def _sh_dq(s: str) -> str:
+    """Escape a path for interpolation inside a double-quoted shell word.
+    Without this a directory named `x$(cmd)` would execute when the hook runs."""
+    if '"' in s or "\n" in s:
+        raise SystemExit("hologram: refusing to write a git hook for a path "
+                         "containing a double quote or newline: " + s)
+    return s.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`")
+
+
 def _tool_invocation() -> str:
     """Command prefix a hook uses to run hologram — the same delivery mode that is
     running now: zipapp path, checkout shim, or `-m hologram` from a pip install."""
     pyz = _pyz_path()
     if pyz is not None:
-        return f'"{_hook_python()}" "{pyz}"'
+        return f'"{_sh_dq(_hook_python())}" "{_sh_dq(str(pyz))}"'
     shim = Path(__file__).resolve().parent.parent / "hologram.py"
     if shim.is_file():
-        return f'"{_hook_python()}" "{shim}"'
-    return f'"{sys.executable}" -m hologram'
+        return f'"{_sh_dq(_hook_python())}" "{_sh_dq(str(shim))}"'
+    return f'"{_sh_dq(sys.executable)}" -m hologram'
 
 
 def _managed_hook_line(line: str, repo: Path) -> bool:
@@ -50,9 +59,16 @@ def _managed_hook_line(line: str, repo: Path) -> bool:
     a quoted script/pyz path, or the `-m hologram` form."""
     executable = r'(?:"[^"\n]+"|\S+)'
     invocation = r'(?:"[^"\n]+hologram\.pyz?"|-m hologram)'
+    repo_str = str(repo.resolve())
+    roots = {repo_str}
+    try:
+        roots.add(_sh_dq(repo_str))  # current escaped form + pre-0.3.1 raw form
+    except SystemExit:
+        pass
+    root_alt = "|".join(re.escape(r) for r in sorted(roots))
     pattern = (
         rf'^{executable} {invocation} build --root '
-        rf'"{re.escape(str(repo.resolve()))}"(?: --lang \S+)*'
+        rf'"(?:{root_alt})"(?: --lang \S+)*'
         rf'(?: --(?:no-)?embed)? --quiet \|\| true'
         rf'(?: {re.escape(_HOOK_MARKER)})?$'
     )
@@ -77,7 +93,7 @@ def _dead_hook_scripts(repo: Path) -> set[str]:
 
 def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None) -> None:
     lang_args = "".join(f' --lang {l}' for l in sorted(langs)) if langs else ""
-    hook_line = (f'{_tool_invocation()} build --root "{repo.resolve()}"'
+    hook_line = (f'{_tool_invocation()} build --root "{_sh_dq(str(repo.resolve()))}"'
                  f'{lang_args} --quiet || true {_HOOK_MARKER}\n')
     hooks_dir = repo / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
