@@ -27,3 +27,16 @@ fun demo(prices: Map<String, Long>): Long {
     val backup: Pricer = engine
     return engine.quote(OrderId("x")) + backup.quote(OrderId("y"))
 }
+
+const val MAX_RETRIES = 3
+
+@RestController
+@RequestMapping("/api/orders")
+class OrderController(private val svc: PricingEngine) {
+    @GetMapping("/{id}")
+    fun find(id: Long): Long = svc.quote(OrderId("x"))
+
+    companion object {
+        const val PAGE_SIZE = 25
+    }
+}

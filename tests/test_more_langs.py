@@ -324,6 +324,16 @@ class KotlinExtractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.syms = extract_file(POLY / "Sample.kt", POLY)
 
+    def test_annotations_and_consts(self):
+        ctrl = next(s for s in self.syms if s.name == "OrderController")
+        self.assertEqual(ctrl.decorators,
+                         ["RestController", 'RequestMapping("/api/orders")'])
+        find = next(s for s in self.syms if s.name == "find")
+        self.assertEqual(find.decorators, ['GetMapping("/{id}")'])
+        consts = {s.name: s.signature for s in self.syms if s.kind == "const"}
+        self.assertEqual(consts, {"MAX_RETRIES": "MAX_RETRIES=3",
+                                  "PAGE_SIZE": "PAGE_SIZE=25"})
+
     def test_data_class_enum_interface(self):
         oid = next(s for s in self.syms if s.name == "OrderId")
         self.assertEqual(oid.kind, "record")

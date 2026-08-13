@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,807 LOC · state 4d8d0e687d6c
+# hologram · 7,869 LOC · state 6dfa3d3d560b
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -221,7 +221,8 @@ hologram
   - java.py: _ast_{modifiers,param_types,vis},
              _java_{annotations,param_names,call_entry,calls,param_bindings,class_bindings,local_bindings,method_symbol},
              _extract_java
-  - kotlin.py: _kt_{vis,params,param_names,return,call_entry,raises,local_bindings,fn_symbol},_extract_kotlin
+  - kotlin.py: _kt_{vis,params,param_names,return,call_entry,raises,local_bindings,annotations,const_symbols,fn_symbol},
+               _extract_kotlin
   - misc.py: _lua_call_entry,_extract_{lua,bash,css,html,helm},_bash_call_entry,_css_symbols
   - php.py: _php_{vis,var_name,params,return,call_entry,local_bindings,raises,fn_symbol},_extract_php
   - python.py: _py_{param_facts,calls,raises,bindings,decorators,fn_symbol},_extract_python
