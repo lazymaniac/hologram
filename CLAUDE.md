@@ -163,7 +163,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 6,919 LOC · state 0fd2d3e342a5
+# hologram · 7,037 LOC · state 629986d24aa6
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -193,7 +193,7 @@ hologram
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
  tight_type(t):str
- Symbol(C{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,size})
+ Symbol(C{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,decorators,size})
  - bootstrap.py: _pyz_path,_tool_anchor,_venv_python,_missing_parser_langs,_venv_has_grammars,_bootstrap_or_die
  - cli.py: _hook_python,_tool_invocation,_managed_hook_line,_dead_hook_scripts,_install_hooks,_uninstall,_warn_if_large
  - embed.py: _embed_block,_block_span,_seed_content
@@ -209,23 +209,24 @@ hologram
   - csharp.py: _cs_{vis,params,param_names,call_entry,local_bindings,raises},_extract_cs
   - go.py: _go_{vis,type_text,params,param_names,result,call_entry,local_bindings},_extract_go
   - java.py: _ast_{modifiers,param_types,vis},
-             _java_{param_names,call_entry,calls,param_bindings,class_bindings,local_bindings,method_symbol},_extract_java
+             _java_{annotations,param_names,call_entry,calls,param_bindings,class_bindings,local_bindings,method_symbol},
+             _extract_java
   - kotlin.py: _kt_{vis,params,param_names,return,call_entry,raises,local_bindings,fn_symbol},_extract_kotlin
   - misc.py: _lua_call_entry,_extract_{lua,bash,css,html,helm},_bash_call_entry,_css_symbols
   - php.py: _php_{vis,var_name,params,return,call_entry,local_bindings,raises,fn_symbol},_extract_php
-  - python.py: _py_{param_facts,calls,raises,bindings,fn_symbol},_extract_python
+  - python.py: _py_{param_facts,calls,raises,bindings,decorators,fn_symbol},_extract_python
   - ruby.py: _rb_{call_entry,params,method_symbol,walk},_extract_ruby
   - rust.py: _rs_{vis,params,param_names,call_entry,local_bindings,fn_symbol},_extract_rust
   - scala.py: _sc_{vis,params,return,call_entry,local_bindings,fn_symbol},_extract_scala
   - swift.py: _sw_{vis,params,return,call_entry,local_bindings,fn_symbol},_extract_swift
-  - ts.py: _ts_{exported,params,param_names,return,call_entry,calls,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,top_level_arrows,aliases_and_reexports},
+  - ts.py: _ts_{exported,params,param_names,return,call_entry,calls,decorators,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,top_level_arrows,aliases_and_reexports},
            _extract_{ts,tsx,sfc}
 tools
  measure_tokens.py:main(argv):int
 ? tests
  test_bench.py{{TaskLoader,TranscriptMetrics,DuplicationDetector,Workspace,RunOne,Report,Cli}Test}
  test_cli.py{{CliBuild,InitHooks,InitLang,Bootstrap,PrintCommand,Uninstall,SizeWarning,HookPythonSelection}Test}
- test_extract_langs.py{{PythonExtract,TypeScriptExtract,ArrowFunction}Test}
+ test_extract_langs.py{{Python,TypeScript,Decorator}ExtractTest,ArrowFunctionTest}
  test_freshness_and_markers.py{{StateAndCheck,TestedMarker,SizeMarker,TestIndex,DepsMap,Embed,ContextTargets,DiffCommand}Test}
  test_more_langs.py{{Go,Rust,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Php,Swift,Scala}ExtractTest,
                     {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test}

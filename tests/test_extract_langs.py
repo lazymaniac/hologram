@@ -99,5 +99,59 @@ class ArrowFunctionTest(unittest.TestCase):
         self.assertEqual(names, {"fetchUser", "lookup"})
 
 
+class DecoratorExtractTest(unittest.TestCase):
+    """Extractors store every decorator verbatim; render applies the allowlist."""
+
+    def _one(self, tmp, fname, source):
+        p = Path(tmp) / fname
+        p.write_text(source)
+        return extract_file(p, Path(tmp))
+
+    def test_python_decorators_captured(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            syms = self._one(tmp, "app.py", (
+                "@dataclass\n"
+                "class Order:\n    pass\n\n"
+                '@app.route("/orders", methods=["POST"])\n'
+                "def create():\n    pass\n"))
+        order = next(s for s in syms if s.name == "Order")
+        self.assertEqual(order.decorators, ["dataclass"])
+        create = next(s for s in syms if s.name == "create")
+        self.assertEqual(create.decorators,
+                         ["app.route('/orders',methods=['POST'])"])
+
+    @unittest.skipUnless(hologram.has_parser("java"), "tree-sitter-java missing")
+    def test_java_annotations_captured(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            syms = self._one(tmp, "C.java", (
+                "@RestController @RequestMapping(\"/api/v1\")\n"
+                "public class C {\n"
+                "  @GetMapping(\"/users/{id}\") public String find(long id)"
+                " { return null; }\n"
+                "}\n"))
+        c = next(s for s in syms if s.kind == "class")
+        self.assertEqual(c.decorators,
+                         ["RestController", 'RequestMapping("/api/v1")'])
+        find = next(s for s in syms if s.name == "find")
+        self.assertEqual(find.decorators, ['GetMapping("/users/{id}")'])
+
+    @needs_ts
+    def test_ts_decorators_captured_for_class_and_method(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            syms = self._one(tmp, "c.ts", (
+                "@Component({ selector: 'app-user' })\n"
+                "export class UserComponent {\n"
+                "  @HostListener('click')\n"
+                "  onClick(): void {}\n"
+                "}\n"))
+        comp = next(s for s in syms if s.kind == "class")
+        self.assertEqual(comp.decorators, ["Component({ selector: 'app-user' })"])
+        click = next(s for s in syms if s.name == "onClick")
+        self.assertEqual(click.decorators, ["HostListener('click')"])
+
+
 if __name__ == "__main__":
     unittest.main()

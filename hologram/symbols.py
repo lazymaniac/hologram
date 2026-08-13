@@ -72,7 +72,40 @@ class Symbol:
     permits: list[str] = field(default_factory=list)
     raises: list[str] = field(default_factory=list)
     bindings: dict[str, str] = field(default_factory=dict)  # var/param/field name -> declared type
+    decorators: list[str] = field(default_factory=list)  # verbatim, sigil-stripped; render filters
     size: int = 0  # body line count (0 = bodyless/unknown)
+
+
+# Decorator/annotation allowlists live here so gather and render can both import
+# them without cycles. Extraction stores every decorator; these decide rendering.
+# base name -> HTTP verb; None = path-only (verb elsewhere or class-level prefix)
+ROUTE_DECORATORS: dict[str, str | None] = {
+    # Spring
+    "GetMapping": "GET", "PostMapping": "POST", "PutMapping": "PUT",
+    "DeleteMapping": "DELETE", "PatchMapping": "PATCH", "RequestMapping": None,
+    # JAX-RS (verb annotations are argument-less; @Path carries the route)
+    "GET": "GET", "POST": "POST", "PUT": "PUT", "DELETE": "DELETE",
+    "PATCH": "PATCH", "Path": None,
+    # NestJS
+    "Controller": None, "Get": "GET", "Post": "POST", "Put": "PUT",
+    "Delete": "DELETE", "Patch": "PATCH",
+    # Python web frameworks match on the dotted tail: app.route / router.get …
+    "route": None, "get": "GET", "post": "POST", "put": "PUT",
+    "delete": "DELETE", "patch": "PATCH",
+}
+
+# argument-less markers rendered verbatim as @Name
+MARKER_DECORATORS = {
+    "Transactional", "Scheduled", "KafkaListener", "EventListener",
+    "Injectable", "dataclass", "property", "staticmethod", "classmethod",
+    "abstractmethod", "cached_property", "fixture", "memo", "forwardRef",
+}
+
+# decorators that mean "invoked by a framework, not by project code": their
+# bearers are exempt from the ×0 no-static-use marker
+ENTRYPOINT_DECORATORS = (set(ROUTE_DECORATORS) | {
+    "Scheduled", "EventListener", "KafkaListener", "fixture", "Component",
+}) - {"Path"}
 
 
 def detect_language(path: Path) -> str | None:

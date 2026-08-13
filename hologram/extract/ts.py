@@ -80,6 +80,19 @@ def _ts_calls(body, own_name: str) -> list[str]:
                       _ts_call_entry)
 
 
+def _ts_decorators(node) -> list[str]:
+    """Decorators of a class/method/field: own `decorator` children (fields)
+    plus the run of `decorator` siblings immediately before the node (methods
+    inside class_body; classes inside export_statement or program)."""
+    decs = []
+    sib = node.prev_named_sibling
+    while sib is not None and sib.type == "decorator":
+        decs.insert(0, sib)
+        sib = sib.prev_named_sibling
+    decs.extend(c for c in node.children if c.type == "decorator")
+    return [tight_type(_ast_text(d).lstrip("@")) for d in decs]
+
+
 def _ts_param_bindings(params_node) -> dict[str, str]:
     binds: dict[str, str] = {}
     if params_node is None:
@@ -157,6 +170,7 @@ def _ts_fn_symbol(node, rel: str, container: str | None, visibility: str,
         bindings={**(class_binds or {}),
                   **_ts_param_bindings(_ast_field(fn, "parameters")),
                   **_ts_local_bindings(body)},
+        decorators=_ts_decorators(node),
     )
 
 
@@ -257,6 +271,7 @@ def _extract_ts(text: str, rel: str, lang: str = "typescript") -> list[Symbol]:
                           if p.type == "property_signature"
                           and _ast_field(p, "name") is not None]),
             visibility="pub" if _ts_exported(tn) else "priv", lang="typescript",
+            decorators=_ts_decorators(tn),
         ))
         if kind == "interface" and body is not None:
             for c in body.children:

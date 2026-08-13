@@ -78,6 +78,10 @@ def _py_bindings(node) -> dict[str, str]:
     return binds
 
 
+def _py_decorators(node) -> list[str]:
+    return [tight_type(ast.unparse(d)) for d in node.decorator_list]
+
+
 def _py_fn_symbol(node, rel: str, container: str | None) -> Symbol:
     returns = tight_type(ast.unparse(node.returns)) if node.returns else None
     params, param_names = _py_param_facts(node)
@@ -92,6 +96,7 @@ def _py_fn_symbol(node, rel: str, container: str | None) -> Symbol:
         calls=[c for c in _py_calls(node) if c != node.name],
         raises=_py_raises(node),
         bindings=_py_bindings(node),
+        decorators=_py_decorators(node),
         size=(getattr(node, "end_lineno", node.lineno) - node.lineno + 1),
     )
 
@@ -131,6 +136,7 @@ def _extract_python(text: str, rel: str) -> list[Symbol]:
                 supers=supers,
                 visibility="priv" if node.name.startswith("_") else "pub",
                 lang="python",
+                decorators=_py_decorators(node),
             ))
             for sub in node.body:
                 if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
