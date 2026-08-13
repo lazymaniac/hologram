@@ -40,11 +40,28 @@ class StateAndCheckTest(unittest.TestCase):
     def test_generator_change_invalidates_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
-            with patch.object(hologram, "_generator_fingerprint", return_value=b"one"):
+            with patch.object(hologram.gather, "_generator_fingerprint",
+                              return_value=b"one"):
                 before = hologram._state_hash(root)
-            with patch.object(hologram, "_generator_fingerprint", return_value=b"two"):
+            with patch.object(hologram.gather, "_generator_fingerprint",
+                              return_value=b"two"):
                 after = hologram._state_hash(root)
         self.assertNotEqual(before, after)
+
+    def test_fingerprint_covers_every_package_source(self):
+        """The fingerprint hashes each .py in the package, sorted by relative path,
+        so checkout, wheel, and zipapp installs of the same sources agree."""
+        import hashlib
+        pkg = Path(hologram.__file__).resolve().parent
+        entries = sorted(
+            (str(p.relative_to(pkg)).replace("\\", "/"), p.read_bytes())
+            for p in pkg.rglob("*.py") if "__pycache__" not in p.parts)
+        h = hashlib.sha256()
+        for rel, data in entries:
+            h.update(rel.encode())
+            h.update(data)
+        self.assertEqual(hologram.gather._generator_fingerprint(), h.digest())
+        self.assertGreater(len(entries), 10)  # the split actually happened
 
     def test_check_fresh_then_stale(self):
         with tempfile.TemporaryDirectory() as tmp:

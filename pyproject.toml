@@ -44,7 +44,7 @@ grammars = [
 ]
 
 [project.scripts]
-hologram = "hologram:run_cli"
+hologram = "hologram.cli:run_cli"
 
 [project.urls]
 Homepage = "https://github.com/lazymaniac/hologram"
@@ -53,7 +53,7 @@ Changelog = "https://github.com/lazymaniac/hologram/blob/main/CHANGELOG.md"
 Issues = "https://github.com/lazymaniac/hologram/issues"
 
 [tool.setuptools]
-py-modules = ["hologram"]
+packages = ["hologram", "hologram.extract"]
 
 [tool.setuptools.dynamic]
-version = { attr = "hologram.__version__" }
+version = { attr = "hologram._version.__version__" }
