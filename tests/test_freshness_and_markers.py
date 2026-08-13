@@ -140,8 +140,9 @@ class TestIndexTest(unittest.TestCase):
             root = _proj(Path(tmp))  # test_svc.py has a top-level test fn
             out = build_digest(root)
         line = next(ln for ln in out.splitlines() if "test_svc.py" in ln)
-        self.assertIn(">", line)
-        self.assertIn("Svc", line.split(">", 1)[1])  # Svc().run() resolves
+        # Svc is self-evident from the file name and folds into +N; the
+        # non-obvious target (run) is the headline
+        self.assertIn("> run +1", line)
 
     def test_class_edges_get_own_line_cap_and_overflow(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -155,11 +156,13 @@ class TestIndexTest(unittest.TestCase):
                 + "".join(f"        helper{i}()\n" for i in range(5)) +
                 "\nclass QuietTest:\n    def test_nothing(self):\n        pass\n")
             out = build_digest(root)
-        covered = next(ln for ln in out.splitlines() if "CoveredTest" in ln)
-        self.assertIn("> helper0,helper1,helper2 +2", covered)  # cap 3, +N
-        self.assertNotIn("helper3", covered)
-        quiet = next(ln for ln in out.splitlines() if "QuietTest" in ln)
-        self.assertNotIn(">", quiet)          # edge-less class stays plain
+        line = next(ln for ln in out.splitlines() if "CoveredTest" in ln)
+        # braced form: headline target glued to the member, remainder as +N;
+        # the edge-less sibling stays a plain member of the same braces
+        self.assertIn("CoveredTest>helper0+4", line)
+        self.assertNotIn("helper1", line)
+        self.assertIn("QuietTest", line)
+        self.assertNotIn("QuietTest>", line)
         self.assertIn("+N=more", out.splitlines()[1])
 
 
@@ -204,10 +207,10 @@ class TestHelperTest(unittest.TestCase):
                 "tests/test_a.py": {"BaseIntegrationTest"},
                 "tests/test_b.py": {"BaseIntegrationTest"},
                 "src/prod.py": {"BaseIntegrationTest"}}
-        self.assertEqual(_helper_class_ids([base], toks), {id(base)})
+        self.assertEqual(_helper_class_ids([base], toks), {id(base): True})
         one_ref = {"tests/base_test.py": {"BaseIntegrationTest"},
                    "tests/test_a.py": {"BaseIntegrationTest"}}
-        self.assertEqual(_helper_class_ids([base], one_ref), set())
+        self.assertEqual(_helper_class_ids([base], one_ref), {})
 
     def test_digest_is_deterministic_with_helpers(self):
         with tempfile.TemporaryDirectory() as tmp:
