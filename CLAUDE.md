@@ -139,7 +139,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
 
 ```
-# hologram · 5,579 LOC · state 413ff1e6b721
+# hologram · 5,584 LOC · state 74af1cf178be
 · C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb
 benchmark
  claude_runner(prompt,ws,model,max_turns):str

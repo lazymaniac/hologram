@@ -413,7 +413,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     # dir (Pricer in go + rust) don't merge their method lists
     methods_by_owner: dict[tuple[str, str, str], list[Symbol]] = {}
     for s in prod:
-        if (s.container and s.kind == "method"
+        if (s.container and s.kind in ("method", "ctor")
                 and s.visibility == "pub"):
             methods_by_owner.setdefault(
                 (str(Path(s.file).parent), s.container, s.lang), []).append(s)
@@ -442,7 +442,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     signature_shapes = Counter(
         (s.file, s.container or "", s.name, tuple(_argument_names(s)))
-        for s in prod if s.kind in ("fn", "method")
+        for s in prod if s.kind in ("fn", "method", "ctor")
     )
     top_locations: dict[str, set[tuple[str, str]]] = {}
     for symbol in prod:
@@ -461,7 +461,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if signature_shapes[shape] > 1:
             args = [f"{name}:{sym.params[index]}" if name != sym.params[index] else name
                     for index, name in enumerate(args)]
-        returns = (f":{sym.returns}" if sym.returns
+        returns = (f":{sym.returns}" if sym.returns and sym.kind != "ctor"
                    and sym.returns not in ("void", "Unit", "None") else "")
         if sym.signature and "(" not in sym.signature and sym.lang in ("helm", "html"):
             return sym.signature
