@@ -23,14 +23,17 @@ def estimate_tokens(text: str) -> int:
     return (len(text) + 3) // 4
 
 
+def _test_stem(raw_stem: str) -> bool:
+    stem = raw_stem.casefold()
+    return (stem.startswith("test_") or stem.endswith(("_test", ".test", ".spec"))
+            or raw_stem.endswith(("Test", "Tests", "Spec", "IT")))
+
+
 def _is_test_path(rel: str) -> bool:
     path = Path(rel)
     parts = [p.casefold() for p in path.parts[:-1]]
-    raw_stem = path.stem
-    stem = raw_stem.casefold()
     return (any(p in ("test", "tests", "__tests__") for p in parts)
-            or stem.startswith("test_") or stem.endswith(("_test", ".test", ".spec"))
-            or raw_stem.endswith(("Test", "Tests", "Spec", "IT")))
+            or _test_stem(path.stem))
 
 
 def _tree_lines(payload_by_dir: dict[str, list[str]]) -> list[str]:
@@ -473,6 +476,37 @@ def _braced_lines(label: str, names: list[str], width: int = 120) -> list[str]:
     return lines
 
 
+def _helper_class_ids(symbols: list[Symbol],
+                      file_tokens: dict[str, set[str]] | None) -> set[int]:
+    """Test-support classes worth full signatures: reusable drivers, builders,
+    and shared bases that agents otherwise re-invent. A class qualifies when
+    (a) it lives on a test path only through its directory — the file isn't
+    test-named and neither is the class — or (b) two or more *other* test
+    files reference it by name."""
+    ids: set[int] = set()
+    ref_counts: dict[str, int] = {}
+    if file_tokens:
+        test_files = [f for f in sorted(file_tokens) if _is_test_path(f)]
+    for s in symbols:
+        if s.kind != "class" or not _is_test_path(s.file):
+            continue
+        stem_ok = not _test_stem(Path(s.file).stem)
+        name_ok = not s.name.endswith(("Test", "Tests", "Spec", "IT"))
+        if stem_ok and name_ok:
+            ids.add(id(s))
+            continue
+        # (b) has no name gate on purpose: shared Base*Test classes are the
+        # most common Java helper shape and are exactly what (a) misses
+        if file_tokens:
+            if s.name not in ref_counts:
+                ref_counts[s.name] = sum(
+                    1 for f in test_files
+                    if f != s.file and s.name in file_tokens[f])
+            if ref_counts[s.name] >= 2:
+                ids.add(id(s))
+    return ids
+
+
 _EDGE_CAP = 3  # coverage-edge targets shown per test class; rest summarize to +N
 
 
@@ -485,8 +519,9 @@ def _edge_suffix(targets: list[str]) -> str:
 
 
 def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
-                      resolved_calls: dict[int, list[str]] | None = None
-                      ) -> list[str]:
+                      resolved_calls: dict[int, list[str]] | None = None,
+                      helper_ids: set[int] | None = None,
+                      sig_line=None) -> list[str]:
     test_paths = sorted(str(path.relative_to(root)) for path in files
                         if _is_test_path(str(path.relative_to(root))))
     if not test_paths:
@@ -510,21 +545,42 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     first_parts = {Path(path).parts[0] for path in test_paths if Path(path).parts}
     strip_first = (len(first_parts) == 1
                    and next(iter(first_parts)).casefold() in ("test", "tests", "__tests__"))
+    helper_ids = helper_ids or set()
+    helpers: dict[str, list[Symbol]] = {}
+    for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
+        if id(symbol) in helper_ids:
+            helpers.setdefault(symbol.file, []).append(symbol)
+    helper_names = {(s.file, s.name)
+                    for hs in helpers.values() for s in hs}
     payloads: dict[str, list[str]] = {}
     for path in test_paths:
         display = Path(*Path(path).parts[1:]) if strip_first else Path(path)
         in_braces = [n for n in classes.get(path, [])
-                     if not edges.get((path, n))]
+                     if not edges.get((path, n))
+                     and (path, n) not in helper_names]
         file_line = _braced_lines(display.name, in_braces)
         file_line[-1] += _edge_suffix(edges.get((path, ""), []))
         own_lines = [f" {n}{_edge_suffix(edges[(path, n)])}"
-                     for n in classes.get(path, []) if edges.get((path, n))]
+                     for n in classes.get(path, [])
+                     if edges.get((path, n)) and (path, n) not in helper_names]
+        helper_lines: list[str] = []
+        for h in helpers.get(path, []):
+            components = h.fields or h.params
+            letter = KIND_LETTER.get(h.kind, "C")
+            inner = f"{letter}{{{','.join(components)}}}" if components else letter
+            helper_lines.append(f" *{h.name}({inner})")
+            for ms in sorted(symbols, key=lambda s: (s.line, s.name)):
+                if (ms.file == path and ms.container == h.name
+                        and ms.kind in ("method", "ctor")
+                        and ms.visibility == "pub" and sig_line is not None):
+                    helper_lines.append("  " + sig_line(ms, h.name, False))
         payloads.setdefault(str(display.parent), []).extend(
-            file_line + own_lines)
+            file_line + own_lines + helper_lines)
     return ["? tests", *(" " + line for line in _tree_lines(payloads))]
 
 
-def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
+def _legend_line(text: str, has_priv: bool, has_tests: bool,
+                 has_helpers: bool = False) -> str:
     """Legend restricted to notation the rendered body actually uses.
 
     Needles must never miss real usage (a clause too many wastes a few tokens,
@@ -541,6 +597,8 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
         items.append("-=private")
     if has_tests:
         items.append("?=tests")
+    if has_helpers:
+        items.append("*=test helper")
     if "×0" in text:
         items.append("×0=no static use")
     if "✓" in text:
@@ -579,7 +637,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   deps: list[str] | None = None,
                   zero_usage: set[str] | None = None,
                   langs: set[str] | None = None,
-                  targets: list[str] | None = None) -> str:
+                  targets: list[str] | None = None,
+                  file_tokens: dict[str, set[str]] | None = None) -> str:
     """Compact project facts as a package trie.
 
     pkg
@@ -803,11 +862,16 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         state_part += f" · targets {','.join(sorted(targets))}"
     dep_part = ("\n".join(deps) + "\n") if deps else ""
     body = _tree_lines(payload_by_dir)
-    tests = _test_index_lines(files, symbols, root, resolved_calls)
+    helper_ids = _helper_class_ids(symbols, file_tokens)
+    tests = _test_index_lines(files, symbols, root, resolved_calls,
+                              helper_ids, _sig_line)
     if tests:
         body.extend(tests)
     has_priv = bool(priv_top_by_file or priv_methods_by_owner)
-    legend = _legend_line(dep_part + "\n".join(body), has_priv, bool(tests))
+    has_helpers = bool(tests) and any("\n  *" in "\n" + ln or ln.lstrip().startswith("*")
+                                      for ln in tests)
+    legend = _legend_line(dep_part + "\n".join(body), has_priv, bool(tests),
+                          has_helpers)
     header = f"# hologram · {loc:,} LOC{state_part}\n{legend}\n"
     return header + dep_part + "\n".join(body) + "\n"
 
@@ -818,5 +882,5 @@ def build_digest(root: Path, langs: set[str] | None = None,
     deps = _dep_lines(symbols, file_tokens)
     return render_simple(root, symbols, files, state=state, deps=deps,
                          zero_usage=_zero_usage_names(symbols, usage_tokens),
-                         langs=langs, targets=targets)
+                         langs=langs, targets=targets, file_tokens=file_tokens)
 
