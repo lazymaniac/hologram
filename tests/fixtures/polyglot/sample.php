@@ -29,3 +29,11 @@ function demo(array $prices): int {
     $engine = new PricingEngine($prices);
     return $engine->quote(new OrderId('x'));
 }
+
+#[AsController]
+class OrderController {
+    const MAX_ITEMS = 10;
+
+    #[Route('/orders', methods: ['GET'])]
+    public function index(): array { return []; }
+}
