@@ -21,3 +21,12 @@ public class PricingEngine : IPricer {
 
     private long Compute(OrderId id) => prices.Count;
 }
+
+[ApiController]
+[Route("api/orders")]
+public class OrdersController {
+    public const int MaxItems = 10;
+
+    [HttpGet("{id}")]
+    public Quote Find(long id) { return null; }
+}
