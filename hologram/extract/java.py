@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import re
 
-from ..symbols import Symbol, _base_type, _heritage, _parse_throws, split_params
+from ..symbols import (Symbol, _base_type, _heritage, _parse_throws, split_params,
+                       tight_type)
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text, _body_lines)
 
 # ---------------------------------------------------------------------------
@@ -22,6 +23,13 @@ def _ast_modifiers(node) -> str:
         if c.type == "modifiers":
             return _ast_text(c)
     return ""
+
+
+def _java_annotations(node) -> list[str]:
+    mods = next((c for c in node.children if c.type == "modifiers"), None)
+    return [tight_type(_ast_text(a).lstrip("@"))
+            for a in (mods.children if mods is not None else ())
+            if a.type in ("marker_annotation", "annotation")]
 
 
 def _ast_param_types(node) -> list[str]:
@@ -129,7 +137,8 @@ def _java_method_symbol(m, type_name: str, rel: str, class_binds: dict[str, str]
             param_names=_java_param_names(_ast_field(m, "parameters")), returns=name,
             visibility=_ast_vis(mods),
             container=type_name, lang="java", raises=throws,
-            calls=_java_calls(body, name), bindings=binds, size=_body_lines(body),
+            calls=_java_calls(body, name), bindings=binds,
+            decorators=_java_annotations(m), size=_body_lines(body),
         )
     returns = _ast_text(_ast_field(m, "type"))
     ret_suffix = f":{returns}" if returns != "void" else ""
@@ -141,7 +150,7 @@ def _java_method_symbol(m, type_name: str, rel: str, class_binds: dict[str, str]
         visibility=_ast_vis(mods),
         container=type_name, lang="java",
         calls=_java_calls(body, name), raises=throws, bindings=binds,
-        size=_body_lines(body),
+        decorators=_java_annotations(m), size=_body_lines(body),
     )
 
 
@@ -170,6 +179,7 @@ def _extract_java(text: str, rel: str) -> list[Symbol]:
             fields=(list(_java_class_bindings(tn)) if kind != "enum" else []),
             visibility=_ast_vis(mods), lang="java",
             supers=supers, permits=permits,
+            decorators=_java_annotations(tn),
         ))
         if body is None:
             continue
