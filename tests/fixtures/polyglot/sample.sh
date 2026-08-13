@@ -16,3 +16,8 @@ function deploy {
   build_image "$1"
   docker push "$1"
 }
+
+MAX_RETRIES=3
+export REGISTRY="docker.example.io"
+readonly DEPLOY_TOKEN="tok123"
+STAMP=$(date +%s)

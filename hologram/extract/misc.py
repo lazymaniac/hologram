@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from ..symbols import Symbol
+from ..symbols import Symbol, const_signature
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text, _body_lines, has_parser)
 from .ts import _extract_ts
 
@@ -71,22 +71,53 @@ def _bash_call_entry(node) -> tuple[str, str]:
     return name, name
 
 
+_BASH_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
 def _extract_bash(text: str, rel: str) -> list[Symbol]:
     tree = _PARSERS["bash"].parse(text.encode())
-    symbols: list[Symbol] = []
+    stem = Path(rel).name
+    symbols: list[Symbol] = [Symbol(
+        name=stem, kind="class", file=rel, line=1,
+        signature=f"script {stem}", visibility="pub", lang="bash")]
     for fn in _ast_collect(tree.root_node, ("function_definition",)):
         name = _ast_text(_ast_field(fn, "name"))
         if not name:
             continue
         body = _ast_field(fn, "body")
         symbols.append(Symbol(
-            name=name, kind="fn", file=rel,
+            name=name, kind="method", file=rel,
             line=fn.start_point[0] + 1, signature=f"{name}()",
             visibility="priv" if name.startswith("_") else "pub",
-            lang="bash",
+            container=stem, lang="bash",
             calls=_ast_calls(body, name, ("command",), _bash_call_entry),
             size=_body_lines(body),
         ))
+    # top-level VAR=…, export VAR=…, readonly VAR=… — literal values only;
+    # command substitutions and expansions render name-only
+    for top in tree.root_node.children:
+        if top.type == "variable_assignment":
+            assign = top
+        elif top.type == "declaration_command":
+            assign = next((c for c in top.children
+                           if c.type == "variable_assignment"), None)
+        else:
+            continue
+        if assign is None:
+            continue
+        vname = _ast_text(next((c for c in assign.children
+                                if c.type == "variable_name"), None))
+        if not vname or not _BASH_VAR_NAME_RE.fullmatch(vname):
+            continue
+        val = next((c for c in assign.children
+                    if c.type in ("number", "string", "raw_string", "word")), None)
+        value = _ast_text(val) if val is not None else None
+        if value is not None and ("$" in value or "`" in value):
+            value = None  # expansion inside quotes: not a literal
+        symbols.append(Symbol(
+            name=vname, kind="const", file=rel, line=assign.start_point[0] + 1,
+            signature=const_signature(vname, value),
+            visibility="pub", lang="bash"))
     return symbols
 
 
