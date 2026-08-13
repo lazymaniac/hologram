@@ -172,11 +172,18 @@ def judge_reuse(before: str, after: str, expect_reuse: list[str]) -> dict:
             "duplicated": sorted(set(duplicated))}
 
 
+def _setup_sha(ws: Path) -> str:
+    marker = ws / ".bench-setup-sha"
+    return marker.read_text().strip() if marker.exists() else "HEAD"
+
+
 def _added_lines(ws: Path, test_only: bool = False) -> list[str]:
-    """Lines the agent added, from `git diff` against the setup commit —
-    robust where transcripts are not (Edit payloads are fragments and
-    Bash-written files never appear as tool payloads at all)."""
-    out = subprocess.run(["git", "-C", str(ws), "diff", "--unified=0"],
+    """Lines the agent added, from `git diff` against the recorded setup
+    commit — robust against agents committing their own work (corpus
+    conventions often require it) and where transcripts are not (Edit
+    payloads are fragments; Bash-written files never appear as payloads)."""
+    out = subprocess.run(["git", "-C", str(ws), "diff", "--unified=0",
+                          _setup_sha(ws)],
                          capture_output=True, text=True).stdout
     added: list[str] = []
     current: str | None = None
@@ -261,6 +268,9 @@ def make_workspace(corpus: Path, ws: Path, condition: str,
     subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",
                     "-c", "user.name=bench", "commit", "-qm", "bench setup"],
                    check=True, capture_output=True)
+    (ws / ".bench-setup-sha").write_text(subprocess.run(
+        ["git", "-C", str(ws), "rev-parse", "HEAD"],
+        capture_output=True, text=True).stdout.strip())
     return ws
 
 
@@ -306,7 +316,7 @@ def run_one(corpus: Path, task: Task, condition: str, rep: int,
         subprocess.run(["git", "-C", str(ws), "add", "-N", "."],
                        capture_output=True)
         accepted = subprocess.run(
-            task.accept_cmd.format(ws=ws), shell=True,
+            task.accept_cmd.format(ws=ws, sha=_setup_sha(ws)), shell=True,
             capture_output=True).returncode == 0
         scope_ok = judge_scope(ws, task.expect_in_new_code, task.scope_in_tests)
         metrics = parse_transcript(transcript)
