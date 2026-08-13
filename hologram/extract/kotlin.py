@@ -76,6 +76,34 @@ def _kt_call_entry(n) -> tuple[str, str]:
     return "", ""
 
 
+def _kt_local_bindings(body) -> dict[str, str]:
+    """val/var declarations: explicit `: T` annotations, plus `val e = Engine()`
+    inference when the initializer calls a single capitalized identifier."""
+    binds: dict[str, str] = {}
+    if body is None:
+        return binds
+    for prop in _ast_collect(body, ("property_declaration",)):
+        var = next((c for c in prop.children if c.type == "variable_declaration"), None)
+        if var is None:
+            continue
+        ident = next((c for c in var.children if c.type == "identifier"), None)
+        if ident is None:
+            continue
+        t = next((c for c in var.children
+                  if c.type in ("user_type", "nullable_type")), None)
+        if t is not None:
+            binds[_ast_text(ident)] = _base_type(tight_type(_ast_text(t)).rstrip("?"))
+            continue
+        rhs = next((c for c in prop.children if c.type == "call_expression"), None)
+        if rhs is not None and rhs.children:
+            head = rhs.children[0]
+            if head.type == "identifier":
+                callee = _ast_text(head)
+                if callee[:1].isupper() and _IDENT_RE.fullmatch(callee):
+                    binds[_ast_text(ident)] = callee
+    return binds
+
+
 def _kt_fn_symbol(fn, rel: str, container: str | None, vis: str,
                   class_binds: dict[str, str]) -> Symbol:
     name = _ast_text(_ast_field(fn, "name"))
@@ -91,7 +119,7 @@ def _kt_fn_symbol(fn, rel: str, container: str | None, vis: str,
         params=params, param_names=_kt_param_names(pnode), returns=returns,
         visibility=vis, container=container, lang="kotlin",
         calls=_ast_calls(body, name, ("call_expression",), _kt_call_entry),
-        bindings={**class_binds, **binds},
+        bindings={**class_binds, **binds, **_kt_local_bindings(body)},
         size=(body.end_point[0] - body.start_point[0] + 1) if body is not None else 0,
     )
 

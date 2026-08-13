@@ -333,6 +333,12 @@ class KotlinExtractTest(unittest.TestCase):
         self.assertEqual(fn.kind, "fn")
         self.assertEqual(fn.returns, "List<Long>")
 
+    def test_local_bindings_resolve_receivers(self):
+        demo = next(s for s in self.syms if s.name == "demo")
+        self.assertEqual(demo.bindings.get("engine"), "PricingEngine")
+        self.assertEqual(demo.bindings.get("backup"), "Pricer")
+        self.assertIn("engine.quote", demo.calls)
+
 
 @_needs("typescript")
 class TsGapsTest(unittest.TestCase):
