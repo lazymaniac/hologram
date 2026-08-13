@@ -382,6 +382,55 @@ class TsGapsTest(unittest.TestCase):
         self.assertEqual(reex, {"OrderId", "PriceQuote"})
 
 
+@_needs("typescript")
+class TsLossRecoveryTest(unittest.TestCase):
+    """Data the grammar always had that the extractor used to drop."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls._tmp = tempfile.TemporaryDirectory()
+        root = Path(cls._tmp.name)
+        (root / "w.ts").write_text(
+            "export interface Repo {\n"
+            "  find(id: string): Promise<User>;\n"
+            "  save(u: User): void;\n"
+            "}\n"
+            "export class Widget {\n"
+            "  @Output() picked = new EventEmitter<User>();\n"
+            "  @Input() users: User[] = [];\n"
+            "  constructor(@Inject(TOKEN) private cfg: Config,\n"
+            "              readonly svc: UserService) {}\n"
+            "  ngOnInit(): void { this.svc.load(); }\n"
+            "}\n")
+        cls.syms = extract_file(root / "w.ts", root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_interface_methods_extracted(self):
+        find = next(s for s in self.syms
+                    if s.name == "find" and s.container == "Repo")
+        self.assertEqual(find.kind, "method")
+        self.assertEqual(find.returns, "Promise<User>")
+        self.assertEqual(find.param_names, ["id"])
+
+    def test_untyped_field_bound_through_new_expression(self):
+        widget = next(s for s in self.syms if s.name == "Widget")
+        self.assertIn("picked", widget.fields)
+        ng = next(s for s in self.syms if s.name == "ngOnInit")
+        self.assertEqual(ng.bindings["picked"], "EventEmitter")
+
+    def test_decorated_and_readonly_ctor_params_parse(self):
+        ctor = next(s for s in self.syms if s.kind == "ctor")
+        self.assertEqual(ctor.params, ["Config", "UserService"])
+        self.assertEqual(ctor.param_names, ["cfg", "svc"])
+        ng = next(s for s in self.syms if s.name == "ngOnInit")
+        self.assertEqual(ng.bindings["cfg"], "Config")
+        self.assertEqual(ng.bindings["svc"], "UserService")
+
+
 @_needs("tsx")
 class TsxExtractTest(unittest.TestCase):
     def test_jsx_component_arrow_extracted(self):

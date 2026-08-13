@@ -30,7 +30,8 @@ def _ts_params(node) -> list[str]:
         raw = raw[1:-1]
     types = []
     for p in _split_top_commas(raw, "<([{", ">)]}"):
-        p = re.sub(r"^(private|public|protected|readonly)\s+", "", p.strip())
+        p = re.sub(r"^(?:@[\w.]+(?:\([^)]*\))?\s*)+", "", p.strip())
+        p = re.sub(r"^((private|public|protected|readonly)\s+)+", "", p)
         p = p.split("=")[0]
         types.append(tight_type(p.split(":", 1)[1].strip()) if ":" in p else "?")
     return types
@@ -42,7 +43,8 @@ def _ts_param_names(node) -> list[str]:
         raw = raw[1:-1]
     names: list[str] = []
     for p in _split_top_commas(raw, "<([{", ">)]}"):
-        p = re.sub(r"^(private|public|protected|readonly)\s+", "", p.strip())
+        p = re.sub(r"^(?:@[\w.]+(?:\([^)]*\))?\s*)+", "", p.strip())
+        p = re.sub(r"^((private|public|protected|readonly)\s+)+", "", p)
         p = p.split("=", 1)[0].strip().removeprefix("...")
         name = p.split(":", 1)[0].strip().rstrip("?")
         names.append(name if _IDENT_RE.fullmatch(name) else "")
@@ -96,12 +98,17 @@ def _ts_class_bindings(body) -> dict[str, str]:
     for c in (body.children if body is not None else ()):
         if c.type == "public_field_definition":
             n, t = _ast_field(c, "name"), _ast_field(c, "type")
+            val = _ast_field(c, "value")
             if n is not None and t is not None:
                 binds[_ast_text(n)] = _base_type(_ast_text(t).lstrip(":").strip())
+            elif n is not None and val is not None and val.type == "new_expression":
+                binds[_ast_text(n)] = _base_type(
+                    _ast_text(_ast_field(val, "constructor")))
         if c.type == "method_definition" and _ast_text(_ast_field(c, "name")) == "constructor":
             for p in (_ast_field(c, "parameters") or c).children:
                 if p.type == "required_parameter" and any(
-                        ch.type == "accessibility_modifier" for ch in p.children):
+                        ch.type in ("accessibility_modifier", "readonly")
+                        for ch in p.children):
                     binds.update(_ts_param_bindings_one(p))
     return binds
 
@@ -251,6 +258,10 @@ def _extract_ts(text: str, rel: str, lang: str = "typescript") -> list[Symbol]:
                           and _ast_field(p, "name") is not None]),
             visibility="pub" if _ts_exported(tn) else "priv", lang="typescript",
         ))
+        if kind == "interface" and body is not None:
+            for c in body.children:
+                if c.type == "method_signature":
+                    symbols.append(_ts_fn_symbol(c, rel, name, "pub"))
         if kind == "class" and body is not None:
             class_binds = _ts_class_bindings(body)
             for c in body.children:

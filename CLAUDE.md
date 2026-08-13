@@ -163,7 +163,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 6,859 LOC · state ecac73434465
+# hologram · 6,919 LOC · state 0fd2d3e342a5
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -228,7 +228,7 @@ tools
  test_extract_langs.py{{PythonExtract,TypeScriptExtract,ArrowFunction}Test}
  test_freshness_and_markers.py{{StateAndCheck,TestedMarker,SizeMarker,TestIndex,DepsMap,Embed,ContextTargets,DiffCommand}Test}
  test_more_langs.py{{Go,Rust,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Php,Swift,Scala}ExtractTest,
-                    {CExtract,HtmlNestedBlocks,TsGaps}Test}
+                    {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test}
  test_simple_mode.py{{CallExtraction,SimpleDigest,SameShapeGrouping,RenderUnit,EnumValues,InterfaceMethod,QualifiedCall,FieldNames,ReconstructablePath,LanguageFilter,Relations,Legend,Throws,TransitiveReduction,VoidOmission,GroupExtras,PrivateMembers,CompactMapContract,TightFormat,ZeroUsageMarker}Test}
  test_treesitter.py{TreeSitterJavaTest,MissingParserErrorTest}
 ```
