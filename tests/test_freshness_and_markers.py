@@ -163,6 +163,58 @@ class TestIndexTest(unittest.TestCase):
         self.assertIn("+N=more", out.splitlines()[1])
 
 
+class TestHelperTest(unittest.TestCase):
+    def _proj(self, tmp: Path) -> Path:
+        root = tmp / "p"
+        (root / "tests").mkdir(parents=True)
+        (root / "svc.py").write_text("def run():\n    return 1\n")
+        (root / "tests" / "driver.py").write_text(
+            "class NeutralDriver:\n"
+            "    def send(self, path, body):\n        return run()\n"
+            "    def _internal(self):\n        pass\n")
+        (root / "tests" / "test_svc.py").write_text(
+            "class SvcTest:\n"
+            "    def test_run(self):\n        NeutralDriver().send('/x', b'')\n")
+        return root
+
+    def test_directory_only_test_path_class_becomes_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = build_digest(self._proj(Path(tmp)))
+        self.assertIn("*NeutralDriver(C)", out)
+        self.assertIn("send(path,body) > run", out)   # sig + resolved chain
+        self.assertNotIn("_internal", out.split("*NeutralDriver", 1)[1])
+        self.assertNotIn("*SvcTest", out)             # real test class excluded
+        self.assertIn("*=test helper", out.splitlines()[1])
+
+    def test_no_helpers_no_sigil_no_clause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "p"
+            root.mkdir()
+            (root / "svc.py").write_text("def run():\n    return 1\n")
+            (root / "test_svc.py").write_text(
+                "class SvcTest:\n    def test_run(self):\n        run()\n")
+            out = build_digest(root)
+        self.assertNotIn("*=test helper", out)
+
+    def test_shared_base_detected_via_references(self):
+        from hologram.render import _helper_class_ids
+        base = Symbol(name="BaseIntegrationTest", kind="class",
+                      file="tests/base_test.py", line=1, visibility="pub")
+        toks = {"tests/base_test.py": {"BaseIntegrationTest"},
+                "tests/test_a.py": {"BaseIntegrationTest"},
+                "tests/test_b.py": {"BaseIntegrationTest"},
+                "src/prod.py": {"BaseIntegrationTest"}}
+        self.assertEqual(_helper_class_ids([base], toks), {id(base)})
+        one_ref = {"tests/base_test.py": {"BaseIntegrationTest"},
+                   "tests/test_a.py": {"BaseIntegrationTest"}}
+        self.assertEqual(_helper_class_ids([base], one_ref), set())
+
+    def test_digest_is_deterministic_with_helpers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            self.assertEqual(build_digest(root), build_digest(root))
+
+
 class DepsMapTest(unittest.TestCase):
     def test_cross_module_type_reference_produces_edge(self):
         syms = [
