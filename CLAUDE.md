@@ -163,8 +163,8 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
 
 ```
-# hologram · 6,816 LOC · state 4c9d73e9086d
-· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb
+# hologram · 6,849 LOC · state cc771a425c19
+· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
  drop_workspace(corpus,ws) ✓
@@ -198,9 +198,8 @@ hologram
  - cli.py: _hook_python,_tool_invocation,_managed_hook_line,_dead_hook_scripts,_install_hooks,_uninstall,_warn_if_large
  - embed.py: _embed_block,_block_span,_seed_content
  - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_state,_zero_usage_names
- - render.py: _is_test_path,_tree_lines,_strip_exc,_dep_lines,_total_loc,_symbol_identity,_target_descriptions,
-              _resolved_project_calls,_factored_name_tokens,_factored_names,_private_lines,_braced_lines,
-              _test_index_lines,_legend_line
+ - render.py: _is_test_path,{_tree,_dep,_private,_braced,_test_index}_lines,_strip_exc,_total_loc,_symbol_identity,
+              _target_descriptions,_resolved_project_calls,_factored_name_tokens,_legend_line
  - symbols.py: _parse_throws,_split_top_commas,_base_type,_heritage
  - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
  extract
@@ -224,20 +223,13 @@ hologram
 tools
  measure_tokens.py:main(argv):int
 ? tests
- test_bench.py{TaskLoaderTest,TranscriptMetricsTest,DuplicationDetectorTest,WorkspaceTest,RunOneTest,ReportTest,CliTest}
- test_cli.py{CliBuildTest,InitHooksTest,InitLangTest,BootstrapTest,PrintCommandTest,UninstallTest,SizeWarningTest,
-             HookPythonSelectionTest}
- test_extract_langs.py{PythonExtractTest,TypeScriptExtractTest,ArrowFunctionTest}
- test_freshness_and_markers.py{StateAndCheckTest,TestedMarkerTest,SizeMarkerTest,TestIndexTest,DepsMapTest,EmbedTest,
-                               ContextTargetsTest,DiffCommandTest}
- test_more_langs.py{GoExtractTest,RustExtractTest,CSharpExtractTest,CExtractTest,CppExtractTest,BashExtractTest,
-                    LuaExtractTest,CssExtractTest,HtmlNestedBlocksTest,HtmlExtractTest,HelmExtractTest,KotlinExtractTest,
-                    TsGapsTest,TsxExtractTest,SfcExtractTest,RubyExtractTest,PhpExtractTest,SwiftExtractTest,
-                    ScalaExtractTest}
- test_simple_mode.py{CallExtractionTest,SimpleDigestTest,SameShapeGroupingTest,RenderUnitTest,EnumValuesTest,
-                     InterfaceMethodTest,QualifiedCallTest,FieldNamesTest,ReconstructablePathTest,LanguageFilterTest,
-                     RelationsTest,LegendTest,ThrowsTest,TransitiveReductionTest,VoidOmissionTest,GroupExtrasTest,
-                     PrivateMembersTest,CompactMapContractTest,TightFormatTest,ZeroUsageMarkerTest}
+ test_bench.py{{TaskLoader,TranscriptMetrics,DuplicationDetector,Workspace,RunOne,Report,Cli}Test}
+ test_cli.py{{CliBuild,InitHooks,InitLang,Bootstrap,PrintCommand,Uninstall,SizeWarning,HookPythonSelection}Test}
+ test_extract_langs.py{{PythonExtract,TypeScriptExtract,ArrowFunction}Test}
+ test_freshness_and_markers.py{{StateAndCheck,TestedMarker,SizeMarker,TestIndex,DepsMap,Embed,ContextTargets,DiffCommand}Test}
+ test_more_langs.py{{Go,Rust,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Php,Swift,Scala}ExtractTest,
+                    {CExtract,HtmlNestedBlocks,TsGaps}Test}
+ test_simple_mode.py{{CallExtraction,SimpleDigest,SameShapeGrouping,RenderUnit,EnumValues,InterfaceMethod,QualifiedCall,FieldNames,ReconstructablePath,LanguageFilter,Relations,Legend,Throws,TransitiveReduction,VoidOmission,GroupExtras,PrivateMembers,CompactMapContract,TightFormat,ZeroUsageMarker}Test}
  test_treesitter.py{TreeSitterJavaTest,MissingParserErrorTest}
 ```
 <!-- hologram:end -->

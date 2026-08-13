@@ -289,46 +289,56 @@ _PRIVATE_SEPARATORS = "_./-"
 
 
 def _factored_name_tokens(names: list[str]) -> list[str]:
-    """Losslessly factor repeated identifier prefixes when bytes strictly shrink."""
+    """Losslessly factor repeated prefixes (`p{a,b}`=pa,pb) and suffixes
+    (`{a,b}s`=as,bs) when bytes strictly shrink. Suffix boundaries are a
+    separator char or a lower→upper camel step; ×0-marked names never join
+    suffix groups (the marker must stay outermost)."""
     ordered = list(dict.fromkeys(names))
     remaining = set(range(len(ordered)))
-    groups: list[tuple[int, str, list[int]]] = []
+    groups: list[tuple[int, str, str, list[int]]] = []
     while True:
-        candidates: dict[str, list[int]] = {}
+        candidates: dict[tuple[str, str], list[int]] = {}
         for index in remaining:
             base = ordered[index].removesuffix("×0")
             for pos, char in enumerate(base):
                 prefix = base[:pos + 1]
                 if (char in _PRIVATE_SEPARATORS
                         and any(c not in _PRIVATE_SEPARATORS for c in prefix)):
-                    candidates.setdefault(prefix, []).append(index)
-        choices: list[tuple[int, int, str, list[int]]] = []
-        for prefix, indexes in candidates.items():
+                    candidates.setdefault((prefix, ""), []).append(index)
+            if base != ordered[index]:
+                continue
+            for pos in range(1, len(base)):
+                if (base[pos] in _PRIVATE_SEPARATORS
+                        or (base[pos].isupper() and base[pos - 1].islower())):
+                    suffix = base[pos:]
+                    if any(c not in _PRIVATE_SEPARATORS for c in suffix):
+                        candidates.setdefault(("", suffix), []).append(index)
+        choices: list[tuple[int, int, str, str, list[int]]] = []
+        for (prefix, suffix), indexes in candidates.items():
             indexes = sorted(set(indexes))
             if len(indexes) < 3:
                 continue
             plain = ",".join(ordered[i] for i in indexes)
-            compact = prefix + "{" + ",".join(
-                ordered[i][len(prefix):] for i in indexes) + "}"
+            inner = ",".join(
+                ordered[i][len(prefix):len(ordered[i]) - len(suffix)]
+                for i in indexes)
+            compact = prefix + "{" + inner + "}" + suffix
             saving = len(plain.encode()) - len(compact.encode())
             if saving > 0:
-                choices.append((saving, len(prefix), prefix, indexes))
+                choices.append((saving, len(prefix) + len(suffix),
+                                prefix, suffix, indexes))
         if not choices:
             break
-        saving, _, prefix, indexes = min(
-            choices, key=lambda item: (-item[0], -item[1], item[2]))
-        del saving
-        groups.append((min(indexes), prefix, indexes))
+        _, _, prefix, suffix, indexes = min(
+            choices, key=lambda item: (-item[0], -item[1], item[2], item[3]))
+        groups.append((min(indexes), prefix, suffix, indexes))
         remaining.difference_update(indexes)
     tokens = [(index, ordered[index]) for index in sorted(remaining)]
-    for first, prefix, indexes in groups:
-        tokens.append((first, prefix + "{" + ",".join(
-            ordered[index][len(prefix):] for index in indexes) + "}"))
+    for first, prefix, suffix, indexes in groups:
+        inner = ",".join(ordered[i][len(prefix):len(ordered[i]) - len(suffix)]
+                         for i in indexes)
+        tokens.append((first, prefix + "{" + inner + "}" + suffix))
     return [value for _, value in sorted(tokens)]
-
-
-def _factored_names(names: list[str]) -> str:
-    return ",".join(_factored_name_tokens(names))
 
 
 def _private_lines(prefix: str, names: list[str], width: int = 120) -> list[str]:
@@ -355,7 +365,7 @@ def _braced_lines(label: str, names: list[str], width: int = 120) -> list[str]:
     continuation = " " * len(prefix)
     lines: list[str] = []
     current = prefix
-    for name in names:
+    for name in _factored_name_tokens(names):
         candidate = current + ("," if current != prefix else "") + name
         if len(candidate) + 1 > width and current != prefix:
             lines.append(current + ",")
@@ -415,6 +425,8 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
         items.append("!E=throws")
     if "{" in re.sub(r"\([CRIE]\{", "", text):
         items.append("p{a,b}=pa,pb")
+    if re.search(r"\}[\w-]", text):
+        items.append("{a,b}s=as,bs")
     if " : " in text:
         items.append(":T=supers")
     if "sealed:" in text:

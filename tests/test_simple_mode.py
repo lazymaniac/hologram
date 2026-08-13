@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import hologram  # noqa: E402
 from hologram import (  # noqa: E402
     Symbol,
-    _factored_names,
+    _factored_name_tokens,
     _tree_lines,
     build_digest,
     extract_file,
@@ -425,10 +425,31 @@ class PrivateMembersTest(unittest.TestCase):
         self.assertNotIn("_evict(int)", out)           # no signatures by default
 
     def test_prefix_factoring_is_lossless_and_profitable(self):
-        packed = _factored_names([
+        packed = ",".join(_factored_name_tokens([
             "_extract_java", "_extract_python", "_extract_typescript", "_helper",
-        ])
+        ]))
         self.assertEqual(packed, "_extract_{java,python,typescript},_helper")
+
+    def test_suffix_factoring_camel_and_separator_boundaries(self):
+        packed = ",".join(_factored_name_tokens([
+            "TaskLoaderTest", "WorkspaceTest", "ReportTest", "Runner",
+        ]))
+        self.assertEqual(packed, "{TaskLoader,Workspace,Report}Test,Runner")
+        packed = ",".join(_factored_name_tokens([
+            "load_spec", "save_spec", "drop_spec",
+        ]))
+        self.assertEqual(packed, "{load,save,drop}_spec")
+
+    def test_prefix_and_suffix_groups_claim_disjoint_names(self):
+        # every name reconstructable exactly once; ×0-marked names never
+        # join a suffix group (marker must stay outermost)
+        packed = ",".join(_factored_name_tokens([
+            "_run_a", "_run_b", "_run_c", "AlphaTest", "BetaTest",
+            "GammaTest", "DeltaTest×0",
+        ]))
+        self.assertEqual(
+            packed,
+            "_run_{a,b,c},{Alpha,Beta,Gamma}Test,DeltaTest×0")
 
 
 class CompactMapContractTest(unittest.TestCase):
