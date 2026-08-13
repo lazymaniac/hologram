@@ -163,8 +163,8 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,191 LOC · state 84f3e686c953
-· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · @=route/annotation · p{a,b}=pa,pb · {a,b}s=as,bs
+# hologram · 7,301 LOC · state 2faaf4902686
+· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · @=route/annotation · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
  drop_workspace(corpus,ws) ✓
@@ -187,13 +187,17 @@ hologram
  estimate_tokens(text):int
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
- render_simple(root,symbols,files,state,deps,zero_usage):str ~196 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
+ render_simple(root,symbols,files,state,deps,zero_usage):str ~207 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
  run_cli(argv):int ~112 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_digest_state,embedded_digest,estimate_tokens
  scan_files(root):list[Path] > detect_language
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
  tight_type(t):str
  Symbol(C{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,decorators,size}) @dataclass
+ = cli.py: HOOK_NAMES
+ = embed.py: CONTEXT_FILES,CONTEXT_DIRS
+ = render.py: KIND_LETTER
+ = symbols.py: LANG_EXTENSIONS,DENYLIST_DIRS,TYPE_KINDS,ROUTE_DECORATORS,MARKER_DECORATORS
  - bootstrap.py: _pyz_path,_tool_anchor,_venv_python,_missing_parser_langs,_venv_has_grammars,_bootstrap_or_die
  - cli.py: _hook_python,_tool_invocation,_managed_hook_line,_dead_hook_scripts,_install_hooks,_uninstall,_warn_if_large
  - embed.py: _embed_block,_block_span,_seed_content
@@ -205,6 +209,7 @@ hologram
  - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
  extract
   extract_file(path,root,text):list[Symbol] ✓ !SystemExit > detect_language,has_parser,_grammar_pkgs
+  = __init__.py: EXTRACTORS
   - c_cpp.py: _c_{fn_declarator,params,param_names,field_names,call_entry,static,enum_symbol},_extract_c,_cpp_raises,
               _extract_cpp
   - csharp.py: _cs_{vis,params,param_names,call_entry,local_bindings,raises},_extract_cs
@@ -231,7 +236,7 @@ tools
  test_freshness_and_markers.py{{StateAndCheck,TestedMarker,SizeMarker,TestIndex,DepsMap,Embed,ContextTargets,DiffCommand}Test}
  test_more_langs.py{{Go,Rust,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Php,Swift,Scala}ExtractTest,
                     {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test}
- test_simple_mode.py{{CallExtraction,SimpleDigest,SameShapeGrouping,RenderUnit,EnumValues,InterfaceMethod,QualifiedCall,FieldNames,ReconstructablePath,LanguageFilter,Relations,Legend,RouteRender,Throws,TransitiveReduction,VoidOmission,GroupExtras,PrivateMembers,CompactMapContract,TightFormat,ZeroUsageMarker}Test}
+ test_simple_mode.py{{CallExtraction,SimpleDigest,SameShapeGrouping,RenderUnit,EnumValues,InterfaceMethod,QualifiedCall,FieldNames,ReconstructablePath,LanguageFilter,Relations,Legend,ConstExtract,RouteRender,Throws,TransitiveReduction,VoidOmission,GroupExtras,PrivateMembers,CompactMapContract,TightFormat,ZeroUsageMarker}Test}
  test_treesitter.py{TreeSitterJavaTest,MissingParserErrorTest}
 ```
 <!-- hologram:end -->
