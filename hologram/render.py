@@ -573,7 +573,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     header = (f"# hologram · {loc:,} LOC{state_part}\n"
               "· C/R/I{fields} E{values} T:target · f(args):Ret > project calls · "
               "-=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · "
-              "!E=throws · p{a,b}=pa,pb\n")
+              "!E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · »=re-exports · "
+              "⟨X⟩=own name · deps a→b=a uses b\n")
     dep_part = ("\n".join(deps) + "\n") if deps else ""
     body = _tree_lines(payload_by_dir)
     tests = _test_index_lines(files, symbols, root)
