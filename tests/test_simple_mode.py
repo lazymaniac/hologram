@@ -223,6 +223,14 @@ class LanguageFilterTest(unittest.TestCase):
             self.assertNotIn("py_helper", java_only)
             self.assertIn("PricingEngine", java_only)
 
+    def test_cli_lang_typo_errors_instead_of_empty_map(self):
+        from hologram import run_cli
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", tmp, "--lang", "pyton", "--quiet"])
+        self.assertIn("unknown language", str(ctx.exception))
+        self.assertIn("python", str(ctx.exception))  # known list is shown
+
     def test_cli_lang_flag(self):
         import shutil
 
@@ -263,6 +271,11 @@ class LegendTest(unittest.TestCase):
         self.assertIn("C/R/I{fields}", second)
         self.assertIn("f(args):Ret > project calls", second)
         self.assertIn("?=tests", second)
+
+    def test_legend_covers_all_emitted_notation(self):
+        second = build_digest(JAVAMINI).splitlines()[1]
+        for token in (":T=supers", "sealed:", "»=re-exports", "⟨X⟩", "a→b"):
+            self.assertIn(token, second)
 
     def test_no_query_or_regeneration_prose(self):
         out = build_digest(JAVAMINI)
