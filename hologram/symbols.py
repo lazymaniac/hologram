@@ -89,7 +89,11 @@ ROUTE_DECORATORS: dict[str, str | None] = {
     # NestJS
     "Controller": None, "Get": "GET", "Post": "POST", "Put": "PUT",
     "Delete": "DELETE", "Patch": "PATCH",
+    # ASP.NET Core attributes; Route is shared with Symfony's #[Route]
+    "HttpGet": "GET", "HttpPost": "POST", "HttpPut": "PUT",
+    "HttpDelete": "DELETE", "HttpPatch": "PATCH", "Route": None,
     # Python web frameworks match on the dotted tail: app.route / router.get …
+    # (rust is the one language where these also match bare — actix macros)
     "route": None, "get": "GET", "post": "POST", "put": "PUT",
     "delete": "DELETE", "patch": "PATCH",
 }
@@ -100,6 +104,7 @@ MARKER_DECORATORS = {
     "Transactional", "Scheduled", "KafkaListener", "EventListener",
     "Injectable", "property", "staticmethod", "classmethod",
     "abstractmethod", "cached_property", "fixture", "memo", "forwardRef",
+    "ApiController",
 }
 
 # decorators that mean "invoked by a framework, not by project code": their

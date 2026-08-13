@@ -162,7 +162,8 @@ def _framework_invoked(sym: Symbol) -> bool:
     for d in sym.decorators:
         base = d.split("(", 1)[0].strip()
         tail = base.split(".")[-1]
-        if tail in ENTRYPOINT_DECORATORS and ("." in base or tail not in web_verbs):
+        if tail in ENTRYPOINT_DECORATORS and (
+                "." in base or tail not in web_verbs or sym.lang == "rust"):
             return True
     return False
 
