@@ -15,17 +15,23 @@ jobs:
       - run: python -m pip install build
       - run: python -m build
       - name: Build single-file zipapp
+        # into its own directory — the PyPI publish job uploads everything in
+        # dist/, and a .pyz there fails twine's distribution check
         run: |
-          mkdir -p staging dist
+          mkdir -p staging pyz
           cp -R hologram staging/
           find staging -name __pycache__ -type d -exec rm -rf {} +
-          python -m zipapp staging -o dist/hologram.pyz \
+          python -m zipapp staging -o pyz/hologram.pyz \
             -p "/usr/bin/env python3" -m "hologram.cli:main" --compress
-          python3 dist/hologram.pyz --version
+          python3 pyz/hologram.pyz --version
       - uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pyz
+          path: pyz/
 
   publish:
     needs: build
@@ -50,6 +56,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dist
+          path: dist/
+      - uses: actions/download-artifact@v4
+        with:
+          name: pyz
           path: dist/
       - name: Extract changelog section for this tag
         run: |
