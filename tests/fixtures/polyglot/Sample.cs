@@ -14,6 +14,7 @@ public class PricingEngine : IPricer {
     public PricingEngine(Dictionary<string, long> prices) { this.prices = prices; }
 
     public Quote Evaluate(OrderId id) {
+        if (id.Value.Length == 0) throw new UnknownOrderException(id);
         var total = Compute(id);
         return new Quote(total);
     }

@@ -13,7 +13,11 @@ class PricingEngine(private val prices: Map<String, Long>) : Pricer {
         val total = compute(id)
         return total
     }
-    private fun compute(id: OrderId): Long = prices.size.toLong()
+    @Throws(UnknownOrderException::class)
+    private fun compute(id: OrderId): Long {
+        if (prices.isEmpty()) throw IllegalStateException("empty")
+        return prices.size.toLong()
+    }
 }
 
 fun normalize(items: List<Long>): List<Long> = items
