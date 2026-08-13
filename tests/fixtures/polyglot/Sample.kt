@@ -17,3 +17,9 @@ class PricingEngine(private val prices: Map<String, Long>) : Pricer {
 }
 
 fun normalize(items: List<Long>): List<Long> = items
+
+fun demo(prices: Map<String, Long>): Long {
+    val engine = PricingEngine(prices)
+    val backup: Pricer = engine
+    return engine.quote(OrderId("x")) + backup.quote(OrderId("y"))
+}
