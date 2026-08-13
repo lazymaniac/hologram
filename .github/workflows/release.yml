@@ -12,6 +12,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Tag must match the package version
+        # fail here, at build, instead of at PyPI upload with "file already
+        # exists" after a tag was pushed without bumping _version.py
+        run: |
+          pkg="$(python -c 'from hologram._version import __version__; print(__version__)')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pkg" != "$tag" ]; then
+            echo "::error::tag v$tag but hologram/_version.py says $pkg — bump the version and re-tag"
+            exit 1
+          fi
       - run: python -m pip install build
       - run: python -m build
       - name: Build single-file zipapp
