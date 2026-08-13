@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 7,537 LOC · state 48af4152f1ed
+# hologram · 7,606 LOC · state a2319a81fa69
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -189,8 +189,8 @@ hologram
  estimate_tokens(text):int
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
- render_simple(root,symbols,files,state,deps,zero_usage):str ~227 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
- run_cli(argv):int ~112 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_digest_state,embedded_digest,estimate_tokens
+ render_simple(root,symbols,files,state,deps,zero_usage,langs):str ~230 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
+ run_cli(argv):int ~124 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_digest_langs,embedded_digest,_digest_state,estimate_tokens
  scan_files(root):list[Path] > detect_language
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
@@ -203,7 +203,7 @@ hologram
  - bootstrap.py: _pyz_path,_tool_anchor,_venv_python,_missing_parser_langs,_venv_has_grammars,_bootstrap_or_die
  - cli.py: _hook_python,_tool_invocation,_managed_hook_line,_dead_hook_scripts,_install_hooks,_uninstall,_warn_if_large
  - embed.py: _embed_block,_block_span,_seed_content
- - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_state,_framework_invoked,
+ - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_state,_digest_langs,_framework_invoked,
               _zero_usage_names
  - render.py: _is_test_path,{_tree,_dep,_private,_braced,_test_index}_lines,_strip_exc,_total_loc,_symbol_identity,
               _target_descriptions,_resolved_project_calls,_decorator_notes,_factored_name_tokens,_legend_line
@@ -233,7 +233,7 @@ tools
  measure_tokens.py:main(argv):int
 ? tests
  test_bench.py{{TaskLoader,TranscriptMetrics,DuplicationDetector,Workspace,RunOne,Report,Cli}Test}
- test_cli.py{{CliBuild,InitHooks,InitLang,Bootstrap,PrintCommand,Uninstall,SizeWarning,HookPythonSelection}Test}
+ test_cli.py{{CliBuild,InitHooks,InitLang,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,SizeWarning,HookPythonSelection}Test}
  test_extract_langs.py{{Python,TypeScript,Decorator}ExtractTest,ArrowFunctionTest}
  test_freshness_and_markers.py{{StateAndCheck,TestedMarker,SizeMarker,TestIndex,DepsMap,Embed,ContextTargets,DiffCommand}Test}
  test_more_langs.py{{Go,Rust,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Angular,Tsx,Sfc,Ruby,Php,Swift,Scala}ExtractTest,

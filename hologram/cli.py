@@ -14,7 +14,7 @@ from .bootstrap import (_bootstrap_or_die, _missing_parser_langs, _pyz_path,
                         _venv_python)
 from .embed import _block_span, context_targets, embed_digest, embedded_digest
 from .extract import EXTRACTORS
-from .gather import _digest_state, _state_hash, scan_files
+from .gather import _digest_langs, _digest_state, _state_hash, scan_files
 from .render import build_digest, estimate_tokens
 from .symbols import detect_language
 
@@ -160,7 +160,9 @@ def run_cli(argv: list[str] | None = None) -> int:
     common.add_argument("--root", type=Path, default=Path.cwd())
     common.add_argument("--lang", action="append", default=None,
                         help="restrict to language(s), repeatable or comma-separated "
-                             "(java, python, typescript, javascript)")
+                             "(java, python, typescript, javascript). The filter is "
+                             "recorded in the map and reused by later rebuilds; "
+                             "--lang all clears it")
     common.add_argument("--quiet", action="store_true")
     common.add_argument("--warn-tokens", type=int, default=25000, metavar="N",
                         help="warn on stderr when the map exceeds N estimated "
@@ -191,16 +193,26 @@ def run_cli(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
+    targets = context_targets(root)
     langs = None
     if getattr(args, "lang", None):
         langs = {l.strip() for arg in args.lang for l in arg.split(",") if l.strip()}
-        unknown = langs - set(EXTRACTORS)
-        if unknown:
-            raise SystemExit(
-                f"unknown language{'s' if len(unknown) > 1 else ''}: "
-                f"{', '.join(sorted(unknown))}\n"
-                f"known: {', '.join(sorted(EXTRACTORS))}")
-    targets = context_targets(root)
+        if langs == {"all"}:
+            langs = None  # explicit reset of a stored filter
+        else:
+            unknown = langs - set(EXTRACTORS)
+            if unknown:
+                raise SystemExit(
+                    f"unknown language{'s' if len(unknown) > 1 else ''}: "
+                    f"{', '.join(sorted(unknown))}\n"
+                    f"known: {', '.join(sorted(EXTRACTORS))}")
+    else:
+        # no --lang given: recall the filter a previous build stamped into the map
+        for t in targets:
+            stored = _digest_langs(embedded_digest(t))
+            if stored:
+                langs = stored & set(EXTRACTORS) or None
+                break
     state = _state_hash(root, langs)
     stale = [t for t in targets if _digest_state(embedded_digest(t)) != state]
 

@@ -105,6 +105,52 @@ class InitLangTest(unittest.TestCase):
             self.assertIn("--lang java", hook)
 
 
+class LangFilterPersistenceTest(unittest.TestCase):
+    """--lang is stamped into the map header and recalled by later commands."""
+
+    def _proj(self, tmp: Path) -> Path:
+        root = tmp / "p"
+        root.mkdir()
+        (root / "app.py").write_text("def visible():\n    pass\n")
+        (root / "tool.sh").write_text("hidden() {\n  true\n}\n")
+        return root
+
+    def test_filter_stamped_recalled_and_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--lang", "python", "--quiet"])
+            text = (root / "CLAUDE.md").read_text()
+            self.assertIn("· langs python", text)
+            self.assertNotIn("hidden", text)
+            # check without --lang recalls the filter
+            self.assertEqual(run_cli(["check", "--root", str(root),
+                                      "--quiet"]), 0)
+            # out-of-filter edits don't stale the map; in-filter edits do
+            (root / "tool.sh").write_text("changed() {\n  true\n}\n")
+            self.assertEqual(run_cli(["check", "--root", str(root),
+                                      "--quiet"]), 0)
+            (root / "app.py").write_text("def visible2():\n    pass\n")
+            self.assertEqual(run_cli(["check", "--root", str(root),
+                                      "--quiet"]), 1)
+            # rebuild without --lang keeps the stored filter
+            run_cli(["build", "--root", str(root), "--quiet"])
+            text = (root / "CLAUDE.md").read_text()
+            self.assertIn("· langs python", text)
+            self.assertIn("visible2", text)
+            self.assertNotIn("changed", text)
+
+    @unittest.skipUnless(hologram.has_parser("bash"),
+                         "tree-sitter-bash not installed")
+    def test_lang_all_clears_stored_filter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--lang", "python", "--quiet"])
+            run_cli(["build", "--root", str(root), "--lang", "all", "--quiet"])
+            text = (root / "CLAUDE.md").read_text()
+            self.assertNotIn("· langs", text)
+            self.assertIn("hidden", text)
+
+
 class BootstrapTest(unittest.TestCase):
     def test_missing_parser_langs_detects_gap(self):
         files = [JAVAMINI / "src/App.java", PYMINI_FILE]

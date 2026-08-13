@@ -170,7 +170,10 @@ Everything it can do:
 
 ```bash
 hologram build --root .                    # refresh the embedded map
-hologram build --root . --lang java        # limit to one or more languages
+hologram build --root . --lang java        # limit to one or more languages;
+                                           # the filter is stamped into the map and
+                                           # reused by every later rebuild/check
+                                           # (clear with --lang all)
 hologram build --root . --if-stale         # rebuild only if the code changed
 hologram check --root .                    # is every context file current? exit 0 yes / 1 no
 hologram diff HEAD~3 --root .              # how did the API change since then?
