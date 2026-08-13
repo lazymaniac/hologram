@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 8,412 LOC · state 5580a80e151b
+# hologram · 8,418 LOC · state 52167e0a53ad
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -173,11 +173,11 @@ benchmark
  judge_reuse(before,after,expect_reuse):dict ✓ > _sig_lines,_fn_name,_chain
  load_tasks(path):Config ✓ !SystemExit > Config,Task
  bench.py:main(argv):int ~48 ✓ > load_tasks,report,run_one
- make_workspace(corpus,ws,condition):Path ✓
+ make_workspace(corpus,ws,condition,lang):Path ✓
  parse_transcript(text):dict ~45 ✓
  report(rows,anon):str ~49 ✓
- run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner):dict ✓ > make_workspace,_digest_of,judge_reuse,parse_transcript,drop_workspace
- Config(R{corpus,tasks,model,max_turns})
+ run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang):dict ✓ > make_workspace,_digest_of,judge_reuse,parse_transcript,drop_workspace
+ Config(R{corpus,tasks,model,max_turns,lang})
  Task(R{id,kind,prompt,accept_cmd,expect_reuse,expect_answer,max_turns})
  - bench.py: _sig_lines,_fn_name,_chain,_digest_of,_dry_runner
 hologram
