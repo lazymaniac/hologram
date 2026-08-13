@@ -163,7 +163,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
 
 ```
-# hologram · 6,697 LOC · state 24f1e187ae6a
+# hologram · 6,757 LOC · state d1d4f274b8d4
 · C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · »=re-exports · ⟨X⟩=own name · deps a→b=a uses b
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -221,6 +221,8 @@ hologram
   - swift.py: _sw_{vis,params,return,call_entry,local_bindings,fn_symbol},_extract_swift
   - ts.py: _ts_{exported,params,param_names,return,call_entry,calls,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,top_level_arrows,aliases_and_reexports},
            _extract_{ts,tsx,sfc}
+tools
+ measure_tokens.py:main(argv):int
 ? tests
  test_bench.py{TaskLoaderTest,TranscriptMetricsTest,DuplicationDetectorTest,WorkspaceTest,RunOneTest,ReportTest,CliTest}
  test_cli.py{CliBuildTest,InitHooksTest,InitLangTest,BootstrapTest,PrintCommandTest,UninstallTest,SizeWarningTest,
