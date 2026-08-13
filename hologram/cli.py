@@ -12,9 +12,11 @@ from pathlib import Path
 from ._version import __version__
 from .bootstrap import (_bootstrap_or_die, _missing_parser_langs, _pyz_path,
                         _venv_python)
-from .embed import _block_span, context_targets, embed_digest, embedded_digest
+from .embed import (_block_span, _target_candidates, context_targets,
+                    embed_digest, embedded_digest)
 from .extract import EXTRACTORS
-from .gather import _digest_langs, _digest_state, _state_hash, scan_files
+from .gather import (_digest_langs, _digest_state, _digest_targets,
+                     _state_hash, scan_files)
 from .render import build_digest, estimate_tokens
 from .symbols import detect_language
 
@@ -122,6 +124,24 @@ def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None) -> No
 _MANAGED_BASENAMES = ("hologram.md", "hologram.mdc", "hologram.instructions.md")
 
 
+def _strip_block(root: Path, t: Path) -> str | None:
+    """Remove the managed block from one context file: rule files hologram
+    itself created are deleted outright, others keep their prose. Returns a
+    display string for reporting, or None if nothing changed."""
+    if not t.is_file():
+        return None
+    if t.name in _MANAGED_BASENAMES:
+        t.unlink()
+        return f"{t.relative_to(root)} (deleted)"
+    existing = t.read_text()
+    span = _block_span(existing)
+    if span is None:
+        return None
+    cleaned = (existing[:span[0]] + existing[span[1]:]).strip("\n")
+    t.write_text(cleaned + "\n" if cleaned else "")
+    return str(t.relative_to(root))
+
+
 def _uninstall(root: Path, keep_blocks: bool, quiet: bool) -> None:
     """Remove managed hook lines (deleting a hook file left with only its shebang)
     and, unless keep_blocks, strip embedded map blocks — deleting outright the rule
@@ -144,19 +164,9 @@ def _uninstall(root: Path, keep_blocks: bool, quiet: bool) -> None:
             removed.append(f".git/hooks/{name}")
     if not keep_blocks:
         for t in context_targets(root):
-            if not t.is_file():
-                continue
-            if t.name in _MANAGED_BASENAMES:
-                t.unlink()
-                removed.append(f"{t.relative_to(root)} (deleted)")
-                continue
-            existing = t.read_text()
-            span = _block_span(existing)
-            if span is None:
-                continue
-            cleaned = (existing[:span[0]] + existing[span[1]:]).strip("\n")
-            t.write_text(cleaned + "\n" if cleaned else "")
-            removed.append(str(t.relative_to(root)))
+            stripped = _strip_block(root, t)
+            if stripped is not None:
+                removed.append(stripped)
     if not quiet:
         print("removed: " + (", ".join(removed) if removed else "nothing"))
 
@@ -179,6 +189,13 @@ def run_cli(argv: list[str] | None = None) -> int:
                              "(java, python, typescript, javascript). The filter is "
                              "recorded in the map and reused by later rebuilds; "
                              "--lang all clears it")
+    common.add_argument("--target", action="append", default=None,
+                        help="embed only into the named context file(s), "
+                             "repeatable or comma-separated (CLAUDE.md, "
+                             "AGENTS.md, .cursor/rules/hologram.mdc, …). "
+                             "Recorded in the map and reused by later "
+                             "rebuilds; blocks in deselected files are "
+                             "removed; --target all restores auto-detection")
     common.add_argument("--quiet", action="store_true")
     common.add_argument("--warn-tokens", type=int, default=25000, metavar="N",
                         help="warn on stderr when the map exceeds N estimated "
@@ -210,6 +227,28 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     root = args.root.resolve()
     targets = context_targets(root)
+    target_names: list[str] | None = None
+    if getattr(args, "target", None):
+        wanted = [t.strip() for arg in args.target for t in arg.split(",")
+                  if t.strip()]
+        if wanted == ["all"]:
+            target_names = None  # explicit reset of a stored restriction
+        else:
+            candidates = _target_candidates(root)
+            resolved: list[Path] = []
+            for w in wanted:
+                exact = [c for c in candidates
+                         if str(c.relative_to(root)) == w]
+                by_name = [c for c in candidates if c.name == w]
+                match = exact or by_name
+                if len(match) != 1:
+                    listing = ", ".join(str(c.relative_to(root))
+                                        for c in candidates)
+                    kind_of = "ambiguous" if len(match) > 1 else "unknown"
+                    raise SystemExit(f"{kind_of} target: {w}\n"
+                                     f"candidates: {listing}")
+                resolved.append(match[0])
+            target_names = sorted(str(p.relative_to(root)) for p in resolved)
     langs = None
     if getattr(args, "lang", None):
         langs = {l.strip() for arg in args.lang for l in arg.split(",") if l.strip()}
@@ -229,6 +268,20 @@ def run_cli(argv: list[str] | None = None) -> int:
             if stored:
                 langs = stored & set(EXTRACTORS) or None
                 break
+    if target_names is None and not getattr(args, "target", None):
+        # no --target given: recall a stored restriction the same way
+        for t in targets:
+            stored_t = _digest_targets(embedded_digest(t))
+            if stored_t:
+                target_names = stored_t
+                break
+    if target_names is not None:
+        deselected = [t for t in targets
+                      if str(t.relative_to(root)) not in target_names]
+        targets = [root / n for n in target_names]
+        if getattr(args, "target", None) and args.cmd in ("build", "init"):
+            for t in deselected:
+                _strip_block(root, t)
     state = _state_hash(root, langs)
     stale = [t for t in targets if _digest_state(embedded_digest(t)) != state]
 
@@ -276,7 +329,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "print":
-        digest = build_digest(root, langs=langs)
+        digest = build_digest(root, langs=langs, targets=target_names)
         _warn_if_large(digest, args.warn_tokens)
         print(digest, end="")
         return 0
@@ -287,7 +340,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(f"hologram: warning: a git hook still points at {script}, which no "
               f"longer exists — run `hologram init --root {root}` to repair it",
               file=sys.stderr)
-    digest = build_digest(root, langs=langs)
+    digest = build_digest(root, langs=langs, targets=target_names)
     _warn_if_large(digest, args.warn_tokens)
     for t in targets:
         embed_digest(t, digest)

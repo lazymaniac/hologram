@@ -128,6 +128,72 @@ class HookQuotingTest(unittest.TestCase):
         self.assertEqual(hook.count("build --root"), 1)
 
 
+class TargetOptionTest(unittest.TestCase):
+    """--target restricts which context files carry the map; the restriction
+    is stamped into the header and recalled by flagless rebuilds."""
+
+    def _proj(self, tmp: Path) -> Path:
+        root = tmp / "p"
+        root.mkdir()
+        (root / "app.py").write_text("def run():\n    pass\n")
+        (root / "CLAUDE.md").write_text("# claude prose\n")
+        (root / "AGENTS.md").write_text("# agents prose\n")
+        return root
+
+    def test_restrict_stamps_recalls_and_prunes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--quiet"])
+            self.assertIn("hologram:start", (root / "AGENTS.md").read_text())
+            run_cli(["build", "--root", str(root), "--target", "CLAUDE.md",
+                     "--quiet"])
+            claude = (root / "CLAUDE.md").read_text()
+            agents = (root / "AGENTS.md").read_text()
+            self.assertIn("· targets CLAUDE.md", claude)
+            self.assertNotIn("hologram:start", agents)   # block pruned
+            self.assertIn("agents prose", agents)         # prose survives
+            # check validates only the stamped subset
+            self.assertEqual(run_cli(["check", "--root", str(root),
+                                      "--quiet"]), 0)
+            # flagless rebuild respects the stamp
+            (root / "app.py").write_text("def run2():\n    pass\n")
+            run_cli(["build", "--root", str(root), "--quiet"])
+            self.assertNotIn("hologram:start", (root / "AGENTS.md").read_text())
+            self.assertIn("run2", (root / "CLAUDE.md").read_text())
+
+    def test_target_all_restores_autodetect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--target", "CLAUDE.md",
+                     "--quiet"])
+            run_cli(["build", "--root", str(root), "--target", "all",
+                     "--quiet"])
+            self.assertIn("hologram:start", (root / "AGENTS.md").read_text())
+            self.assertNotIn("· targets", (root / "CLAUDE.md").read_text())
+
+    def test_unknown_and_ambiguous_targets_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", str(root), "--target", "NOPE.md",
+                         "--quiet"])
+            self.assertIn("unknown target", str(ctx.exception))
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", str(root), "--target",
+                         "hologram.md", "--quiet"])
+            self.assertIn("ambiguous target", str(ctx.exception))
+
+    def test_named_target_created_when_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "p"
+            root.mkdir()
+            (root / "app.py").write_text("def run():\n    pass\n")
+            run_cli(["build", "--root", str(root), "--target", "AGENTS.md",
+                     "--quiet"])
+            self.assertIn("hologram:start", (root / "AGENTS.md").read_text())
+            self.assertFalse((root / "CLAUDE.md").exists())
+
+
 class LangFilterPersistenceTest(unittest.TestCase):
     """--lang is stamped into the map header and recalled by later commands."""
 
