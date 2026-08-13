@@ -492,6 +492,31 @@ class AngularExtractTest(unittest.TestCase):
         self.assertIn("/users→UserListComponent", out)
         self.assertNotIn("ngOnInit() ×0", out)  # lifecycle hook is not dead code
 
+    def test_inline_template_elements_become_component_edges(self):
+        app = next(s for s in self.syms if s.name == "AppComponent")
+        self.assertIn("app-user-list", app.calls)
+        out = build_digest(WEBMINI)
+        self.assertIn("AppComponent(C{all}) @app-root > UserListComponent", out)
+
+    def test_templateurl_external_html_joins(self):
+        out = build_digest(WEBMINI)
+        self.assertIn("ShellComponent(C) @app-shell > UserListComponent", out)
+
+    def test_duplicate_selector_produces_no_edge(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.ts").write_text(
+                "@Component({ selector: 'app-x', template: '<i></i>' })\n"
+                "export class XComponent {}\n"
+                "@Component({ selector: 'app-x', template: '<i></i>' })\n"
+                "export class YComponent {}\n"
+                "@Component({ selector: 'app-z', template: '<app-x/>' })\n"
+                "export class ZComponent {}\n")
+            out = build_digest(root)
+        self.assertNotIn("> XComponent", out)
+        self.assertNotIn("> YComponent", out)
+
 
 @_needs("typescript")
 class TsLossRecoveryTest(unittest.TestCase):

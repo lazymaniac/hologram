@@ -6,6 +6,14 @@ export class UserService {
 }
 
 @Component({
+  selector: 'app-root',
+  template: '<main><app-user-list [users]="all"></app-user-list></main>',
+})
+export class AppComponent {
+  all: string[] = [];
+}
+
+@Component({
   selector: 'app-user-list',
   template: '<ul><li *ngFor="let u of users">{{ u }}</li></ul>',
 })
