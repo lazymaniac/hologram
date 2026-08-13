@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import hologram  # noqa: E402
-from hologram import extract_file  # noqa: E402
+from hologram import build_digest, extract_file  # noqa: E402
 
 POLY = Path(__file__).resolve().parent / "fixtures" / "polyglot"
 
@@ -380,6 +380,69 @@ class TsGapsTest(unittest.TestCase):
     def test_reexports(self):
         reex = {s.name for s in self.syms if s.kind == "reexport"}
         self.assertEqual(reex, {"OrderId", "PriceQuote"})
+
+
+WEBMINI = Path(__file__).resolve().parent / "fixtures" / "webmini"
+
+
+@_needs("tsx")
+class ReactComponentTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(WEBMINI / "Component.tsx", WEBMINI)
+
+    def test_jsx_usage_becomes_calls_intrinsics_dropped(self):
+        ul = next(s for s in self.syms if s.name == "UserList")
+        self.assertIn("UserCard", ul.calls)
+        self.assertIn("Badge", ul.calls)
+        self.assertNotIn("section", ul.calls)
+
+    def test_memo_wrapped_default_export_recovered(self):
+        page = next(s for s in self.syms if s.name == "Page")
+        self.assertEqual(page.decorators, ["memo"])
+        self.assertIn("UserList", page.calls)
+
+    def test_fc_type_argument_replaces_untyped_props(self):
+        card = next(s for s in self.syms if s.name == "UserCard")
+        self.assertEqual(card.params, ["Props"])
+
+    def test_component_render_tree_in_digest(self):
+        out = build_digest(WEBMINI)
+        page_line = next(ln for ln in out.splitlines() if "Page()" in ln)
+        self.assertIn("@memo", page_line)
+        self.assertIn("UserList", page_line.split(">", 1)[1])
+
+
+@_needs("typescript")
+class AngularExtractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.syms = extract_file(WEBMINI / "app.component.ts", WEBMINI)
+
+    def test_component_selector_and_injectable(self):
+        comp = next(s for s in self.syms if s.name == "UserListComponent")
+        self.assertTrue(any(d.startswith("Component(") for d in comp.decorators))
+        svc = next(s for s in self.syms if s.name == "UserService")
+        self.assertEqual(svc.decorators, ["Injectable()"])
+
+    def test_di_and_output_bindings(self):
+        ng = next(s for s in self.syms if s.name == "ngOnInit")
+        self.assertEqual(ng.bindings["svc"], "UserService")
+        self.assertEqual(ng.bindings["cfg"], "Config")
+        self.assertEqual(ng.bindings["picked"], "EventEmitter")
+
+    def test_route_config_extracted(self):
+        syms = extract_file(WEBMINI / "app.routes.ts", WEBMINI)
+        routes = next(s for s in syms if s.kind == "const")
+        self.assertEqual(
+            routes.signature,
+            "routes=/users→UserListComponent,/orders/:id→OrderComponent")
+
+    def test_digest_shows_selector_and_routes(self):
+        out = build_digest(WEBMINI)
+        self.assertIn("@app-user-list", out)
+        self.assertIn("/users→UserListComponent", out)
+        self.assertNotIn("ngOnInit() ×0", out)  # lifecycle hook is not dead code
 
 
 @_needs("typescript")

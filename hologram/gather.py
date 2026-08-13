@@ -148,6 +148,9 @@ def _digest_state(digest: str) -> str | None:
 def _framework_invoked(sym: Symbol) -> bool:
     """Bearers of route/scheduler/listener decorators are called by the
     framework, so zero static use is expected, not evidence of dead code."""
+    if (sym.lang == "typescript" and sym.kind == "method"
+            and re.match(r"ng[A-Z]", sym.name)):
+        return True  # Angular lifecycle hooks (ngOnInit, ngOnDestroy, …)
     web_verbs = ("route", "get", "post", "put", "delete", "patch")
     for d in sym.decorators:
         base = d.split("(", 1)[0].strip()
