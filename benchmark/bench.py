@@ -179,6 +179,17 @@ def make_workspace(corpus: Path, ws: Path, condition: str,
     `git diff` shows exactly what the agent changed."""
     subprocess.run(["git", "-C", str(corpus), "worktree", "add", "--detach",
                     "-f", str(ws), "HEAD"], check=True, capture_output=True)
+    # A corpus whose committed context files already carry an embedded map
+    # would contaminate the control condition — strip any pre-existing
+    # blocks in both conditions; A rebuilds its own below.
+    for target in hologram.context_targets(ws):
+        if not target.is_file():
+            continue
+        text = target.read_text()
+        span = hologram.embed._block_span(text)
+        if span is not None:
+            cleaned = (text[:span[0]] + text[span[1]:]).strip("\n")
+            target.write_text(cleaned + "\n" if cleaned else "")
     claude_path = ws / "CLAUDE.md"
     existing = claude_path.read_text() if claude_path.exists() else ""
     claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
