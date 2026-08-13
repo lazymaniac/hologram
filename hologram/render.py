@@ -473,25 +473,54 @@ def _braced_lines(label: str, names: list[str], width: int = 120) -> list[str]:
     return lines
 
 
-def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path) -> list[str]:
+_EDGE_CAP = 3  # coverage-edge targets shown per test class; rest summarize to +N
+
+
+def _edge_suffix(targets: list[str]) -> str:
+    if not targets:
+        return ""
+    shown = targets[:_EDGE_CAP]
+    more = len(targets) - len(shown)
+    return f" > {','.join(shown)}" + (f" +{more}" if more else "")
+
+
+def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
+                      resolved_calls: dict[int, list[str]] | None = None
+                      ) -> list[str]:
     test_paths = sorted(str(path.relative_to(root)) for path in files
                         if _is_test_path(str(path.relative_to(root))))
     if not test_paths:
         return []
     classes: dict[str, list[str]] = {}
+    # (file, class) -> production symbols the class's methods resolve to; the
+    # per-class view of the same edges the ✓ marker flattens
+    edges: dict[tuple[str, str], list[str]] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
-        if _is_test_path(symbol.file) and symbol.kind == "class":
+        if not _is_test_path(symbol.file):
+            continue
+        if symbol.kind == "class":
             names = classes.setdefault(symbol.file, [])
             if symbol.name not in names:
                 names.append(symbol.name)
+        elif symbol.kind in ("fn", "method", "ctor") and resolved_calls:
+            key = (symbol.file, symbol.container or "")
+            merged = edges.setdefault(key, [])
+            merged[:] = list(dict.fromkeys(
+                merged + resolved_calls.get(id(symbol), [])))
     first_parts = {Path(path).parts[0] for path in test_paths if Path(path).parts}
     strip_first = (len(first_parts) == 1
                    and next(iter(first_parts)).casefold() in ("test", "tests", "__tests__"))
     payloads: dict[str, list[str]] = {}
     for path in test_paths:
         display = Path(*Path(path).parts[1:]) if strip_first else Path(path)
+        in_braces = [n for n in classes.get(path, [])
+                     if not edges.get((path, n))]
+        file_line = _braced_lines(display.name, in_braces)
+        file_line[-1] += _edge_suffix(edges.get((path, ""), []))
+        own_lines = [f" {n}{_edge_suffix(edges[(path, n)])}"
+                     for n in classes.get(path, []) if edges.get((path, n))]
         payloads.setdefault(str(display.parent), []).extend(
-            _braced_lines(display.name, classes.get(path, [])))
+            file_line + own_lines)
     return ["? tests", *(" " + line for line in _tree_lines(payloads))]
 
 
@@ -528,6 +557,8 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
         items.append("p{a,b}=pa,pb")
     if re.search(r"\}[\w-]", text):
         items.append("{a,b}s=as,bs")
+    if re.search(r" \+\d+\b", text):
+        items.append("+N=more")
     if " : " in text:
         items.append(":T=supers")
     if "sealed:" in text:
@@ -772,7 +803,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         state_part += f" · targets {','.join(sorted(targets))}"
     dep_part = ("\n".join(deps) + "\n") if deps else ""
     body = _tree_lines(payload_by_dir)
-    tests = _test_index_lines(files, symbols, root)
+    tests = _test_index_lines(files, symbols, root, resolved_calls)
     if tests:
         body.extend(tests)
     has_priv = bool(priv_top_by_file or priv_methods_by_owner)

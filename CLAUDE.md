@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 8,434 LOC · state 8d9cc2972951
+# hologram · 8,492 LOC · state 995f0dda4762
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
@@ -208,7 +208,8 @@ hologram
  - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_{state,langs,targets},_framework_invoked,
               _zero_usage_names
  - render.py: _is_test_path,{_tree,_dep,_private,_braced,_test_index}_lines,_strip_exc,_total_loc,_symbol_identity,
-              _target_descriptions,_resolved_project_calls,_decorator_notes,_factored_name_tokens,_legend_line
+              _target_descriptions,_resolved_project_calls,_decorator_notes,_factored_name_tokens,_edge_suffix,
+              _legend_line
  - symbols.py: _parse_throws,_split_top_commas,_base_type,_heritage
  - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
  extract
@@ -235,13 +236,88 @@ hologram
 tools
  measure_tokens.py:main(argv):int
 ? tests
- test_bench.py{{TaskLoader,TranscriptMetrics,DuplicationDetector,Workspace,RunOne,Report,Cli}Test}
- test_cli.py{{CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,SizeWarning,HookPythonSelection}Test}
- test_extract_langs.py{{Python,TypeScript,Decorator}ExtractTest,ArrowFunctionTest}
- test_freshness_and_markers.py{{StateAndCheck,TestedMarker,SizeMarker,TestIndex,DepsMap,Embed,ContextTargets,DiffCommand}Test}
- test_more_langs.py{{Go,Rust,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Angular,Tsx,Sfc,Ruby,Php,Swift,Scala}ExtractTest,
-                    {CExtract,HtmlNestedBlocks,TsGaps,ReactComponent,TsLossRecovery}Test}
- test_simple_mode.py{{CallExtraction,SimpleDigest,SameShapeGrouping,RenderUnit,EnumValues,InterfaceMethod,QualifiedCall,FieldNames,ReconstructablePath,LanguageFilter,Relations,InterfaceImplementors,Legend,ConstExtract,SecretRedaction,RouteRender,Throws,TransitiveReduction,VoidOmission,GroupExtras,PrivateMembers,CompactMapContract,TightFormat,ZeroUsageMarker}Test}
+ test_bench.py
+  TaskLoaderTest > load_tasks
+  TranscriptMetricsTest > parse_transcript
+  DuplicationDetectorTest > judge_reuse
+  WorkspaceTest > make_workspace,drop_workspace
+  RunOneTest > run_one
+  ReportTest > report
+  CliTest > bench.main
+ test_cli.py
+  CliBuildTest > run_cli
+  InitHooksTest > run_cli
+  InitLangTest > run_cli
+  HookQuotingTest > run_cli
+  TargetOptionTest > run_cli
+  LangFilterPersistenceTest > run_cli
+  BootstrapTest > run_cli
+  PrintCommandTest > run_cli
+  UninstallTest > run_cli
+  SizeWarningTest > run_cli
+  HookPythonSelectionTest > _hook_python
+ test_extract_langs.py
+  PythonExtractTest > extract_file
+  TypeScriptExtractTest > extract_file
+  ArrowFunctionTest > extract_file
+  DecoratorExtractTest > extract_file
+ test_freshness_and_markers.py
+  StateAndCheckTest > run_cli,_generator_fingerprint
+  TestedMarkerTest > build_digest
+  SizeMarkerTest > build_digest
+  TestIndexTest > build_digest
+  DepsMapTest > Symbol
+  EmbedTest > run_cli
+  ContextTargetsTest > run_cli
+  DiffCommandTest > run_cli
+ test_more_langs.py
+  GoExtractTest > extract_file
+  RustExtractTest > extract_file,build_digest
+  CSharpExtractTest > extract_file
+  CExtractTest > extract_file
+  CppExtractTest > extract_file
+  BashExtractTest > extract_file
+  LuaExtractTest > extract_file
+  CssExtractTest > extract_file
+  HtmlNestedBlocksTest > extract_file
+  HtmlExtractTest > extract_file
+  HelmExtractTest > extract_file
+  KotlinExtractTest > extract_file
+  TsGapsTest > extract_file
+  ReactComponentTest > extract_file,build_digest
+  AngularExtractTest > extract_file,build_digest
+  TsLossRecoveryTest > extract_file
+  TsxExtractTest > extract_file
+  SfcExtractTest > extract_file
+  RubyExtractTest > extract_file
+  PhpExtractTest > extract_file,build_digest
+  SwiftExtractTest > extract_file
+  ScalaExtractTest > extract_file
+ test_simple_mode.py
+  CallExtractionTest > extract_file
+  SimpleDigestTest > build_digest
+  SameShapeGroupingTest > build_digest
+  RenderUnitTest > Symbol,render_simple,_tree_lines
+  EnumValuesTest > extract_file,build_digest
+  InterfaceMethodTest > extract_file,build_digest
+  QualifiedCallTest > extract_file,build_digest
+  FieldNamesTest > build_digest
+  ReconstructablePathTest > build_digest
+  LanguageFilterTest > build_digest,run_cli,embedded_digest
+  RelationsTest > extract_file,_heritage,build_digest
+  InterfaceImplementorsTest > Symbol,render_simple
+  LegendTest > build_digest
+  ConstExtractTest > build_digest
+  SecretRedactionTest > build_digest,const_signature
+  RouteRenderTest > render_simple,Symbol
+  ThrowsTest > extract_file,build_digest
+  TransitiveReductionTest > Symbol,render_simple
+  VoidOmissionTest > extract_file
+  GroupExtrasTest > Symbol,render_simple
+  PrivateMembersTest > Symbol,render_simple,_factored_name_tokens
+  CompactMapContractTest > Symbol,render_simple
+  TightFormatTest > build_digest
+  ZeroUsageMarkerTest > build_digest,Symbol,_framework_invoked
  test_treesitter.py{TreeSitterJavaTest,MissingParserErrorTest}
 ```
 <!-- hologram:end -->

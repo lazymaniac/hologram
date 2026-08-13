@@ -135,6 +135,33 @@ class TestIndexTest(unittest.TestCase):
         self.assertIn("test_svc.py", out)
         self.assertNotIn("test_run_returns_one", out)
 
+    def test_file_level_coverage_edges_for_classless_tests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))  # test_svc.py has a top-level test fn
+            out = build_digest(root)
+        line = next(ln for ln in out.splitlines() if "test_svc.py" in ln)
+        self.assertIn(">", line)
+        self.assertIn("Svc", line.split(">", 1)[1])  # Svc().run() resolves
+
+    def test_class_edges_get_own_line_cap_and_overflow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "p"
+            root.mkdir()
+            (root / "lib.py").write_text("".join(
+                f"def helper{i}():\n    pass\n\n" for i in range(5)))
+            (root / "test_lib.py").write_text(
+                "class CoveredTest:\n"
+                "    def test_all(self):\n"
+                + "".join(f"        helper{i}()\n" for i in range(5)) +
+                "\nclass QuietTest:\n    def test_nothing(self):\n        pass\n")
+            out = build_digest(root)
+        covered = next(ln for ln in out.splitlines() if "CoveredTest" in ln)
+        self.assertIn("> helper0,helper1,helper2 +2", covered)  # cap 3, +N
+        self.assertNotIn("helper3", covered)
+        quiet = next(ln for ln in out.splitlines() if "QuietTest" in ln)
+        self.assertNotIn(">", quiet)          # edge-less class stays plain
+        self.assertIn("+N=more", out.splitlines()[1])
+
 
 class DepsMapTest(unittest.TestCase):
     def test_cross_module_type_reference_produces_edge(self):
