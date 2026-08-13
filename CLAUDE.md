@@ -163,8 +163,8 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
 
 ```
-# hologram · 6,757 LOC · state d1d4f274b8d4
-· C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · »=re-exports · ⟨X⟩=own name · deps a→b=a uses b
+# hologram · 6,816 LOC · state 4c9d73e9086d
+· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
  drop_workspace(corpus,ws) ✓
@@ -187,7 +187,7 @@ hologram
  estimate_tokens(text):int
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
- render_simple(root,symbols,files,state,deps,zero_usage):str ⋮193 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_private_lines,_is_test_path,_strip_exc
+ render_simple(root,symbols,files,state,deps,zero_usage):str ⋮191 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_legend_line,_private_lines,_is_test_path,_strip_exc
  run_cli(argv):int ⋮112 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_digest_state,embedded_digest,estimate_tokens
  scan_files(root):list[Path] > detect_language
  split_params(raw):list[str] > _split_top_commas,tight_type
@@ -200,7 +200,7 @@ hologram
  - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_state,_zero_usage_names
  - render.py: _is_test_path,_tree_lines,_strip_exc,_dep_lines,_total_loc,_symbol_identity,_target_descriptions,
               _resolved_project_calls,_factored_name_tokens,_factored_names,_private_lines,_braced_lines,
-              _test_index_lines
+              _test_index_lines,_legend_line
  - symbols.py: _parse_throws,_split_top_commas,_base_type,_heritage
  - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
  extract

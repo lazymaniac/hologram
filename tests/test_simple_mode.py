@@ -272,10 +272,28 @@ class LegendTest(unittest.TestCase):
         self.assertIn("f(args):Ret > project calls", second)
         self.assertIn("?=tests", second)
 
-    def test_legend_covers_all_emitted_notation(self):
-        second = build_digest(JAVAMINI).splitlines()[1]
-        for token in (":T=supers", "sealed:", "»=re-exports", "⟨X⟩", "a→b"):
-            self.assertIn(token, second)
+    def test_legend_covers_emitted_notation_and_nothing_else(self):
+        digest = build_digest(JAVAMINI)
+        second = digest.splitlines()[1]
+        body = "\n".join(digest.splitlines()[2:])
+        # notation → legend clause; clause present exactly when notation occurs
+        for notation, clause in ((" : ", ":T=supers"), ("sealed:", "sealed:A|B"),
+                                 ("»", "»=re-exports"), ("⟨X⟩", "⟨X⟩=own name"),
+                                 ("· deps", "a→b=a uses b"), ("✓", "✓=tested"),
+                                 ("×0", "×0=no static use"), ("⋮", "⋮N=lines")):
+            if notation in body:
+                self.assertIn(clause, second)
+            else:
+                self.assertNotIn(clause, second)
+
+    def test_legend_prunes_unused_clauses_on_small_corpus(self):
+        digest = build_digest(PYMINI)
+        second = digest.splitlines()[1]
+        body = "\n".join(digest.splitlines()[2:])
+        self.assertNotIn("sealed:", body)
+        self.assertNotIn("sealed:A|B", second)
+        self.assertNotIn("»", second)
+        self.assertIn("C/R/I{fields}", second)
 
     def test_no_query_or_regeneration_prose(self):
         out = build_digest(JAVAMINI)
@@ -577,8 +595,11 @@ class ZeroUsageMarkerTest(unittest.TestCase):
 
     def test_legend_describes_static_usage_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out = build_digest(Path(tmp))
+            root = Path(tmp)
+            (root / "mod.py").write_text("def _orphan():\n    pass\n")
+            out = build_digest(root)
 
+        self.assertIn("_orphan×0", out)
         self.assertIn("×0=no static use", out)
 
 
