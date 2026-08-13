@@ -139,7 +139,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
 
 ```
-# hologram · 5,324 LOC · state 3d552b288174
+# hologram · 5,328 LOC · state de5167393246
 · C/R/I{fields} E{values} T:target · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb
 build_digest(root,langs):str ✓ > _gather,_dep_lines,render_simple,_zero_usage_names
 context_targets(root):list[Path] ✓
@@ -150,7 +150,7 @@ estimate_tokens(text):int
 extract_file(path,root,text):list[Symbol] ✓ !SystemExit > detect_language,has_parser,_grammar_pkgs
 has_parser(lang):bool ✓
 render_simple(root,symbols,files,state,deps,zero_usage):str ⋮192 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_private_lines,_is_test_path,_strip_exc
-run_cli(argv):int ⋮81 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_bootstrap_or_die,_install_hooks,embed_digest,_digest_state,embedded_digest,estimate_tokens
+run_cli(argv):int ⋮83 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_bootstrap_or_die,_install_hooks,embed_digest,_digest_state,embedded_digest,estimate_tokens
 scan_files(root):list[Path] > detect_language
 split_params(raw):list[str] > _split_top_commas,tight_type
 strip_comments_and_strings(text):str

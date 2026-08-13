@@ -1,4 +1,7 @@
 .venv/
 __pycache__/
+dist/
+build/
+*.egg-info/
 benchmark/results/
 benchmark/archive/

@@ -23,6 +23,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
+__version__ = "0.1.0"
+
 LANG_EXTENSIONS = {
     ".java": "java",
     ".py": "python",
@@ -3020,6 +3022,8 @@ def run_cli(argv: list[str] | None = None) -> int:
     common.add_argument("--quiet", action="store_true")
 
     parser = argparse.ArgumentParser(prog="hologram", description=__doc__)
+    parser.add_argument("--version", action="version",
+                        version=f"hologram {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_build = sub.add_parser("build", parents=[common],
                              help="(re)generate the map embedded in CLAUDE.md")
