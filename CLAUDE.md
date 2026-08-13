@@ -160,10 +160,10 @@ reintroduce it. Private-corpus numbers stay out of tracked files; keep it that w
 editing `README.md` or `benchmark/*.md`.
 
 <!-- hologram:start — generated, do not edit; refreshed by git hooks -->
-This is a hologram map of this repository: a deterministic, always-current index of its public callables and their signatures, type fields, project-internal call chains, private identifiers, and test locations — the shape of the code without its bodies. Read it before exploring: it says what exists and where, so you can find the helper that already does the job, extend the conventions in place, and open the right file first. It says nothing about whether that code is correct. Line 2 is the notation legend.
+This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 6,849 LOC · state cc771a425c19
+# hologram · 6,851 LOC · state 681bde9a0ca6
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str

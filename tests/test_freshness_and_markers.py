@@ -169,6 +169,11 @@ class EmbedTest(unittest.TestCase):
         self.assertIn("run():int ✓ > _step", text)
         self.assertNotIn("whole codebase at a glance", text)
 
+    def test_embed_note_stays_short_and_identifiable(self):
+        self.assertIn("hologram map of this repository", hologram._EMBED_NOTE)
+        self.assertIn("Line 2 is the legend", hologram._EMBED_NOTE)
+        self.assertLess(len(hologram._EMBED_NOTE), 260)
+
     def test_embed_is_idempotent_and_refreshes(self):
         with tempfile.TemporaryDirectory() as tmp:
             cm = Path(tmp) / "CLAUDE.md"
@@ -201,7 +206,7 @@ class EmbedTest(unittest.TestCase):
             hologram.embed_digest(path, self.DIGEST)
             text = path.read_text()
         self.assertIn("hologram map of this repository", text)
-        self.assertIn("notation legend", text)
+        self.assertIn("Line 2 is the legend", text)
         # the note lives inside the managed block, not in user-owned prose
         self.assertLess(text.index(hologram._EMBED_START),
                         text.index("hologram map of this repository"))
