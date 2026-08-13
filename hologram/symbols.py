@@ -157,7 +157,7 @@ def _heritage(segment: str) -> tuple[list[str], list[str]]:
         if not m:
             return []
         return [re.sub(r"<.*", "", n.strip()).split(".")[-1]
-                for n in m.group(1).split(",") if n.strip()]
+                for n in _split_top_commas(m.group(1), "<", ">") if n.strip()]
     supers = names("extends") + names("implements")
     return supers, names("permits")
 
