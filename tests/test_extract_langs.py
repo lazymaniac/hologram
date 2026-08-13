@@ -18,8 +18,9 @@ needs_ts = unittest.skipUnless(hologram.has_parser("typescript"),
 class PythonExtractTest(unittest.TestCase):
     def test_classes_and_methods(self):
         syms = extract_file(PYMINI / "models.py", PYMINI)
-        classes = {s.name for s in syms if s.kind == "class"}
-        self.assertEqual(classes, {"UserId", "OrderId", "ItemId"})
+        # @dataclass flips kind to record (R), like Java records / Kotlin data
+        records = {s.name for s in syms if s.kind == "record"}
+        self.assertEqual(records, {"UserId", "OrderId", "ItemId"})
         methods = [s for s in syms if s.kind == "method" and s.container == "UserId"]
         self.assertEqual([m.name for m in methods], ["check"])
         self.assertEqual(next(s for s in syms if s.name == "UserId").fields, ["value"])

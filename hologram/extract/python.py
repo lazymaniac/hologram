@@ -129,16 +129,20 @@ def _extract_python(text: str, rel: str) -> list[Symbol]:
             )
             supers = [] if is_enum else [
                 re.sub(r"\[.*", "", ast.unparse(b)).split(".")[-1] for b in node.bases]
+            decorators = _py_decorators(node)
+            is_record = any(d.split("(", 1)[0].split(".")[-1] == "dataclass"
+                            for d in decorators)
             symbols.append(Symbol(
-                name=node.name, kind="enum" if is_enum else "class", file=rel,
-                line=node.lineno,
+                name=node.name,
+                kind="enum" if is_enum else "record" if is_record else "class",
+                file=rel, line=node.lineno,
                 signature=f"class {node.name}",
                 params=members if is_enum else field_types,
                 fields=[] if is_enum else list(dict.fromkeys(field_names)),
                 supers=supers,
                 visibility="priv" if node.name.startswith("_") else "pub",
                 lang="python",
-                decorators=_py_decorators(node),
+                decorators=decorators,
             ))
             for sub in node.body:
                 if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):

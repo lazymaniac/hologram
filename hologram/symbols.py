@@ -95,9 +95,10 @@ ROUTE_DECORATORS: dict[str, str | None] = {
 }
 
 # argument-less markers rendered verbatim as @Name
+# (@dataclass is absent on purpose: it flips the symbol's kind to record)
 MARKER_DECORATORS = {
     "Transactional", "Scheduled", "KafkaListener", "EventListener",
-    "Injectable", "dataclass", "property", "staticmethod", "classmethod",
+    "Injectable", "property", "staticmethod", "classmethod",
     "abstractmethod", "cached_property", "fixture", "memo", "forwardRef",
 }
 
