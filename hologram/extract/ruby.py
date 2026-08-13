@@ -50,6 +50,32 @@ def _rb_method_symbol(m, rel: str, container: str | None, vis: str) -> Symbol:
     )
 
 
+def _rb_fields(body) -> list[str]:
+    """attr_accessor/attr_reader/attr_writer symbols plus @ivar assignments
+    in initialize."""
+    fields: list[str] = []
+    if body is None:
+        return fields
+    for m in body.children:
+        if (m.type == "call"
+                and _ast_text(_ast_field(m, "method") or m.children[0]).startswith("attr_")):
+            args = next((c for c in m.children if c.type == "argument_list"), None)
+            for sym in (args.children if args is not None else ()):
+                if sym.type == "simple_symbol":
+                    fname = _ast_text(sym).lstrip(":")
+                    if fname not in fields:
+                        fields.append(fname)
+        elif m.type == "method" and _ast_text(_ast_field(m, "name")) == "initialize":
+            mbody = _ast_field(m, "body")
+            for a in (mbody.children if mbody is not None else ()):
+                if a.type == "assignment" and a.children \
+                        and a.children[0].type == "instance_variable":
+                    fname = _ast_text(a.children[0]).lstrip("@")
+                    if fname not in fields:
+                        fields.append(fname)
+    return fields
+
+
 def _rb_walk(node, rel: str, symbols: list[Symbol],
              container: str | None = None) -> None:
     """One pass over a program or body_statement node. Bare private/protected
@@ -63,14 +89,15 @@ def _rb_walk(node, rel: str, symbols: list[Symbol],
         elif m.type in ("module", "class"):
             name = _ast_text(_ast_field(m, "name"))
             sup = _ast_field(m, "superclass")
+            body = _ast_field(m, "body")
             symbols.append(Symbol(
                 name=name, kind="class", file=rel, line=m.start_point[0] + 1,
                 signature=f"{m.type} {name}",
                 supers=[_ast_text(sup).lstrip("< ").strip()] if sup is not None
                 else [],
+                fields=_rb_fields(body),
                 visibility="pub", lang="ruby",
             ))
-            body = _ast_field(m, "body")
             if body is not None:
                 _rb_walk(body, rel, symbols, container=name)
         elif m.type in ("method", "singleton_method"):

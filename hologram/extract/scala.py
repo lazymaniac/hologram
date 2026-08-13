@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from ..symbols import Symbol, _base_type, tight_type
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field,
                           _ast_text, _body_lines)
@@ -90,6 +92,22 @@ def _sc_local_bindings(body) -> dict[str, str]:
     return binds
 
 
+_SC_THROW_RE = re.compile(r"new\s+([A-Za-z_][\w.]*)")
+
+
+def _sc_raises(body) -> list[str]:
+    raises: list[str] = []
+    if body is None:
+        return raises
+    for th in _ast_collect(body, ("throw_expression",)):
+        m = _SC_THROW_RE.search(_ast_text(th))
+        if m:
+            name = _base_type(m.group(1)).split(".")[-1]
+            if name not in raises:
+                raises.append(name)
+    return raises
+
+
 def _sc_fn_symbol(fn, rel: str, container: str | None,
                   class_binds: dict[str, str]) -> Symbol:
     name = _ast_text(_ast_field(fn, "name") or next(
@@ -109,6 +127,7 @@ def _sc_fn_symbol(fn, rel: str, container: str | None,
                          ("call_expression", "instance_expression"),
                          _sc_call_entry),
         bindings={**class_binds, **pbinds, **_sc_local_bindings(body)},
+        raises=_sc_raises(body),
         size=_body_lines(body),
     )
 

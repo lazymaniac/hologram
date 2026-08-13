@@ -9,7 +9,8 @@ class PricingEngine: Pricer {
         self.prices = prices
     }
 
-    func quote(id: String) -> Int {
+    func quote(id: String) throws -> Int {
+        if id.isEmpty { throw PricingError.empty }
         return compute(id: id)
     }
 

@@ -8,6 +8,7 @@ trait Pricer {
 
 class PricingEngine(prices: Map[String, Long]) extends Pricer {
   def quote(id: OrderId): Long = {
+    if (id.value.isEmpty) throw new UnknownOrderException(id.value)
     val total = compute(id)
     total
   }

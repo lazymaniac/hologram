@@ -1,5 +1,7 @@
 module Shop
   class PricingEngine
+    attr_reader :prices
+
     def initialize(prices)
       @prices = prices
     end

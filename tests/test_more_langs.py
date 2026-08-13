@@ -575,6 +575,10 @@ class RubyExtractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.syms = extract_file(POLY / "sample.rb", POLY)
 
+    def test_attr_and_ivar_fields(self):
+        eng = next(s for s in self.syms if s.name == "PricingEngine")
+        self.assertEqual(eng.fields, ["prices"])
+
     def test_module_class_and_methods(self):
         eng = next(s for s in self.syms if s.name == "PricingEngine"
                    and s.kind == "class")
@@ -651,6 +655,11 @@ class SwiftExtractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.syms = extract_file(POLY / "sample.swift", POLY)
 
+    def test_throw_types_become_raises(self):
+        q = next(s for s in self.syms
+                 if s.name == "quote" and s.container == "PricingEngine")
+        self.assertEqual(q.raises, ["PricingError"])
+
     def test_protocol_class_struct_kinds_and_supers(self):
         pricer = next(s for s in self.syms if s.name == "Pricer")
         self.assertEqual(pricer.kind, "interface")
@@ -686,6 +695,11 @@ class ScalaExtractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.syms = extract_file(POLY / "sample.scala", POLY)
+
+    def test_throw_new_becomes_raises(self):
+        q = next(s for s in self.syms
+                 if s.name == "quote" and s.container == "PricingEngine")
+        self.assertEqual(q.raises, ["UnknownOrderException"])
 
     def test_case_class_trait_object_kinds(self):
         oid = next(s for s in self.syms if s.name == "OrderId")

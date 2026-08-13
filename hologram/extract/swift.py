@@ -98,6 +98,21 @@ def _sw_local_bindings(body) -> dict[str, str]:
     return binds
 
 
+def _sw_raises(body) -> list[str]:
+    """Types thrown via `throw X…` statements (control_transfer_statement)."""
+    raises: list[str] = []
+    if body is None:
+        return raises
+    for st in _ast_collect(body, ("control_transfer_statement",)):
+        text = _ast_text(st)
+        if not text.startswith("throw "):
+            continue
+        name = _base_type(text[len("throw "):].split(".")[0].split("(")[0].strip())
+        if name and name[:1].isupper() and name not in raises:
+            raises.append(name)
+    return raises
+
+
 def _sw_fn_symbol(fn, rel: str, container: str | None, kind: str) -> Symbol:
     if kind == "ctor":
         name = container or "init"
@@ -117,6 +132,7 @@ def _sw_fn_symbol(fn, rel: str, container: str | None, kind: str) -> Symbol:
         visibility=_sw_vis(fn), container=container, lang="swift",
         calls=_ast_calls(body, name, ("call_expression",), _sw_call_entry),
         bindings={**pbinds, **_sw_local_bindings(body)},
+        raises=_sw_raises(body),
         size=_body_lines(body),
     )
 
