@@ -43,6 +43,7 @@ class Config:
     tasks: list[Task]
     model: str = "sonnet"
     max_turns: int = 40
+    lang: list[str] = field(default_factory=list)  # map filter for condition A
 
 
 def load_tasks(path: Path) -> Config:
@@ -58,7 +59,8 @@ def load_tasks(path: Path) -> Config:
         return Config(corpus=Path(data["corpus"]).expanduser().resolve(),
                       tasks=tasks,
                       model=data.get("model", "sonnet"),
-                      max_turns=int(data.get("max_turns", 40)))
+                      max_turns=int(data.get("max_turns", 40)),
+                      lang=list(data.get("lang", [])))
     except KeyError as e:
         raise SystemExit(f"task file {path}: missing field {e}")
 
@@ -168,7 +170,8 @@ Complete the requested task directly. Keep changes minimal and idiomatic.
 """
 
 
-def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
+def make_workspace(corpus: Path, ws: Path, condition: str,
+                   lang: list[str] | None = None) -> Path:
     """Detached git worktree of the corpus, prepared for one condition.
     A = the map embedded in the agent's context file (the whole map in context
     from turn zero); B = control. The corpus's own CLAUDE.md is preserved, and
@@ -181,8 +184,11 @@ def make_workspace(corpus: Path, ws: Path, condition: str) -> Path:
     claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
     claude_path.write_text(claude_md)
     if condition == "A":
-        subprocess.run([sys.executable, str(HOLOGRAM), "build",
-                        "--root", str(ws), "--quiet"], check=True)
+        cmd = [sys.executable, str(HOLOGRAM), "build", "--root", str(ws),
+               "--quiet", "--warn-tokens", "0"]
+        for l in (lang or []):
+            cmd += ["--lang", l]
+        subprocess.run(cmd, check=True)
     subprocess.run(["git", "-C", str(ws), "add", "-A"],
                    check=True, capture_output=True)
     subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",
@@ -214,10 +220,10 @@ def _digest_of(ws: Path) -> str:
 
 def run_one(corpus: Path, task: Task, condition: str, rep: int,
             results_dir: Path, model: str, max_turns: int,
-            runner=claude_runner) -> dict:
+            runner=claude_runner, lang: list[str] | None = None) -> dict:
     results_dir.mkdir(parents=True, exist_ok=True)
     ws = results_dir / f"ws-{task.id}-{condition}-{rep}"
-    make_workspace(corpus, ws, condition)
+    make_workspace(corpus, ws, condition, lang=lang)
     try:
         before = _digest_of(ws)
         transcript = runner(task.prompt, ws, model, max_turns)
@@ -345,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[{done}/{total}] {task.id} {cond} rep{rep}", flush=True)
                 row = run_one(cfg.corpus, task, cond, rep, args.results,
                               cfg.model, task.max_turns or cfg.max_turns,
-                              runner=runner)
+                              runner=runner, lang=cfg.lang or None)
                 with runs_path.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
     return 0
