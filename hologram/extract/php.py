@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from ..symbols import Symbol, _base_type, tight_type
+import re
+
+from ..symbols import Symbol, _base_type, const_signature, tight_type
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field,
                           _ast_text, _body_lines)
 
@@ -119,6 +121,17 @@ def _php_raises(body) -> list[str]:
     return raises
 
 
+_PHP_CONST_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
+def _php_attributes(node) -> list[str]:
+    """PHP 8 #[Attr(...)] groups on a class or method declaration."""
+    return [tight_type(_ast_text(a).lstrip("\\"))
+            for al in node.children if al.type == "attribute_list"
+            for grp in al.children if grp.type == "attribute_group"
+            for a in grp.children if a.type == "attribute"]
+
+
 def _php_fn_symbol(m, rel: str, container: str | None, cname_binds: dict[str, str],
                    kind: str, vis: str) -> Symbol:
     name = _ast_text(_ast_field(m, "name"))
@@ -137,6 +150,7 @@ def _php_fn_symbol(m, rel: str, container: str | None, cname_binds: dict[str, st
         calls=_ast_calls(body, name, _PHP_CALL_KINDS, _php_call_entry),
         bindings={**cname_binds, **pbinds, **_php_local_bindings(body)},
         size=_body_lines(body), raises=_php_raises(body),
+        decorators=_php_attributes(m),
     )
 
 
@@ -184,7 +198,28 @@ def _extract_php(text: str, rel: str) -> list[Symbol]:
             name=name, kind=kind, file=rel, line=tn.start_point[0] + 1,
             signature=f"{kind} {name}", params=params, fields=fields,
             supers=supers, visibility="pub", lang="php",
+            decorators=_php_attributes(tn),
         ))
+        for member in (body.children if body is not None else ()):
+            if member.type != "const_declaration":
+                continue
+            for el in _ast_collect(member, ("const_element",)):
+                cname_node = next((c for c in el.children if c.type == "name"),
+                                  None)
+                if cname_node is None:
+                    continue
+                cname = _ast_text(cname_node)
+                if not _PHP_CONST_NAME_RE.fullmatch(cname):
+                    continue
+                value = next(
+                    (_ast_text(c) for c in el.children
+                     if c.type in ("integer", "float", "string",
+                                   "encapsed_string", "boolean")), None)
+                symbols.append(Symbol(
+                    name=cname, kind="const", file=rel,
+                    line=el.start_point[0] + 1,
+                    signature=const_signature(cname, value),
+                    visibility=_php_vis(member), lang="php"))
         for m in (body.children if body is not None else ()):
             if m.type != "method_declaration":
                 continue

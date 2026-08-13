@@ -575,6 +575,16 @@ class PhpExtractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.syms = extract_file(POLY / "sample.php", POLY)
 
+    def test_attributes_and_class_consts(self):
+        ctrl = next(s for s in self.syms if s.name == "OrderController")
+        self.assertEqual(ctrl.decorators, ["AsController"])
+        idx = next(s for s in self.syms if s.name == "index")
+        self.assertEqual(idx.decorators, ["Route('/orders',methods: ['GET'])"])
+        const = next(s for s in self.syms if s.kind == "const")
+        self.assertEqual(const.signature, "MAX_ITEMS=10")
+        out = build_digest(POLY)
+        self.assertIn("index():array @GET/orders", out)
+
     def test_interface_class_supers_fields(self):
         pricer = next(s for s in self.syms if s.name == "Pricer")
         self.assertEqual(pricer.kind, "interface")
