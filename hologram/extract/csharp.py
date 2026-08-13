@@ -87,6 +87,25 @@ def _cs_local_bindings(body) -> dict[str, str]:
     return binds
 
 
+def _cs_raises(body) -> list[str]:
+    """Exception types constructed in throw statements/expressions."""
+    raises: list[str] = []
+    if body is None:
+        return raises
+    for th in _ast_collect(body, ("throw_statement", "throw_expression")):
+        obj = next((c for c in th.children
+                    if c.type == "object_creation_expression"), None)
+        if obj is None:
+            continue
+        t = next((c for c in obj.children
+                  if c.type in ("identifier", "qualified_name", "generic_name")), None)
+        if t is not None:
+            name = _base_type(_ast_text(t)).split(".")[-1]
+            if name and name not in raises:
+                raises.append(name)
+    return raises
+
+
 def _extract_cs(text: str, rel: str) -> list[Symbol]:
     tree = _PARSERS["csharp"].parse(text.encode())
     symbols: list[Symbol] = []
@@ -160,6 +179,7 @@ def _extract_cs(text: str, rel: str) -> list[Symbol]:
                 returns=returns,
                 visibility=_cs_vis(m), container=name, lang="csharp",
                 calls=calls, bindings=binds, size=_body_lines(mbody),
+                raises=_cs_raises(mbody),
             ))
     return symbols
 

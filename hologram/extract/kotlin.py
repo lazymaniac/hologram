@@ -76,6 +76,29 @@ def _kt_call_entry(n) -> tuple[str, str]:
     return "", ""
 
 
+def _kt_raises(fn, body) -> list[str]:
+    """@Throws(X::class, …) annotations plus types constructed in throw expressions."""
+    raises: list[str] = []
+
+    def add(name: str) -> None:
+        if name and name not in raises:
+            raises.append(name)
+
+    mods = next((c for c in fn.children if c.type == "modifiers"), None)
+    if mods is not None:
+        for inv in _ast_collect(mods, ("constructor_invocation",)):
+            ut = next((c for c in inv.children if c.type == "user_type"), None)
+            if ut is None or _ast_text(ut) != "Throws":
+                continue
+            for arg in _ast_collect(inv, ("value_argument",)):
+                add(_ast_text(arg).split("::")[0].split(".")[-1].strip())
+    for th in (_ast_collect(body, ("throw_expression",)) if body is not None else []):
+        call = next((c for c in th.children if c.type == "call_expression"), None)
+        if call is not None and call.children and call.children[0].type == "identifier":
+            add(_ast_text(call.children[0]))
+    return raises
+
+
 def _kt_local_bindings(body) -> dict[str, str]:
     """val/var declarations: explicit `: T` annotations, plus `val e = Engine()`
     inference when the initializer calls a single capitalized identifier."""
@@ -120,6 +143,7 @@ def _kt_fn_symbol(fn, rel: str, container: str | None, vis: str,
         visibility=vis, container=container, lang="kotlin",
         calls=_ast_calls(body, name, ("call_expression",), _kt_call_entry),
         bindings={**class_binds, **binds, **_kt_local_bindings(body)},
+        raises=_kt_raises(fn, body),
         size=(body.end_point[0] - body.start_point[0] + 1) if body is not None else 0,
     )
 

@@ -189,6 +189,21 @@ def _extract_c(text: str, rel: str) -> list[Symbol]:
     return symbols
 
 
+def _cpp_raises(body) -> list[str]:
+    """Types thrown by value or constructed in throw statements."""
+    raises: list[str] = []
+    if body is None:
+        return raises
+    for th in _ast_collect(body, ("throw_statement",)):
+        call = next((c for c in th.children if c.type == "call_expression"), None)
+        fn = _ast_field(call, "function") if call is not None else None
+        if fn is not None and fn.type in ("identifier", "qualified_identifier"):
+            name = _base_type(_ast_text(fn)).split("::")[-1]
+            if name and name not in raises:
+                raises.append(name)
+    return raises
+
+
 def _extract_cpp(text: str, rel: str) -> list[Symbol]:
     tree = _PARSERS["cpp"].parse(text.encode())
     symbols: list[Symbol] = []
@@ -242,6 +257,7 @@ def _extract_cpp(text: str, rel: str) -> list[Symbol]:
                                      ("call_expression", "new_expression"),
                                      _c_call_entry),
                     bindings=binds, size=_body_lines(mbody),
+                    raises=_cpp_raises(mbody),
                 )
                 symbols.append(sym)
                 members[(cname, mname)] = sym
@@ -265,6 +281,8 @@ def _extract_cpp(text: str, rel: str) -> list[Symbol]:
             if existing is not None:
                 if not existing.calls:
                     existing.calls = calls
+                if not existing.raises:
+                    existing.raises = _cpp_raises(body)
                 continue
             params, binds = _c_params(_ast_field(fd, "parameters"))
             rtype = _ast_field(fn, "type")
@@ -276,7 +294,7 @@ def _extract_cpp(text: str, rel: str) -> list[Symbol]:
                 params=params, param_names=_c_param_names(_ast_field(fd, "parameters")),
                 returns=returns,
                 visibility="pub", container=container, lang="cpp",
-                calls=calls, bindings=binds,
+                calls=calls, bindings=binds, raises=_cpp_raises(body),
             ))
         elif name_node.type == "identifier" and fn.parent is not None \
                 and fn.parent.type in ("translation_unit", "namespace_definition",
@@ -293,7 +311,7 @@ def _extract_cpp(text: str, rel: str) -> list[Symbol]:
                 visibility="priv" if _c_static(fn) else "pub", lang="cpp",
                 calls=_ast_calls(body, name, ("call_expression", "new_expression"),
                                  _c_call_entry),
-                bindings=binds,
+                bindings=binds, raises=_cpp_raises(body),
             ))
     return symbols
 

@@ -105,6 +105,11 @@ class CSharpExtractTest(unittest.TestCase):
         ctor = next(s for s in self.syms if s.kind == "ctor")
         self.assertEqual(ctor.params, ["Dictionary<string,long>"])
 
+    def test_throw_statements_become_raises(self):
+        ev = next(s for s in self.syms
+                  if s.name == "Evaluate" and s.container == "PricingEngine")
+        self.assertEqual(ev.raises, ["UnknownOrderException"])
+
 
 @_needs("c")
 class CExtractTest(unittest.TestCase):
@@ -154,6 +159,10 @@ class CppExtractTest(unittest.TestCase):
     def test_ctor(self):
         ctor = next(s for s in self.syms if s.kind == "ctor")
         self.assertEqual(ctor.name, "Engine")
+
+    def test_throw_statements_become_raises(self):
+        ev = next(s for s in self.syms if s.name == "evaluate")
+        self.assertEqual(ev.raises, ["BadInput"])
 
 
 @_needs("bash")
@@ -338,6 +347,11 @@ class KotlinExtractTest(unittest.TestCase):
         self.assertEqual(demo.bindings.get("engine"), "PricingEngine")
         self.assertEqual(demo.bindings.get("backup"), "Pricer")
         self.assertIn("engine.quote", demo.calls)
+
+    def test_throws_annotation_and_throw_expressions_become_raises(self):
+        comp = next(s for s in self.syms if s.name == "compute")
+        self.assertEqual(comp.raises,
+                         ["UnknownOrderException", "IllegalStateException"])
 
 
 @_needs("typescript")
