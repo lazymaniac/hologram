@@ -198,18 +198,29 @@ class BashExtractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.syms = extract_file(POLY / "sample.sh", POLY)
 
-    def test_both_definition_forms(self):
-        names = {s.name for s in self.syms}
-        self.assertEqual(names, {"_log", "build_image", "deploy"})
+    def test_script_root_node_and_both_definition_forms(self):
+        script = next(s for s in self.syms if s.name == "sample.sh")
+        self.assertEqual(script.kind, "class")
+        self.assertEqual(script.signature, "script sample.sh")
+        fns = {s.name for s in self.syms if s.kind == "method"}
+        self.assertEqual(fns, {"_log", "build_image", "deploy"})
         deploy = next(s for s in self.syms if s.name == "deploy")
-        self.assertEqual(deploy.kind, "fn")
+        self.assertEqual(deploy.container, "sample.sh")
         self.assertEqual(deploy.signature, "deploy()")
+
+    def test_variables_with_values_secret_redacted(self):
+        consts = {s.name: s.signature for s in self.syms if s.kind == "const"}
+        self.assertEqual(consts["MAX_RETRIES"], "MAX_RETRIES=3")
+        self.assertEqual(consts["REGISTRY"], 'REGISTRY="docker.example.io"')
+        self.assertEqual(consts["DEPLOY_TOKEN"], "DEPLOY_TOKEN")  # redacted
+        self.assertEqual(consts["STAMP"], "STAMP")  # command substitution
 
     def test_underscore_prefix_private(self):
         log = next(s for s in self.syms if s.name == "_log")
         self.assertEqual(log.visibility, "priv")
         self.assertTrue(all(
-            s.visibility == "pub" for s in self.syms if s.name != "_log"))
+            s.visibility == "pub" for s in self.syms
+            if s.kind == "method" and s.name != "_log"))
 
     def test_call_chains(self):
         deploy = next(s for s in self.syms if s.name == "deploy")
@@ -220,7 +231,8 @@ class BashExtractTest(unittest.TestCase):
         self.assertIn("_log", build.calls)
 
     def test_sizes(self):
-        self.assertTrue(all(s.size > 0 for s in self.syms))
+        self.assertTrue(all(s.size > 0 for s in self.syms
+                            if s.kind == "method"))
 
 
 @_needs("lua")
