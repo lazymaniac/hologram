@@ -15,13 +15,10 @@ _EMBED_END = "<!-- hologram:end -->"
 
 
 _EMBED_NOTE = (
-    "This is a hologram map of this repository: a deterministic, always-current "
-    "index of its public callables and their signatures, type fields, "
-    "project-internal call chains, private identifiers, and test locations — "
-    "the shape of the code without its bodies. Read it before exploring: it says "
-    "what exists and where, so you can find the helper that already does the job, "
-    "extend the conventions in place, and open the right file first. It says "
-    "nothing about whether that code is correct. Line 2 is the notation legend."
+    "This is a hologram map of this repository: a deterministic index of its "
+    "public API — signatures, fields, call chains, private names, test "
+    "locations. Read it before exploring to find what exists and open the "
+    "right file first. Line 2 is the legend."
 )
 
 
