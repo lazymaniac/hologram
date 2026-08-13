@@ -61,6 +61,7 @@ class RustExtractTest(unittest.TestCase):
         self.assertEqual(force.params, ["Asserted", "Entailed", "Supported"])
         pricer = next(s for s in self.syms if s.name == "Pricer")
         self.assertEqual(pricer.kind, "interface")
+        self.assertEqual(pricer.supers, ["Clone"])  # trait X: Y supertrait bound
 
     def test_trait_impl_becomes_super(self):
         rat = next(s for s in self.syms if s.name == "Rational")

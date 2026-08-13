@@ -2,7 +2,7 @@ pub struct Rational { num: i64, den: i64 }
 
 pub enum Force { Asserted, Entailed, Supported }
 
-pub trait Pricer {
+pub trait Pricer: Clone {
     fn quote(&self, id: u32) -> u64;
 }
 

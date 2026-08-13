@@ -132,8 +132,14 @@ def _extract_rust(text: str, rel: str) -> list[Symbol]:
                          signature=f"enum {name}", params=variants,
                          visibility=vis, lang="rust")
         else:
+            bounds = next((c for c in tn.children if c.type == "trait_bounds"), None)
+            supers = [_base_type(_ast_text(b))
+                      for b in (bounds.children if bounds is not None else ())
+                      if b.type in ("type_identifier", "scoped_type_identifier",
+                                    "generic_type")]
             sym = Symbol(name=name, kind="interface", file=rel, line=line,
-                         signature=f"trait {name}", visibility=vis, lang="rust")
+                         signature=f"trait {name}", supers=supers,
+                         visibility=vis, lang="rust")
             for m in _ast_collect(body, ("function_signature_item", "function_item")
                                   ) if body is not None else []:
                 symbols.append(_rs_fn_symbol(m, rel, name, vis))
