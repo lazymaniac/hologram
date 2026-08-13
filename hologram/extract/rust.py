@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 
-from ..symbols import Symbol, _base_type, tight_type
+import re
+
+from ..symbols import Symbol, _base_type, const_signature, tight_type
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text, _body_lines)
 
 # ---------------------------------------------------------------------------
@@ -80,6 +82,21 @@ def _rs_local_bindings(body) -> dict[str, str]:
     return binds
 
 
+_RS_CONST_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+
+
+def _rs_attributes(node) -> list[str]:
+    """#[attr(...)] items are preceding siblings of the item they decorate."""
+    decs: list[str] = []
+    sib = node.prev_named_sibling
+    while sib is not None and sib.type == "attribute_item":
+        inner = next((c for c in sib.children if c.type == "attribute"), None)
+        if inner is not None:
+            decs.insert(0, tight_type(_ast_text(inner)))
+        sib = sib.prev_named_sibling
+    return decs
+
+
 def _rs_fn_symbol(fn, rel: str, container: str | None, vis: str,
                   extra_binds: dict[str, str] | None = None) -> Symbol:
     name = _ast_text(_ast_field(fn, "name"))
@@ -100,6 +117,7 @@ def _rs_fn_symbol(fn, rel: str, container: str | None, vis: str,
                          ("call_expression", "struct_expression"), _rs_call_entry),
         size=_body_lines(body),
         bindings=binds,
+        decorators=_rs_attributes(fn),
     )
 
 
@@ -123,7 +141,8 @@ def _extract_rust(text: str, rel: str) -> list[Symbol]:
             sym = Symbol(name=name, kind="class", file=rel, line=line,
                          signature=f"struct {name}", params=components,
                          fields=fields,
-                         visibility=vis, lang="rust")
+                         visibility=vis, lang="rust",
+                         decorators=_rs_attributes(tn))
         elif tn.type == "enum_item":
             variants = [_ast_text(_ast_field(v, "name"))
                         for v in _ast_collect(body, ("enum_variant",))
@@ -159,5 +178,17 @@ def _extract_rust(text: str, rel: str) -> list[Symbol]:
     for fn in tree.root_node.children:
         if fn.type == "function_item":
             symbols.append(_rs_fn_symbol(fn, rel, None, _rs_vis(fn)))
+    for item in _ast_collect(tree.root_node, ("const_item", "static_item")):
+        cname = _ast_text(_ast_field(item, "name"))
+        if not _RS_CONST_NAME_RE.fullmatch(cname):
+            continue
+        val = _ast_field(item, "value")
+        value = (_ast_text(val) if val is not None
+                 and (val.type.endswith("_literal") or val.type == "string_literal")
+                 else None)
+        symbols.append(Symbol(
+            name=cname, kind="const", file=rel, line=item.start_point[0] + 1,
+            signature=const_signature(cname, value),
+            visibility=_rs_vis(item), lang="rust"))
     return symbols
 

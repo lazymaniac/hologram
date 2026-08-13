@@ -52,6 +52,15 @@ class RustExtractTest(unittest.TestCase):
     def setUpClass(cls):
         cls.syms = extract_file(POLY / "sample.rs", POLY)
 
+    def test_attributes_and_consts(self):
+        find = next(s for s in self.syms if s.name == "find_rational")
+        self.assertEqual(find.decorators, ['get("/rationals/{id}")'])
+        const = next(s for s in self.syms if s.kind == "const")
+        self.assertEqual(const.signature, "MAX_ITEMS=10")
+        out = build_digest(POLY)
+        self.assertIn("@GET/rationals/{id}", out)
+        self.assertNotIn("find_rational(id):Rational ×0", out)
+
     def test_struct_enum_trait(self):
         rat = next(s for s in self.syms if s.name == "Rational")
         self.assertEqual(rat.kind, "class")

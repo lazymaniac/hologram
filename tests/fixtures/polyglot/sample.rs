@@ -19,3 +19,8 @@ impl Rational {
 }
 
 pub fn normalize(items: Vec<Rational>) -> Vec<Rational> { items }
+
+pub const MAX_ITEMS: usize = 10;
+
+#[get("/rationals/{id}")]
+pub fn find_rational(id: u64) -> Rational { Rational { num: 1, den: 1 } }
