@@ -163,14 +163,14 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 6,851 LOC · state 681bde9a0ca6
-· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ⋮N=lines · !E=throws · p{a,b}=pa,pb · {a,b}s=as,bs
+# hologram · 6,851 LOC · state 648869a10348
+· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · p{a,b}=pa,pb · {a,b}s=as,bs
 benchmark
  claude_runner(prompt,ws,model,max_turns):str
  drop_workspace(corpus,ws) ✓
  judge_reuse(before,after,expect_reuse):dict ✓ > _sig_lines,_fn_name,_chain
  load_tasks(path):Config ✓ !SystemExit > Config,Task
- bench.py:main(argv):int ⋮44 ✓ > load_tasks,report,run_one
+ bench.py:main(argv):int ~44 ✓ > load_tasks,report,run_one
  make_workspace(corpus,ws,condition):Path ✓
  parse_transcript(text):dict ✓
  report(rows):str ✓
@@ -187,8 +187,8 @@ hologram
  estimate_tokens(text):int
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
- render_simple(root,symbols,files,state,deps,zero_usage):str ⋮191 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_legend_line,_private_lines,_is_test_path,_strip_exc
- run_cli(argv):int ⋮112 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_digest_state,embedded_digest,estimate_tokens
+ render_simple(root,symbols,files,state,deps,zero_usage):str ~191 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_test_index_lines,_legend_line,_private_lines,_is_test_path,_strip_exc
+ run_cli(argv):int ~112 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_digest_state,embedded_digest,estimate_tokens
  scan_files(root):list[Path] > detect_language
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
