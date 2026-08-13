@@ -297,8 +297,12 @@ collaborator. The top tier didn't need the help (6/6 either way); the bottom tie
 couldn't use it (0/6 either way). The map changes what a mid-tier model *does*, not
 just how fast it does it.
 
-Caveats stay honest: one private corpus per round (numbers published, corpus
-withheld), n=3 per cell in the sweep, quality judged on one task shape. Classic
+A follow-up round at pinned low effort on the 0.6.0 map (test helpers +
+coverage edges) produced the measurement program's only duplication event —
+in the weakest model's control condition, re-inventing a helper the map
+names; every map-equipped run reused it. Caveats stay honest: one private
+corpus per round (numbers published, corpus withheld), n=3 per cell, quality
+judged on narrow task shapes. Classic
 AI-slop markers (mock storms, duplicate test bodies, comment chatter) were largely
 absent in *all* conditions — a strict corpus CLAUDE.md sets that floor, map or not.
 On a famous OSS corpus the model has memorized, expect no benefit at all — a control
