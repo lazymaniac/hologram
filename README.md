@@ -263,19 +263,40 @@ the map compresses and transmits the misleading names with perfect fidelity. Dep
 varies by language — the table above is honest about which ones get the full
 treatment.
 
-**What's been measured.** The map in context, against the same agent without it, on a
-private 133k-LOC codebase the model had never seen (10 headless sonnet sessions vs
-matched baselines, transcripts reviewed by hand): **outcomes stayed equal while effort
-dropped ~36% in turns and ~55% in searches, with navigation tasks 40% faster — one
-answered in 4 turns with zero file reads, straight from the embedded map. Total tokens
-came out level: the per-turn cost of the map was fully offset by fewer turns.** That is
-the thesis doing what it was supposed to do — the map in context replaces exploration.
+**What's been measured.** Two rounds on private codebases the models had never seen,
+map-in-context vs matched control, headless sessions, transcripts and written code
+reviewed ([full tables](benchmark/README.md)).
 
-Caveats stay honest: n=1 per cell, one model, one corpus (results withheld — private);
-duplication was zero in every condition, so the measured win is orientation speed, not
-duplication prevention; and larger repos, weaker models, and chat-only contexts remain
-unmeasured. On a famous OSS corpus the model has largely memorized, expect no benefit
-at all — a control agent walks straight to the right API from training memory.
+*Navigation and lookup* (constants, implementors, route→handler): with the map the
+agent answers **in ~1 turn with zero file reads, straight off the map** — the control
+reaches the same answers in ~3.5 turns, 2 searches, and +80% input tokens. Both are
+100% correct; the map's win here is pure effort.
+
+*A long generative task across model tiers* (one 60-turn test-writing task, 3 reps ×
+map/control × haiku/sonnet/opus, all 18 runs passing acceptance):
+
+| model | map turns | control turns | saving |
+|---|---|---|---|
+| haiku | 33.7 | 48.0 | −30% |
+| sonnet | 28.3 | 37.0 | −24% |
+| opus | 26.7 | 34.0 | −21% |
+
+The saving replicates at every tier and grows as models get weaker; the map also
+*stabilizes* sessions (map runs varied by ±1–3 turns, control runs by ±10–17). A
+cheaper model with the map matched a stronger model without it on effort. The
+sharpest result was about quality, not speed: the task required testing a real
+implementation rather than a stub, and the mid-tier model did so in **1/3 control
+runs vs 3/3 map runs** — the map's implementor lists steered it to the right
+collaborator. The top tier didn't need the help (6/6 either way); the bottom tier
+couldn't use it (0/6 either way). The map changes what a mid-tier model *does*, not
+just how fast it does it.
+
+Caveats stay honest: one private corpus per round (numbers published, corpus
+withheld), n=3 per cell in the sweep, quality judged on one task shape. Classic
+AI-slop markers (mock storms, duplicate test bodies, comment chatter) were largely
+absent in *all* conditions — a strict corpus CLAUDE.md sets that floor, map or not.
+On a famous OSS corpus the model has memorized, expect no benefit at all — a control
+agent walks straight to the right API from training memory.
 
 ## How it works
 
