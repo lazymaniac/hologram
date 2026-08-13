@@ -266,9 +266,42 @@ class RelationsTest(unittest.TestCase):
 
     def test_relations_rendered(self):
         out = build_digest(JAVAMINI)
-        self.assertIn("PricingEngine(C{basePrices}) : PricePort", out)
+        # interface relations live on the interface line, not per implementor
+        self.assertIn("PricePort(I) ←PricingEngine", out)
+        self.assertNotIn(": PricePort", out)
         self.assertIn("DeltaOp(I) sealed:AddOp|RemoveOp", out)
-        self.assertIn("(R{nodeId}) : DeltaOp", out)
+        self.assertNotIn(": DeltaOp", out)  # sealed permits already say it
+        # non-interface supers keep the : T suffix
+        self.assertIn("UnknownItemException(C) : RuntimeException", out)
+
+
+class InterfaceImplementorsTest(unittest.TestCase):
+    def test_inversion_moves_relation_to_interface(self):
+        syms = [
+            Symbol(name="Port", kind="interface", file="core/p.java", line=1,
+                   visibility="pub", lang="java"),
+            Symbol(name="AImpl", kind="class", file="core/a.java", line=1,
+                   visibility="pub", lang="java", supers=["Port"]),
+            Symbol(name="BImpl", kind="class", file="core/b.java", line=1,
+                   visibility="pub", lang="java", supers=["Port", "Base"]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render_simple(Path(tmp), syms, [])
+        self.assertIn("Port(I) ←AImpl|BImpl", out)
+        self.assertNotIn(": Port", out)
+        self.assertIn("BImpl(C) : Base", out)   # external super survives
+        self.assertIn("←A|B=implementors", out.splitlines()[1])
+
+    def test_many_implementors_summarized_to_count(self):
+        syms = [Symbol(name="Port", kind="interface", file="p.java", line=1,
+                       visibility="pub", lang="java")]
+        syms += [Symbol(name=f"Impl{i}", kind="class", file=f"i{i}.java", line=1,
+                        visibility="pub", lang="java", supers=["Port"])
+                 for i in range(8)]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render_simple(Path(tmp), syms, [])
+        self.assertIn("Port(I) ←8 impls", out)
+        self.assertNotIn("Impl0|", out)
 
 
 @needs_java
