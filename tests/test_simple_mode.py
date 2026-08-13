@@ -310,6 +310,62 @@ class LegendTest(unittest.TestCase):
         self.assertNotIn("grep", out)
 
 
+class RouteRenderTest(unittest.TestCase):
+    def _render(self, *syms):
+        with tempfile.TemporaryDirectory() as tmp:
+            return render_simple(Path(tmp), list(syms), [])
+
+    def test_spring_route_and_class_prefix(self):
+        out = self._render(
+            Symbol(name="UserController", kind="class", file="api/u.java", line=1,
+                   visibility="pub", lang="java",
+                   decorators=["RestController", 'RequestMapping("/api/v1")']),
+            Symbol(name="find", kind="method", file="api/u.java", line=2,
+                   container="UserController", signature="find(long):User",
+                   returns="User", visibility="pub", lang="java",
+                   decorators=['GetMapping("/users/{id}")']))
+        self.assertIn("UserController(C) @/api/v1", out)
+        self.assertIn("find():User @GET/users/{id}", out)
+        self.assertIn("@=route/annotation", out)
+
+    def test_jaxrs_verb_and_path_pair(self):
+        out = self._render(
+            Symbol(name="list", kind="fn", file="api/o.java", line=1,
+                   signature="list()", visibility="pub", lang="java",
+                   decorators=["GET", 'Path("/orders")']))
+        self.assertIn("list() @GET/orders", out)
+
+    def test_flask_verb_from_methods_kwarg(self):
+        out = self._render(
+            Symbol(name="create", kind="fn", file="app.py", line=1,
+                   signature="create()", visibility="pub", lang="python",
+                   decorators=["app.route('/orders',methods=['POST'])"]))
+        self.assertIn("create() @POST/orders", out)
+
+    def test_markers_render_bare_and_noise_dropped(self):
+        out = self._render(
+            Symbol(name="settle", kind="fn", file="pay.java", line=1,
+                   signature="settle()", visibility="pub", lang="java",
+                   decorators=["Transactional", "Override",
+                               "SuppressWarnings(\"unchecked\")"]))
+        self.assertIn("settle() @Transactional", out)
+        self.assertNotIn("Override", out)
+        self.assertNotIn("SuppressWarnings", out)
+
+    def test_angular_component_selector(self):
+        out = self._render(
+            Symbol(name="UserComponent", kind="class", file="u.ts", line=1,
+                   visibility="pub", lang="typescript",
+                   decorators=["Component({ selector: 'app-user' })"]))
+        self.assertIn("UserComponent(C) @app-user", out)
+
+    def test_no_decorators_no_legend_clause(self):
+        out = self._render(
+            Symbol(name="plain", kind="fn", file="a.py", line=1,
+                   signature="plain()", visibility="pub", lang="python"))
+        self.assertNotIn("@=route/annotation", out)
+
+
 class ThrowsTest(unittest.TestCase):
     @needs_java
     def test_java_throws_clause_extracted(self):

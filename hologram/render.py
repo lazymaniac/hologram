@@ -6,7 +6,8 @@ from collections import Counter
 from pathlib import Path
 
 from .gather import _gather, _zero_usage_names
-from .symbols import TYPE_KINDS, Symbol, _base_type
+from .symbols import (MARKER_DECORATORS, ROUTE_DECORATORS, TYPE_KINDS, Symbol,
+                      _base_type)
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +286,69 @@ def _resolved_project_calls(symbols: list[Symbol]
     return displayed, tested
 
 
+_FIRST_STRING_RE = re.compile(r"""['"]([^'"]+)['"]""")
+_METHODS_VERB_RE = re.compile(r"""['"](GET|POST|PUT|DELETE|PATCH)['"]""")
+
+
+def _decorator_notes(decorators: list[str]) -> list[str]:
+    """Displayable atoms from a symbol's decorators, allowlist-filtered.
+
+    Routes collapse to VERB/path (JAX-RS pairs a verb annotation with @Path;
+    Flask recovers the verb from methods=[...]; Spring's method= is read from
+    RequestMethod.X). Angular @Component yields its selector. Markers render
+    bare. Everything else is dropped — conservative: on parse doubt emit the
+    marker form, never a wrong path."""
+    notes: list[str] = []
+    verb_pending: str | None = None
+    path_pending: str | None = None
+    for d in decorators:
+        base = d.split("(", 1)[0].strip()
+        args = d[len(base):].strip()
+        args = args[1:-1] if args.startswith("(") else ""
+        tail = base.split(".")[-1]
+        dotted = "." in base
+        first = _FIRST_STRING_RE.search(args)
+        if tail == "Component" and "selector" in args:
+            m = re.search(r"""selector\s*:\s*['"]([^'"]+)['"]""", args)
+            if m:
+                notes.append(m.group(1))
+            continue
+        # lowercase route names (route/get/post/…) only match as dotted tails
+        # (app.route, router.get); bare lowercase identifiers stay unmatched
+        if tail in ROUTE_DECORATORS and (dotted or not tail.islower()):
+            verb = ROUTE_DECORATORS[tail]
+            if tail == "route" or tail == "RequestMapping":
+                verbs = _METHODS_VERB_RE.findall(args)
+                m = re.search(r"RequestMethod\.(\w+)", args)
+                if m:
+                    verbs.append(m.group(1))
+                if verbs:
+                    verb = "|".join(dict.fromkeys(verbs))
+            path = first.group(1) if first is not None else None
+            if path is not None and not path.startswith("/"):
+                path = "/" + path
+            if verb and path:
+                notes.append(f"{verb}{path}")
+            elif verb:
+                verb_pending = verb_pending or verb
+            elif path:
+                path_pending = path_pending or path
+            continue
+        if tail in MARKER_DECORATORS:
+            notes.append(tail)
+            continue
+        if first is not None and (first.group(1).startswith("/")
+                                  or "{" in first.group(1)):
+            notes.append(f"{tail}:{first.group(1)}")
+    if verb_pending and path_pending:
+        notes.append(f"{verb_pending}{path_pending}")
+    elif verb_pending:
+        notes.append(verb_pending)
+    elif path_pending:
+        notes.append(path_pending)
+    return notes
+
+
 _PRIVATE_SEPARATORS = "_./-"
 
 
@@ -423,7 +487,9 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool) -> str:
         items.append("~N=lines")
     if re.search(r" !\S", text):
         items.append("!E=throws")
-    if "{" in re.sub(r"\([CRIE]\{", "", text):
+    if " @" in text:
+        items.append("@=route/annotation")
+    if "{" in re.sub(r"\([CRIE]\{| @\S+", "", text):
         items.append("p{a,b}=pa,pb")
     if re.search(r"\}[\w-]", text):
         items.append("{a,b}s=as,bs")
@@ -522,6 +588,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     def _sig_line(sym: Symbol, own: str, grouped: bool,
                   display_name: str | None = None) -> str:
         sig = _display_signature(sym, display_name)
+        for note in _decorator_notes(sym.decorators):
+            sig = f"{sig} @{note}"
         if sym.size >= 40:
             sig = f"{sig} ~{sym.size}"
         if id(sym) in tested:
@@ -549,10 +617,11 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                           t.fields or t.params)
             unused = t.kind == "class" and t.name in zero_usage
             group_key = (t.lang, t.kind, t.visibility, tuple(components), tuple(t.supers),
-                         tuple(t.permits), unused, bool(t.fields))
+                         tuple(t.permits), unused, bool(t.fields),
+                         tuple(_decorator_notes(t.decorators)))
             groups.setdefault(group_key, []).append(t)
-        for (_, kind, vis, components, supers, permits, unused, named_fields), members \
-                in groups.items():
+        for (_, kind, vis, components, supers, permits, unused, named_fields,
+             deco_notes), members in groups.items():
             members.sort(key=lambda s: s.name)
             names = ",".join(_top_display(m) for m in members)
             letter = KIND_LETTER.get(kind, "?")
@@ -565,7 +634,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             permit_suffix = f" sealed:{'|'.join(permits)}" if permits else ""
             rel_suffix = f" : {','.join(supers)}" if supers else ""
             hot_suffix = " ×0" if unused else ""
-            payload.append(f"{names}({inner}){rel_suffix}{permit_suffix}{hot_suffix}")
+            deco_suffix = "".join(f" @{n}" for n in deco_notes)
+            payload.append(
+                f"{names}({inner}){deco_suffix}{rel_suffix}{permit_suffix}{hot_suffix}")
             # Methods shared by every member print once (Self-normalized); each
             # member's remaining methods print on its own `Name: …` line.
             member_methods = {id(m): methods_by_owner.get((d, m.name, m.lang), [])
