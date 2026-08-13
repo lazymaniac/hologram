@@ -324,6 +324,8 @@ def _decorator_notes(decorators: list[str]) -> list[str]:
                     verbs.append(m.group(1))
                 if verbs:
                     verb = "|".join(dict.fromkeys(verbs))
+                elif tail == "route":
+                    verb = "GET"  # Flask default when methods= is absent
             path = first.group(1) if first is not None else None
             if path is not None and not path.startswith("/"):
                 path = "/" + path
