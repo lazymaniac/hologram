@@ -855,6 +855,27 @@ class ZeroUsageMarkerTest(unittest.TestCase):
         self.assertIn("×0=no static use", out)
 
 
+class PrecomputedRenderTest(unittest.TestCase):
+    def test_precomputed_inputs_render_identically(self):
+        from hologram.render import (_helper_class_ids, _resolved_project_calls,
+                                     _total_loc)
+        syms = [Symbol(name="Engine", kind="class", file="a/Engine.java",
+                       line=1, visibility="pub", lang="java",
+                       fields=["basePrices"]),
+                Symbol(name="run", kind="method", file="a/Engine.java", line=2,
+                       container="Engine", visibility="pub", lang="java",
+                       signature="run()", calls=["helper"]),
+                Symbol(name="helper", kind="fn", file="a/util.java", line=1,
+                       visibility="pub", lang="java", signature="helper()")]
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = render_simple(Path(tmp), syms, [])
+            pre = render_simple(
+                Path(tmp), syms, [], loc=_total_loc([]),
+                resolved=_resolved_project_calls(syms),
+                helpers=_helper_class_ids(syms, None))
+        self.assertEqual(plain, pre)
+
+
 class TestIndexDietTest(unittest.TestCase):
     def _sym(self, name, kind, file, container=None, calls=(), line=1):
         return Symbol(name=name, kind=kind, file=file, line=line,

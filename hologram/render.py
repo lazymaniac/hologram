@@ -214,10 +214,12 @@ def _raw_call_targets(symbols: list[Symbol]) -> dict[int, list[Symbol]]:
 
 
 def _resolved_project_calls(symbols: list[Symbol]
-                            ) -> tuple[dict[int, list[str]], set[int]]:
+                            ) -> tuple[dict[int, list[str]], set[int],
+                                       dict[int, list[Symbol]]]:
     """Resolve raw calls to project symbols; omit external and ambiguous targets.
 
-    Returns display calls by caller identity plus production targets called by tests.
+    Returns display calls by caller identity, production targets called by
+    tests, and the raw caller-id → target-Symbol edges (for fan-in ranking).
     """
     production = [s for s in symbols if not _is_test_path(s.file)]
     targets = [s for s in production if s.kind in TYPE_KINDS + ("fn", "method")]
@@ -271,7 +273,7 @@ def _resolved_project_calls(symbols: list[Symbol]
         for caller in symbols if _is_test_path(caller.file)
         for target in raw_targets[id(caller)]
     }
-    return displayed, tested
+    return displayed, tested, raw_targets
 
 
 _FIRST_STRING_RE = re.compile(r"""['"]([^'"]+)['"]""")
@@ -635,8 +637,16 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   targets: list[str] | None = None,
                   file_tokens: dict[str, set[str]] | None = None,
                   detail: int = 0,
-                  budget: int | None = None) -> str:
+                  budget: int | None = None,
+                  loc: int | None = None,
+                  resolved: tuple | None = None,
+                  helpers: dict[int, bool] | None = None) -> str:
     """Compact project facts as a package trie.
+
+    `loc`, `resolved` (the _resolved_project_calls triple) and `helpers`
+    (_helper_class_ids) are level-invariant and may be precomputed by the
+    caller — they MUST come from the same id()-keyed `symbols` list; when
+    None they are computed here, so the function stays independently usable.
 
     pkg
       Class(K{fields})
@@ -646,7 +656,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     prod = [s for s in symbols if not _is_test_path(s.file)]
     if zero_usage is None:
         zero_usage = set()
-    resolved_calls, resolved_tested = _resolved_project_calls(symbols)
+    resolved_calls, resolved_tested, raw_targets = (
+        resolved if resolved is not None else _resolved_project_calls(symbols))
     tested = resolved_tested
     types_by_dir: dict[str, list[Symbol]] = {}
     for s in prod:
@@ -874,7 +885,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     for (d, fname), names_r in sorted(reex_by_file.items()):
         payload_by_dir.setdefault(d, []).append(f"» {fname}: {','.join(names_r)}")
 
-    loc = _total_loc(files)
+    if loc is None:
+        loc = _total_loc(files)
     state_part = f" · state {state}" if state else ""
     if langs:
         state_part += f" · langs {','.join(sorted(langs))}"
@@ -883,7 +895,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     if budget:
         state_part += f" · budget {budget}" + (f" L{detail}" if detail else "")
     body = _tree_lines(payload_by_dir)
-    helper_ids = _helper_class_ids(symbols, file_tokens)
+    helper_ids = (helpers if helpers is not None
+                  else _helper_class_ids(symbols, file_tokens))
     tests = _test_index_lines(files, symbols, root,
                               resolved_calls if detail < 2 else None,
                               helper_ids if detail < 2 else
@@ -905,12 +918,18 @@ def build_digest(root: Path, langs: set[str] | None = None,
                  budget: int | None = None) -> str:
     files, symbols, file_tokens, usage_tokens, state = _gather(root, langs)
     zero = _zero_usage_names(symbols, usage_tokens)
+    # level-invariant work computed once — the ladder re-renders up to
+    # _MAX_LEVEL times and _total_loc reads every file from disk
+    loc = _total_loc(files)
+    resolved = _resolved_project_calls(symbols)
+    helpers = _helper_class_ids(symbols, file_tokens)
 
     def render(level: int) -> str:
         return render_simple(root, symbols, files, state=state,
                              zero_usage=zero, langs=langs, targets=targets,
                              file_tokens=file_tokens, detail=level,
-                             budget=budget)
+                             budget=budget, loc=loc, resolved=resolved,
+                             helpers=helpers)
 
     digest = render(0)
     if not budget:
