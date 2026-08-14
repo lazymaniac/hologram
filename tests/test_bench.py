@@ -245,6 +245,17 @@ class WorkspaceTest(unittest.TestCase):
                 bench.drop_workspace(repo, ws)
 
 
+class BudgetConditionTest(unittest.TestCase):
+    def test_workspace_map_carries_budget_stamp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _mini_corpus(Path(tmp))
+            ws = Path(tmp) / "wsB"
+            bench.make_workspace(corpus, ws, "A", budget=1)
+            text = (ws / "CLAUDE.md").read_text()
+            self.assertIn("· budget 1", text)
+            bench.drop_workspace(corpus, ws)
+
+
 class ActedOnFindingsTest(unittest.TestCase):
     def _t(self, *events):
         lines = []
