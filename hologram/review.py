@@ -9,6 +9,7 @@ gate, always exit 0.
 from __future__ import annotations
 
 import difflib
+import os
 import subprocess
 import tempfile
 from collections import Counter
@@ -278,6 +279,14 @@ def render_report(findings: list[Finding], rev: str) -> str:
 def run_review(root: Path, rev: str, langs: set[str] | None = None,
                checks: frozenset[str] | None = None) -> str:
     """Review the working tree against `rev` via a detached worktree."""
+    # When invoked from a git hook, git exports GIT_DIR / GIT_INDEX_FILE /
+    # GIT_WORK_TREE pointing (relatively) at the committing repo — those
+    # poison every git call this review makes against other directories
+    # (the scratch worktree, and scan_files inside it). The CLI process is
+    # short-lived, so scrub them from the process environment outright.
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
+                "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"):
+        os.environ.pop(var, None)
     new = snapshot(root, langs)
     with tempfile.TemporaryDirectory(prefix="hologram-review-") as tmp:
         wt = Path(tmp) / "wt"

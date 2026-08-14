@@ -167,6 +167,41 @@ class ReportAndCliTest(unittest.TestCase):
             self.assertIn("hologram review vs HEAD", out.getvalue())
             self.assertIn("normalize_amount", out.getvalue())
 
+    def test_review_survives_git_hook_environment(self):
+        # git exports GIT_DIR / GIT_INDEX_FILE while running hooks; review
+        # spawns git against other directories and must scrub them
+        import contextlib
+        import io
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "r"
+            repo.mkdir()
+            (repo / "util.py").write_text(
+                "def normalize_amount(v):\n    return int(v)\n")
+            for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                        ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                         "commit", "-qm", "base"]):
+                subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+            (repo / "money.py").write_text(
+                "def normalise_amounts(vs):\n    return [int(v) for v in vs]\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
+            saved = {k: os.environ.get(k) for k in ("GIT_DIR",
+                                                    "GIT_INDEX_FILE")}
+            os.environ["GIT_DIR"] = ".git"
+            os.environ["GIT_INDEX_FILE"] = ".git/index"
+            try:
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = run_cli(["review", "HEAD", "--root", str(repo)])
+                self.assertEqual(code, 0)
+                self.assertIn("normalize_amount", out.getvalue())
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
     def test_history_only_change_never_alters_digest(self):
         from hologram import build_digest
         with tempfile.TemporaryDirectory() as tmp:
