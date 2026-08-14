@@ -592,13 +592,25 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
             helpers.setdefault(symbol.file, []).append(symbol)
     helper_names = {(s.file, s.name)
                     for hs in helpers.values() for s in hs}
+    suffixes = {Path(p).suffix for p in test_paths}
+    shared_ext = (next(iter(suffixes))
+                  if len(suffixes) == 1 and next(iter(suffixes)) else "")
     payloads: dict[str, list[str]] = {}
     for path in test_paths:
         display_path = Path(*Path(path).parts[1:]) if strip_first else Path(path)
-        in_braces = [n + _edge_suffix(n, edges.get((path, n), []), braced=True)
-                     for n in classes.get(path, [])
-                     if (path, n) not in helper_names]
-        file_line = _braced_lines(display_path.name, in_braces)
+        display_name = display_path.name.removesuffix(shared_ext)
+        own_classes = [n for n in classes.get(path, [])
+                       if (path, n) not in helper_names]
+        if own_classes == [Path(path).stem]:
+            # single class named like its file: the braces restate the stem
+            file_line = [display_name + _edge_suffix(
+                own_classes[0], edges.get((path, own_classes[0]), []),
+                braced=True)]
+        else:
+            in_braces = [n + _edge_suffix(n, edges.get((path, n), []),
+                                          braced=True)
+                         for n in own_classes]
+            file_line = _braced_lines(display_name, in_braces)
         file_line[-1] += _edge_suffix(Path(path).stem, edges.get((path, ""), []))
         own_lines: list[str] = []
         helper_lines: list[str] = []
@@ -614,7 +626,8 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                     helper_lines.append("  " + sig_line(ms, h.name, False))
         payloads.setdefault(str(display_path.parent), []).extend(
             file_line + own_lines + helper_lines)
-    return ["? tests", *(" " + line for line in _tree_lines(payloads))]
+    header = f"? tests ·{shared_ext}" if shared_ext else "? tests"
+    return [header, *(" " + line for line in _tree_lines(payloads))]
 
 
 def _legend_line(text: str, has_priv: bool, has_tests: bool,

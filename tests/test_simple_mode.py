@@ -855,6 +855,54 @@ class ZeroUsageMarkerTest(unittest.TestCase):
         self.assertIn("×0=no static use", out)
 
 
+class TestIndexDietTest(unittest.TestCase):
+    def _sym(self, name, kind, file, container=None, calls=(), line=1):
+        return Symbol(name=name, kind=kind, file=file, line=line,
+                      visibility="pub", lang="java", container=container,
+                      signature=f"{name}()", calls=list(calls))
+
+    def _render(self, syms, files):
+        with tempfile.TemporaryDirectory() as tmp:
+            return render_simple(Path(tmp), syms,
+                                 [Path(tmp) / f for f in files])
+
+    def test_single_class_file_folds_and_keeps_edge(self):
+        syms = [self._sym("applyDelta", "fn", "src/Engine.java"),
+                self._sym("PricingTest", "class", "test/PricingTest.java"),
+                self._sym("t1", "method", "test/PricingTest.java",
+                          container="PricingTest", calls=["applyDelta"])]
+        out = self._render(syms, ["src/Engine.java", "test/PricingTest.java"])
+        self.assertIn("? tests ·.java", out)
+        self.assertIn("PricingTest>applyDelta", out)
+        self.assertNotIn("PricingTest{", out)
+        self.assertNotIn(".java{", out)
+
+    def test_multi_class_file_keeps_braces(self):
+        syms = [self._sym("PricingTest", "class", "test/PricingTest.java"),
+                self._sym("Bulk", "class", "test/PricingTest.java", line=9)]
+        out = self._render(syms, ["test/PricingTest.java"])
+        self.assertIn("PricingTest{PricingTest,Bulk}", out)
+
+    def test_stem_mismatch_keeps_braces(self):
+        syms = [self._sym("ServiceTest", "class", "test/AllTests.java")]
+        out = self._render(syms, ["test/AllTests.java"])
+        self.assertIn("AllTests{ServiceTest}", out)
+
+    def test_mixed_extensions_keep_everything(self):
+        syms = [self._sym("ATest", "class", "test/ATest.java"),
+                Symbol(name="test_b", kind="fn", file="test/test_b.py", line=1,
+                       visibility="pub", lang="python", signature="test_b()")]
+        out = self._render(syms, ["test/ATest.java", "test/test_b.py"])
+        self.assertIn("? tests\n", out)
+        self.assertIn("ATest.java", out)
+        self.assertIn("test_b.py", out)
+
+    def test_determinism(self):
+        syms = [self._sym("PricingTest", "class", "test/PricingTest.java")]
+        self.assertEqual(self._render(syms, ["test/PricingTest.java"]),
+                         self._render(syms, ["test/PricingTest.java"]))
+
+
 def _ctor_fixture(ctor_kw=None, fields=("basePrices",), args=("basePrices",)):
     cls = Symbol(name="Engine", kind="class", file="a/Engine.java", line=1,
                  visibility="pub", lang="java", fields=list(fields))

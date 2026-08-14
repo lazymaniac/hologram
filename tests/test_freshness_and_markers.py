@@ -131,15 +131,15 @@ class TestIndexTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
             out = build_digest(root)
-        self.assertIn("? tests", out)
-        self.assertIn("test_svc.py", out)
+        self.assertIn("? tests ·.py", out)  # shared extension factored once
+        self.assertIn("test_svc", out)
         self.assertNotIn("test_run_returns_one", out)
 
     def test_file_level_coverage_edges_for_classless_tests(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))  # test_svc.py has a top-level test fn
             out = build_digest(root)
-        line = next(ln for ln in out.splitlines() if "test_svc.py" in ln)
+        line = next(ln for ln in out.splitlines() if "test_svc" in ln)
         # Svc is self-evident from the file name and folds into +N; the
         # non-obvious target (run) is the headline
         self.assertIn("> run +1", line)

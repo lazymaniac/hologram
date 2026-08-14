@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers; run `hologram review` before finishing to catch duplicates and drift.
 
 ```
-# hologram · 9,718 LOC · state e85fe47cb589
+# hologram · 9,779 LOC · state 97a24238eb2a
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -244,27 +244,27 @@ hologram
            _extract_{ts,tsx,sfc}
 tools
  measure_tokens.py:main(argv):int
-? tests
- test_bench.py{TaskLoaderTest>load_tasks,TranscriptMetricsTest>parse_transcript,DuplicationDetectorTest>judge_reuse,
-               WorkspaceTest>make_workspace+1,ReviewConditionTest>make_workspace+2,CoachConditionTest>make_workspace+1,
-               RunOneTest,ScopeJudgeTest>judge_scope,ReportTest,CliTest>bench.main}
- test_cli.py{{CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,SizeWarning}Test>run_cli,
-             BudgetTest>build_digest+1,HookPythonSelectionTest}
- test_extract_langs.py{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}
- test_freshness_and_markers.py{StateAndCheckTest>run_cli+1,{TestedMarker,SizeMarker,TestIndex}Test>build_digest,
-                               DisplayNameTest>render_simple+1,TestHelperTest>build_digest+2,DepsMapTest>Symbol,
-                               {Embed,ContextTargets,DiffCommand}Test>run_cli}
- test_more_langs.py{{Go,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Swift,Scala}ExtractTest>extract_file,
-                    {RustExtract,ReactComponent,AngularExtract,PhpExtract}Test>extract_file+1,
-                    {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test>extract_file}
- test_review.py{{DupCheck,RecoverCheck,DeadOrphanApi,PlaceCheck}Test>review_snapshots,ReportAndCliTest>render_report+2} > Snapshot +1
- test_simple_mode.py{CallExtractionTest>extract_file,
-                     {SimpleDigest,SameShapeGrouping,FieldNames,ReconstructablePath,Legend,ConstExtract,TightFormat}Test>build_digest,
-                     RenderUnitTest>Symbol+2,{EnumValues,InterfaceMethod,QualifiedCall,Throws}Test>extract_file+1,
-                     LanguageFilterTest>build_digest+2,RelationsTest>extract_file+2,
-                     {InterfaceImplementors,TransitiveReduction,GroupExtras,CompactMapContract}Test>Symbol+1,
-                     SecretRedactionTest>build_digest+1,{RouteRender,CtorSuppression,DunderPrivate}Test>render_simple+1,
-                     VoidOmissionTest>extract_file,PrivateMembersTest>Symbol+2,ZeroUsageMarkerTest>build_digest+2} > Symbol
- test_treesitter.py{TreeSitterJavaTest,MissingParserErrorTest}
+? tests ·.py
+ test_bench{TaskLoaderTest>load_tasks,TranscriptMetricsTest>parse_transcript,DuplicationDetectorTest>judge_reuse,
+            WorkspaceTest>make_workspace+1,ReviewConditionTest>make_workspace+2,CoachConditionTest>make_workspace+1,
+            RunOneTest,ScopeJudgeTest>judge_scope,ReportTest,CliTest>bench.main}
+ test_cli{{CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,SizeWarning}Test>run_cli,
+          BudgetTest>build_digest+1,HookPythonSelectionTest}
+ test_extract_langs{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}
+ test_freshness_and_markers{StateAndCheckTest>run_cli+1,{TestedMarker,SizeMarker,TestIndex}Test>build_digest,
+                            DisplayNameTest>render_simple+1,TestHelperTest>build_digest+2,DepsMapTest>Symbol,
+                            {Embed,ContextTargets,DiffCommand}Test>run_cli}
+ test_more_langs{{Go,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Swift,Scala}ExtractTest>extract_file,
+                 {RustExtract,ReactComponent,AngularExtract,PhpExtract}Test>extract_file+1,
+                 {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test>extract_file}
+ test_review{{DupCheck,RecoverCheck,DeadOrphanApi,PlaceCheck}Test>review_snapshots,ReportAndCliTest>render_report+2} > Snapshot +1
+ test_simple_mode{CallExtractionTest>extract_file,
+                  {SimpleDigest,SameShapeGrouping,FieldNames,ReconstructablePath,Legend,ConstExtract,TightFormat}Test>build_digest,
+                  RenderUnitTest>Symbol+2,{EnumValues,InterfaceMethod,QualifiedCall,Throws}Test>extract_file+1,
+                  LanguageFilterTest>build_digest+2,RelationsTest>extract_file+2,
+                  {InterfaceImplementors,TransitiveReduction,GroupExtras,CompactMapContract,TestIndexDiet}Test>Symbol+1,
+                  SecretRedactionTest>build_digest+1,{RouteRender,CtorSuppression,DunderPrivate}Test>render_simple+1,
+                  VoidOmissionTest>extract_file,PrivateMembersTest>Symbol+2,ZeroUsageMarkerTest>build_digest+2} > Symbol
+ test_treesitter{TreeSitterJavaTest,MissingParserErrorTest}
 ```
 <!-- hologram:end -->

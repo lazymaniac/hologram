@@ -114,6 +114,9 @@ any LLM:
   coverage edge to the first non-obvious production symbol it exercises
   (`{WorkspaceTest>make_workspace+1,…}`; `+N` = more targets). Test functions are
   omitted because their names cost tokens without improving placement guidance.
+  When every test file shares one extension it is stated once in the header
+  (`? tests ·.java`), and a file whose only test class matches its name folds to
+  one token (`PricingEngineTest>applyDelta+2` — no braces).
 - **Test helpers** — reusable drivers/builders/shared bases — render with a `*`
   sigil and, when referenced by other test files, their full public signatures:
   the reuse targets agents otherwise re-invent. Helpers living under directories
