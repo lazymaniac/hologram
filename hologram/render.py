@@ -561,6 +561,8 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     # (file, class) -> production symbols the class's methods resolve to; the
     # per-class view of the same edges the ✓ marker flattens
     edges: dict[tuple[str, str], list[str]] = {}
+    # (file, class) -> @DisplayName text: the behavior in the author's words
+    display: dict[tuple[str, str], str] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
         if not _is_test_path(symbol.file):
             continue
@@ -568,6 +570,13 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
             names = classes.setdefault(symbol.file, [])
             if symbol.name not in names:
                 names.append(symbol.name)
+            for d in symbol.decorators:
+                if d.split("(", 1)[0].split(".")[-1] == "DisplayName":
+                    m = _FIRST_STRING_RE.search(d.split("(", 1)[-1])
+                    if m and (symbol.file, symbol.name) not in display:
+                        text = m.group(1)
+                        display[(symbol.file, symbol.name)] = (
+                            text[:63] + "…" if len(text) > 64 else text)
         elif symbol.kind in ("fn", "method", "ctor") and resolved_calls:
             key = (symbol.file, symbol.container or "")
             merged = edges.setdefault(key, [])
@@ -585,13 +594,20 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                     for hs in helpers.values() for s in hs}
     payloads: dict[str, list[str]] = {}
     for path in test_paths:
-        display = Path(*Path(path).parts[1:]) if strip_first else Path(path)
+        display_path = Path(*Path(path).parts[1:]) if strip_first else Path(path)
         in_braces = [n + _edge_suffix(n, edges.get((path, n), []), braced=True)
                      for n in classes.get(path, [])
                      if (path, n) not in helper_names]
-        file_line = _braced_lines(display.name, in_braces)
+        file_line = _braced_lines(display_path.name, in_braces)
         file_line[-1] += _edge_suffix(Path(path).stem, edges.get((path, ""), []))
         own_lines: list[str] = []
+        named = [n for n in classes.get(path, [])
+                 if (path, n) in display and (path, n) not in helper_names]
+        for n in named:
+            prefix = f"{n} " if len(named) > 1 or len(
+                [c for c in classes.get(path, [])
+                 if (path, c) not in helper_names]) > 1 else ""
+            own_lines.append(f' {prefix}"{display[(path, n)]}"')
         helper_lines: list[str] = []
         for h in helpers.get(path, []):
             # helper fields are internals; the public methods are the API
@@ -603,7 +619,7 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                         and ms.kind in ("method", "ctor")
                         and ms.visibility == "pub" and sig_line is not None):
                     helper_lines.append("  " + sig_line(ms, h.name, False))
-        payloads.setdefault(str(display.parent), []).extend(
+        payloads.setdefault(str(display_path.parent), []).extend(
             file_line + own_lines + helper_lines)
     return ["? tests", *(" " + line for line in _tree_lines(payloads))]
 
@@ -646,6 +662,8 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
         items.append("{a,b}s=as,bs")
     if re.search(r"\+\d+\b", text):
         items.append("+N=more")
+    if re.search(r'(?m)^\s+(?:[\w$.]+ )?"[^"\n]+"$', text):
+        items.append('"…"=@DisplayName')
     if " : " in text:
         items.append(":T=supers")
     if "sealed:" in text:
