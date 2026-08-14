@@ -47,6 +47,7 @@ class Config:
     model: str = "sonnet"
     max_turns: int = 40
     lang: list[str] = field(default_factory=list)  # map filter for condition A
+    budget: int | None = None  # token budget for the embedded map
     effort: str | None = None  # reasoning effort requested from the CLI
 
 
@@ -68,6 +69,8 @@ def load_tasks(path: Path) -> Config:
                       model=data.get("model", "sonnet"),
                       max_turns=int(data.get("max_turns", 40)),
                       lang=list(data.get("lang", [])),
+                      budget=(int(data["budget"]) if "budget" in data
+                              else None),
                       effort=data.get("effort"))
     except KeyError as e:
         raise SystemExit(f"task file {path}: missing field {e}")
@@ -274,7 +277,8 @@ read or modified — ignore it.
 
 
 def make_workspace(corpus: Path, ws: Path, condition: str,
-                   lang: list[str] | None = None) -> Path:
+                   lang: list[str] | None = None,
+                   budget: int | None = None) -> Path:
     """Detached local clone of the corpus, prepared for one condition.
     A = the map embedded in the agent's context file (the whole map in context
     from turn zero); B = control. The corpus's own CLAUDE.md is preserved, and
@@ -327,6 +331,8 @@ def make_workspace(corpus: Path, ws: Path, condition: str,
                "--quiet", "--warn-tokens", "0"]
         for l in (lang or []):
             cmd += ["--lang", l]
+        if budget:
+            cmd += ["--budget", str(budget)]
         subprocess.run(cmd, check=True)
         if condition == "A":
             # A = map without the coaching sentence; AC = shipped note
@@ -374,10 +380,11 @@ def _digest_of(ws: Path) -> str:
 def run_one(corpus: Path, task: Task, condition: str, rep: int,
             results_dir: Path, model: str, max_turns: int,
             runner=claude_runner, lang: list[str] | None = None,
+            budget: int | None = None,
             effort: str | None = None) -> dict:
     results_dir.mkdir(parents=True, exist_ok=True)
     ws = results_dir / f"ws-{task.id}-{condition}-{rep}"
-    make_workspace(corpus, ws, condition, lang=lang)
+    make_workspace(corpus, ws, condition, lang=lang, budget=budget)
     try:
         before = _digest_of(ws)
         transcript = runner(task.prompt, ws, model, max_turns, effort)
@@ -527,6 +534,7 @@ def main(argv: list[str] | None = None) -> int:
                 row = run_one(cfg.corpus, task, cond, rep, args.results,
                               cfg.model, task.max_turns or cfg.max_turns,
                               runner=runner, lang=cfg.lang or None,
+                              budget=cfg.budget,
                               effort=task.effort or cfg.effort)
                 with runs_path.open("a") as fh:
                     fh.write(json.dumps(row) + "\n")
