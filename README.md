@@ -22,8 +22,10 @@ whole. Token cost stays low by choosing compact facts instead of truncating them
   extend. Plans written this way survive contact with the codebase.
 - **Implementation** — the agent (or you) finds the existing helper before writing a
   second one, follows the house conventions, and places code where it belongs.
-- **Code review** — `hologram diff` shows a pull request's API drift on one screen,
-  including the near-duplicate helpers that sneak in quietly.
+- **Code review** — `hologram diff` shows a pull request's API drift on one screen;
+  `hologram review` goes further and names the near-duplicate helpers, re-covered
+  test paths, and misplaced additions that sneak in quietly — from the post-commit
+  hook, straight into the committing agent's context.
 - **Refactoring** — `×0` flags functions and classes with no statically observed
   project references, and the `· deps` lines show which modules are coupled, before
   you start pulling threads.
@@ -112,6 +114,9 @@ any LLM:
   coverage edge to the first non-obvious production symbol it exercises
   (`{WorkspaceTest>make_workspace+1,…}`; `+N` = more targets). Test functions are
   omitted because their names cost tokens without improving placement guidance.
+  Class-level `@DisplayName` strings render as quoted sub-lines
+  (`"pricing engine behaviours"`) — the covered behaviors in prose, not just
+  symbol names.
 - **Test helpers** — reusable drivers/builders/shared bases — render with a `*`
   sigil and, when referenced by other test files, their full public signatures:
   the reuse targets agents otherwise re-invent. Helpers living under directories
@@ -185,7 +190,10 @@ hologram build --root . --lang java        # limit to one or more languages;
 hologram build --root . --if-stale         # rebuild only if the code changed
 hologram check --root .                    # is every context file current? exit 0 yes / 1 no
 hologram diff HEAD~3 --root .              # how did the API change since then?
+hologram review --root .                   # map-level drift check of uncommitted work
+hologram review HEAD~3 --root .            # …or of the last three commits
 hologram print --root .                    # write the map to stdout, touch nothing
+hologram build --root . --budget 8000      # fit the map into a token budget
 hologram uninstall --root .                # remove the hooks and embedded blocks
 ```
 
@@ -244,6 +252,44 @@ is confidently wrong. Three commands make freshness a non-issue:
   looked at an older revision and prints the difference — a pull request's API drift
   on one screen.
 
+## Reviewing changes — the map talks back
+
+`hologram review [REV]` compares the map-level facts of your working tree against a
+revision (default `HEAD`) and reports what drifted:
+
+- **near-duplicates** — a new function whose name is suspiciously close to an
+  existing one in another file, *with the original's map line as the pointer*
+  (delegating to the original doesn't count — that's reuse);
+- **re-covered paths** — a new test edge to a production symbol some other test
+  class already covers;
+- **dead on arrival** — a new public symbol with zero static references;
+- **orphaned tests** — a test still naming production code this change deleted;
+- **API drift** — `+added −removed ~changed` in one line (`--brief K` prints just
+  this for the last K commits);
+- **placement** — a new symbol whose calls point overwhelmingly at a different
+  module than the one it landed in.
+
+Everything is advisory: `review` always exits 0, and `--quiet-if-clean` prints
+nothing when there's nothing to say. `init` wires it into the post-commit hook,
+which is the interesting part: when a *coding agent* commits, the findings print
+into the agent's own session — the map answers back at exactly the moment the
+mistake is cheapest to undo. Findings are heuristic (name similarity, call
+affinity), so expect the occasional false positive; they point, you decide.
+
+Review output is never embedded into context files — the embedded map stays a pure
+function of the tracked sources, so a map diff always means the code changed.
+
+## Fitting a token budget
+
+The map is already compact (facts are chosen, never truncated), but if you need a
+hard ceiling, `--budget N` applies a deterministic degradation ladder — const
+values first, then test extras, private inventories, `×0` call chains, finally
+methods of unreferenced types — stopping at the first level that fits. The level
+is stamped in the header (`· budget 8000 L2`) and reused by every later rebuild
+until you clear it with `--budget 0`. The same code and budget always produce the
+same map. If even the deepest level doesn't fit, the map is emitted anyway with a
+warning suggesting `--lang` filters — hologram never cuts a fact in half.
+
 ## Does it actually help? An honest take
 
 hologram exists because of one specific failure: an agent lands in a repo with no
@@ -300,9 +346,20 @@ just how fast it does it.
 A follow-up round at pinned low effort on the 0.6.0 map (test helpers +
 coverage edges) produced the measurement program's only duplication event —
 in the weakest model's control condition, re-inventing a helper the map
-names; every map-equipped run reused it. Caveats stay honest: one private
-corpus per round (numbers published, corpus withheld), n=3 per cell, quality
-judged on narrow task shapes. Classic
+names; every map-equipped run reused it.
+
+A third round measured the 0.7.0 review loop (map vs map+coaching vs
+map+live post-commit review, two write-task shapes, sonnet + haiku, n=3):
+zero duplication in every map-bearing condition, and the reviewer fired on
+exactly the commits that drifted — naming the classes that already covered
+what a parallel test file re-covered, and flagging dead-on-arrival
+additions — while staying silent on clean commits. The honest half of the
+result: at low effort the weakest tier *read* the findings but didn't
+restructure already-committed work, and placement quality split by model
+tier, not by condition. The reviewer surfaces drift the moment it happens;
+what the agent does next still scales with capability. Caveats stay honest:
+one private corpus per round (numbers published, corpus withheld), n=3 per
+cell, quality judged on narrow task shapes. Classic
 AI-slop markers (mock storms, duplicate test bodies, comment chatter) were largely
 absent in *all* conditions — a strict corpus CLAUDE.md sets that floor, map or not.
 On a famous OSS corpus the model has memorized, expect no benefit at all — a control

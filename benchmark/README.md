@@ -169,5 +169,62 @@ reasoning effort against the 0.6.0 map (coverage edges + test helpers):
   working-tree diff — all judges now diff against the recorded setup
   commit.
 
+### Review-loop round — 0.7.0 (A vs AC vs AR, sonnet + haiku, effort=low, 3 reps)
+
+Three map-bearing conditions on two write-task shapes: **A** = embedded map,
+**AC** = map + the coaching sentence in the embed note, **AR** = map +
+coaching + the post-commit `hologram review` hook live in the workspace.
+Task shapes: a *duplication bait* (add a small utility whose value logic
+already exists in the corpus) and a *coverage-placement task* with a
+verified premise (write a test for an endpoint behavior that production
+declares but no test file touches — confirmed by map and grep before the
+round). All 39 runs passed acceptance.
+
+| model | task | cond | reuse | parallel test file | review seen | turns |
+|---|---|---|---|---|---|---|
+| sonnet | dup bait | A | 3/3 | — | — | 7.7 |
+| sonnet | dup bait | AC | 3/3 | — | — | 8.7 |
+| sonnet | dup bait | AR | 3/3 | — | 3/3 | 7.7 |
+| sonnet | coverage | A/AC/AR | — | 0/9 | 0/3 (clean) | 18–25 |
+| haiku | dup bait | A | 2/3 | — | — | 26.0 |
+| haiku | dup bait | AC | 3/3 | — | — | 18.7 |
+| haiku | dup bait | AR | 3/3 | — | 3/3 | 13.0 |
+| haiku | coverage | A | — | 1/3 | — | 23.0 |
+| haiku | coverage | AC | — | 1/3 | — | 30.0 |
+| haiku | coverage | AR | — | 2/3 | 3/3 | 32.3 |
+
+- **Zero duplication events in any condition** — every map-bearing run on
+  the bait either called the existing helper directly or delegated to it.
+  The 0.6.0 round's haiku-control duplication did not recur because every
+  0.7.0 condition carries the map; the map remains the first line of
+  defense.
+- **Placement splits by tier, not condition**: sonnet extended the existing
+  endpoint test class in 9/9 coverage runs; haiku invented a parallel test
+  file in 4/9, roughly evenly across conditions. The map alone saturates
+  placement at mid-tier; at the weakest tier placement decisions happen
+  *before* any feedback can fire.
+- **The review loop fired exactly when it should**: every AR commit that
+  drifted got findings in-session — *recover* findings naming the classes
+  that already cover the paths a parallel test file re-covered, *dead*
+  findings for the bait utility (task-induced: the task plants an uncalled
+  helper) and for an unrequested production exception handler one haiku run
+  added. Clean commits printed nothing (`--quiet-if-clean`), so sonnet's
+  coverage runs saw no review output at all — silence is the designed
+  behavior for clean work.
+- **Seeing is not yet acting at low effort**: haiku agents read the
+  findings, re-ran tests, and inspected the named originals — but none
+  restructured already-committed work. The loop reliably *surfaces* drift
+  at the moment it happens; acting on it still depends on model capability
+  (and on prompts that leave room for a follow-up commit).
+- The coaching sentence (AC) neither helped nor hurt measurably on these
+  saturated tasks (haiku bait reuse 3/3 vs A's 2/3 is inside noise at n=3);
+  it stays because its cost is ~30 tokens.
+- The round itself caught two harness/tool bugs now fixed: the post-commit
+  review died silently inside git hooks (`GIT_DIR` environment poisoning —
+  the AR bait cell for sonnet was rerun after the fix), and a corpus
+  context file instructing agents to work in its home checkout by absolute
+  path let one early agent commit into the real corpus — bench workspaces
+  are now path-confined clones with no origin remote.
+
 Cross-round comparisons to the 0.5.0 tables are directional only: these
 runs pinned `--effort low`; the earlier rounds ran at CLI defaults.
