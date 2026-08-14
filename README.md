@@ -27,7 +27,7 @@ whole. Token cost stays low by choosing compact facts instead of truncating them
   test paths, and misplaced additions that sneak in quietly — from the post-commit
   hook, straight into the committing agent's context.
 - **Refactoring** — `×0` flags functions and classes with no statically observed
-  project references, and the `· deps` lines show which modules are coupled, before
+  project references, and the call chains show which modules are coupled, before
   you start pulling threads.
 - **Debugging** — call chains, private-name lists, and `~N` body-size marks point at
   the right file before you open a single one.
@@ -121,8 +121,6 @@ any LLM:
   sigil and, when referenced by other test files, their full public signatures:
   the reuse targets agents otherwise re-invent. Helpers living under directories
   named `fixtures`, `testdata`, or `resources` are never scanned (denylist).
-- **`· deps a→b`** = module `a` uses types from module `b`: the import architecture
-  without reading imports.
 - **`state`** hashes the exact sources plus the generator, so source or extraction/
   rendering changes make old maps stale.
 

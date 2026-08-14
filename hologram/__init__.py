@@ -18,7 +18,7 @@ from .extract import EXTRACTORS, extract_file
 from .extract.java import _extract_java
 from .gather import (_digest_state, _gather, _generator_fingerprint, _state_hash,
                      _zero_usage_names, scan_files)
-from .render import (_dep_lines, _factored_name_tokens, _is_test_path, _tree_lines,
+from .render import (_factored_name_tokens, _is_test_path, _tree_lines,
                      build_digest, estimate_tokens, render_simple)
 from .symbols import (DENYLIST_DIRS, LANG_EXTENSIONS, TYPE_KINDS, Symbol,
                       detect_language, split_params, strip_comments_and_strings,

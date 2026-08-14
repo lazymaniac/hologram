@@ -73,59 +73,6 @@ def _strip_exc(name: str) -> str:
     return name.removesuffix("Exception") or name
 
 
-_BOILERPLATE_PARTS = ("src", "main", "java", "kotlin", "test", "tests", "lib")
-
-
-def _dep_lines(symbols: list[Symbol], file_tokens: dict[str, set[str]],
-               min_refs: int = 2) -> list[str]:
-    """Module dependency edges (`a→b` = code in a references types defined in b),
-    from data already in hand. Modules are top path segments after boilerplate
-    and the corpus-wide shared prefix."""
-    type_dir: dict[str, str] = {}
-    for s in symbols:
-        if s.kind in TYPE_KINDS and not _is_test_path(s.file):
-            type_dir.setdefault(s.name, str(Path(s.file).parent))
-    dirs = {str(Path(rel).parent) for rel in file_tokens} | set(type_dir.values())
-    stripped = {d: [p for p in Path(d).parts if p not in _BOILERPLATE_PARTS]
-                for d in dirs}
-    common: list[str] = []
-    lists = [p for p in stripped.values() if p]
-    while lists and all(len(p) > len(common) + 1 for p in lists) \
-            and len({p[len(common)] for p in lists}) == 1:
-        common.append(lists[0][len(common)])
-
-    def label(d: str) -> str:
-        parts = stripped[d]
-        if common and parts[:len(common)] == common and len(parts) > len(common):
-            parts = parts[len(common):]
-        return parts[0] if parts else "."
-
-    counts: dict[tuple[str, str], int] = {}
-    for rel, toks in file_tokens.items():
-        if _is_test_path(rel):
-            continue
-        m_from = label(str(Path(rel).parent))
-        for t in toks & set(type_dir):
-            m_to = label(type_dir[t])
-            if m_from != m_to:
-                counts[(m_from, m_to)] = counts.get((m_from, m_to), 0) + 1
-    by_src: dict[str, list[str]] = {}
-    for (a, b), n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-        if n >= min_refs:
-            by_src.setdefault(a, []).append(b)
-    cells = [f"{a}→{','.join(bs)}" for a, bs in sorted(by_src.items())]
-    lines, cur = [], ""
-    for c in cells:
-        if cur and len(cur) + len(c) + 3 > 110:
-            lines.append(f"· deps {cur}")
-            cur = c
-        else:
-            cur = f"{cur} | {c}" if cur else c
-    if cur:
-        lines.append(f"· deps {cur}")
-    return lines
-
-
 def _total_loc(files: list[Path]) -> int:
     loc = 0
     for f in files:
@@ -678,14 +625,11 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
         items.append("»=re-exports")
     if "Self" in text:
         items.append("Self=own type")
-    if "· deps " in text:
-        items.append("deps a→b=a uses b")
     return "· " + " · ".join(items)
 
 
 def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   state: str = "",
-                  deps: list[str] | None = None,
                   zero_usage: set[str] | None = None,
                   langs: set[str] | None = None,
                   targets: list[str] | None = None,
@@ -938,7 +882,6 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         state_part += f" · targets {','.join(sorted(targets))}"
     if budget:
         state_part += f" · budget {budget}" + (f" L{detail}" if detail else "")
-    dep_part = ("\n".join(deps) + "\n") if deps else ""
     body = _tree_lines(payload_by_dir)
     helper_ids = _helper_class_ids(symbols, file_tokens)
     tests = _test_index_lines(files, symbols, root,
@@ -951,21 +894,20 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     has_priv = bool(priv_top_by_file or priv_methods_by_owner)
     has_helpers = bool(tests) and any("\n  *" in "\n" + ln or ln.lstrip().startswith("*")
                                       for ln in tests)
-    legend = _legend_line(dep_part + "\n".join(body), has_priv, bool(tests),
+    legend = _legend_line("\n".join(body), has_priv, bool(tests),
                           has_helpers)
     header = f"# hologram · {loc:,} LOC{state_part}\n{legend}\n"
-    return header + dep_part + "\n".join(body) + "\n"
+    return header + "\n".join(body) + "\n"
 
 
 def build_digest(root: Path, langs: set[str] | None = None,
                  targets: list[str] | None = None,
                  budget: int | None = None) -> str:
     files, symbols, file_tokens, usage_tokens, state = _gather(root, langs)
-    deps = _dep_lines(symbols, file_tokens)
     zero = _zero_usage_names(symbols, usage_tokens)
 
     def render(level: int) -> str:
-        return render_simple(root, symbols, files, state=state, deps=deps,
+        return render_simple(root, symbols, files, state=state,
                              zero_usage=zero, langs=langs, targets=targets,
                              file_tokens=file_tokens, detail=level,
                              budget=budget)

@@ -232,20 +232,6 @@ class TestHelperTest(unittest.TestCase):
             self.assertEqual(build_digest(root), build_digest(root))
 
 
-class DepsMapTest(unittest.TestCase):
-    def test_cross_module_type_reference_produces_edge(self):
-        syms = [
-            Symbol(name="Core", kind="class", file="core/c.py", line=1,
-                   visibility="pub"),
-            Symbol(name="use_core", kind="fn", file="app/a.py", line=1,
-                   signature="use_core()", visibility="pub"),
-        ]
-        tokens = {"core/c.py": {"Core"},
-                  "app/a.py": {"use_core", "Core"}}
-        lines = hologram._dep_lines(syms, tokens, min_refs=1)
-        self.assertTrue(any("app→core" in ln for ln in lines))
-
-
 class EmbedTest(unittest.TestCase):
     DIGEST = ("# proj @x 2026-08-08 · 10 LOC · state ab · regen: x\n"
               "· legend: …\n"

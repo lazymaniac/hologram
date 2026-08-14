@@ -320,7 +320,7 @@ class LegendTest(unittest.TestCase):
         # notation → legend clause; clause present exactly when notation occurs
         for notation, clause in ((" : ", ":T=supers"), ("sealed:", "sealed:A|B"),
                                  ("»", "»=re-exports"), ("Self", "Self=own type"),
-                                 ("· deps", "a→b=a uses b"), ("✓", "✓=tested"),
+                                 ("✓", "✓=tested"),
                                  ("×0", "×0=no static use"), (" ~", "~N=lines")):
             if notation in body:
                 self.assertIn(clause, second)
