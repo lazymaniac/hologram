@@ -276,7 +276,18 @@ def _resolved_project_calls(symbols: list[Symbol]
     return displayed, tested, raw_targets
 
 
-_MAX_LEVEL = 8  # deepest budget-ladder degradation level (the skeleton)
+_MAX_LEVEL = 7  # deepest budget-ladder degradation level (the skeleton)
+
+# level → human label for the in-map disclosure line (cumulative)
+_LEVEL_DROPS = (
+    (1, "test coverage edges"),
+    (2, "test-helper signatures"),
+    (3, "private names"),
+    (4, "untested call chains"),
+    (5, "unreferenced types' methods"),
+    (6, "all call chains"),
+    (7, "all method lines (routes ride them) and const values"),
+)
 
 _FIRST_STRING_RE = re.compile(r"""['"]([^'"]+)['"]""")
 _METHODS_VERB_RE = re.compile(r"""['"](GET|POST|PUT|DELETE|PATCH)['"]""")
@@ -674,7 +685,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     # the type (name-keyed since container is a string, so same-named twins
     # only read cold when ALL of them are).
     cold_types: set[tuple[str, str]] = set()
-    if detail >= 6:
+    if detail >= 5:
         all_types = {(s.name, s.lang) for s in prod
                      if s.kind in TYPE_KINDS and s.container is None}
         warm: set[tuple[str, str]] = set()
@@ -693,9 +704,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     for s in prod:
         if (s.container and s.kind in ("method", "ctor")
                 and s.visibility == "pub"):
-            if detail >= 8:
+            if detail >= 7:
                 continue  # budget: skeleton — no method lines at all
-            if detail >= 6 and (s.container, s.lang) in cold_types:
+            if detail >= 5 and (s.container, s.lang) in cold_types:
                 continue  # budget: cold types keep their header, lose methods
             methods_by_owner.setdefault(
                 (str(Path(s.file).parent), s.container, s.lang), []).append(s)
@@ -706,7 +717,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     priv_methods_by_owner: dict[tuple[str, str, str], list[str]] = {}
     priv_top_by_file: dict[tuple[str, str], list[str]] = {}
     for s in prod:
-        if detail >= 4 or s.visibility != "priv":
+        if detail >= 3 or s.visibility != "priv":
             continue
         marked = s.kind in ("fn", "method", "class") and s.name in zero_usage
         name = f"{s.name}×0" if marked else s.name
@@ -766,9 +777,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if sym.kind in ("fn", "method") and sym.name in zero_usage:
             sig = f"{sig} ×0"
         kept = resolved_calls.get(id(sym), [])
-        if detail >= 7:
+        if detail >= 6:
             kept = []  # budget: all chains gone
-        elif detail >= 5 and id(sym) not in tested:
+        elif detail >= 4 and id(sym) not in tested:
             kept = []  # budget: untested paths lose their chains first
         if sym.raises:
             sig = f"{sig} !{','.join(_strip_exc(r) for r in sym.raises)}"
@@ -820,7 +831,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                          bool(t.fields),
                          tuple(_decorator_notes(t.decorators, t.lang)),
                          tuple(resolved_calls.get(id(t), ()))
-                         if detail < 7 else ())  # L7: chains leave group keys too
+                         if detail < 6 else ())  # L6: chains leave group keys too
             groups.setdefault(group_key, []).append(t)
         for (_, kind, vis, components, supers, permits, impls, unused,
              named_fields, deco_notes, type_calls), members in groups.items():
@@ -885,8 +896,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             const_key = (str(Path(s.file).parent), Path(s.file).name)
             vals = consts_by_file.setdefault(const_key, [])
             entry = s.signature or s.name
-            if detail >= 1:
-                entry = entry.split("=", 1)[0]  # budget: values drop first
+            if detail >= 7:
+                entry = entry.split("=", 1)[0]  # budget: values ride to the skeleton
             if entry not in vals:
                 vals.append(entry)
     for (d, fname), vals in sorted(consts_by_file.items()):
@@ -926,8 +937,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     helper_ids = (helpers if helpers is not None
                   else _helper_class_ids(symbols, file_tokens))
     tests = _test_index_lines(files, symbols, root,
-                              resolved_calls if detail < 2 else None,
-                              helper_ids if detail < 3 else
+                              resolved_calls if detail < 1 else None,
+                              helper_ids if detail < 2 else
                               {k: False for k in helper_ids},
                               _sig_line)
     if tests:
@@ -938,6 +949,13 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     legend = _legend_line("\n".join(body), has_priv, bool(tests),
                           has_helpers)
     header = f"# hologram · {loc:,} LOC{state_part}\n{legend}\n"
+    if detail:
+        # silent omission misleads: a reader answering off a degraded map
+        # must know which fact classes need a file read to confirm
+        dropped = [label for lvl, label in _LEVEL_DROPS if detail >= lvl]
+        header += ("‥ budget dropped: " + ", ".join(dropped)
+                   + " — the map no longer carries these facts; NEVER guess "
+                   "them, read the source file first\n")
     return header + "\n".join(body) + "\n"
 
 

@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers. When `hologram review` reports findings, address them before finishing: reuse the named original instead of a duplicate; consolidate re-covered tests.
 
 ```
-# hologram · 10,030 LOC · state 40139baf0d55
+# hologram · 10,075 LOC · state c8e6458c36e7
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -173,12 +173,12 @@ benchmark
  judge_reuse(before,after,expect_reuse):dict ✓ > bench._sig_lines,_fn_name,_chain
  judge_scope(ws,expect,test_only):bool | None ✓ > _added_lines
  load_tasks(path):Config ✓ !SystemExit > Config,Task
- bench.py:main(argv):int ~58 ✓ > load_tasks,report,run_one
- make_workspace(corpus,ws,condition,lang):Path ~71 ✓ > _block_span
+ bench.py:main(argv):int ~59 ✓ > load_tasks,report,run_one
+ make_workspace(corpus,ws,condition,lang,budget):Path ~74 ✓ > _block_span
  parse_transcript(text):dict ~61 ✓ > _acted_on_findings
  report(rows,anon):str ~57 ✓
- run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,effort):dict ✓ > make_workspace,_digest_of,judge_reuse,judge_scope,parse_transcript,drop_workspace,_setup_sha
- Config(R{corpus,tasks,model,max_turns,lang,effort})
+ run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,budget,effort):dict ✓ > make_workspace,_digest_of,judge_reuse,judge_scope,parse_transcript,drop_workspace,_setup_sha
+ Config(R{corpus,tasks,model,max_turns,lang,budget,effort})
  Task(R{id,kind,prompt,accept_cmd,expect_reuse,expect_answer,expect_in_new_code,scope_in_tests,max_turns,effort})
  - bench.py: _acted_on_findings,_sig_lines,_fn_name,_chain,_setup_sha,_added_lines,_effort_invocation,_digest_of,
              _dry_runner
@@ -193,7 +193,7 @@ hologram
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
  render_report(findings,rev):str ✓
- render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers):str ~306 ✓ > _tree_lines,_test_index_lines,_legend_line,_resolved_project_calls,_decorator_notes,_total_loc,_helper_class_ids,_private_lines,_is_test_path,_strip_exc
+ render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers):str ~313 ✓ > _tree_lines,_test_index_lines,_legend_line,_resolved_project_calls,_decorator_notes,_total_loc,_helper_class_ids,_private_lines,_is_test_path,_strip_exc
  review_snapshots(old,new,old_digest,checks):list[Finding] ~167 ✓ > _prod_api,_raw_call_targets,_test_edges,_prod_callables,_zero_usage_names,_is_test_path,_map_line_for,_describe,Finding,_key,_decorator_notes
  run_cli(argv):int ~212 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,_uninstall,run_review,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,_warn_if_large,embed_digest,_target_candidates,_digest_langs,_digest_targets,embedded_digest,_digest_budget,_strip_block,_digest_state
  run_review(root,rev,langs,checks):str !SystemExit > snapshot,render_report,review_snapshots,build_digest
@@ -247,8 +247,8 @@ tools
  measure_tokens.py:main(argv):int
 ? tests ·.py
  test_bench{TaskLoaderTest>load_tasks,TranscriptMetricsTest>parse_transcript,DuplicationDetectorTest>judge_reuse,
-            WorkspaceTest>make_workspace+1,ActedOnFindingsTest>parse_transcript,ReviewConditionTest>make_workspace+2,
-            CoachConditionTest>make_workspace+1,RunOneTest,ScopeJudgeTest>judge_scope,ReportTest,CliTest>bench.main}
+            {Workspace,BudgetCondition,CoachCondition}Test>make_workspace+1,ActedOnFindingsTest>parse_transcript,
+            ReviewConditionTest>make_workspace+2,RunOneTest,ScopeJudgeTest>judge_scope,ReportTest,CliTest>bench.main}
  test_cli{{CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,SizeWarning}Test>run_cli,
           ManagedHookLineTest>_sh_dq+1,PostCommitHookE2ETest>run_cli,BudgetTest>build_digest+4,HookPythonSelectionTest}
  test_extract_langs{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}
