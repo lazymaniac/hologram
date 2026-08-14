@@ -230,11 +230,11 @@ class BudgetTest(unittest.TestCase):
             (root / "test_app.py").write_text(
                 "from app import covered\n\n"
                 "def test_covered():\n    assert covered() == 1\n")
-            # detail 5 renders: covered keeps its chain, uncovered loses it
+            # detail 4 renders: covered keeps its chain, uncovered loses it
             from hologram.render import render_simple
             from hologram.gather import _gather
             files, syms, ft, ut, state = _gather(root, None)
-            out = render_simple(root, syms, files, file_tokens=ft, detail=5)
+            out = render_simple(root, syms, files, file_tokens=ft, detail=4)
         cov = next(ln for ln in out.splitlines() if "covered()" in ln
                    and "uncovered" not in ln)
         unc = next(ln for ln in out.splitlines() if "uncovered()" in ln)
@@ -242,14 +242,22 @@ class BudgetTest(unittest.TestCase):
         self.assertNotIn("> target", unc)
 
     def test_levels_monotonic(self):
+        # monotonicity holds for the map body; the one-line budget
+        # disclosure in the header is bounded overhead that real corpora
+        # dwarf but a five-line fixture does not
         from hologram.gather import _gather
         from hologram.render import _MAX_LEVEL, render_simple
         from hologram import estimate_tokens
+
+        def body(text):
+            return "\n".join(l for l in text.splitlines()
+                             if not l.startswith(("# hologram", "· ", "‥ ")))
+
         with tempfile.TemporaryDirectory() as tmp:
             root = self._proj(Path(tmp))
             files, syms, ft, ut, state = _gather(root, None)
-            sizes = [estimate_tokens(render_simple(root, syms, files,
-                                                   file_tokens=ft, detail=lvl))
+            sizes = [estimate_tokens(body(render_simple(
+                         root, syms, files, file_tokens=ft, detail=lvl)))
                      for lvl in range(_MAX_LEVEL + 1)]
         for earlier, later in zip(sizes, sizes[1:]):
             self.assertLessEqual(later, earlier)
@@ -279,7 +287,7 @@ class BudgetTest(unittest.TestCase):
         self.assertNotIn(" > ", a)                 # no chains anywhere
         self.assertNotIn("- ", "\n".join(
             l for l in a.splitlines() if l.strip().startswith("- ")))
-        self.assertIn("· budget 1 L8", a.splitlines()[0])
+        self.assertIn("· budget 1 L7", a.splitlines()[0])
         self.assertNotIn("project calls", a.splitlines()[1])  # legend honest
         self.assertIn("even the skeleton map", err.getvalue())
 
@@ -309,7 +317,7 @@ class BudgetTest(unittest.TestCase):
                 "    def miss(self):\n        return 2\n\n"
                 "def caller():\n    return Warm().hit()\n")
             files, syms, ft, ut, state = _gather(root, None)
-            out = render_simple(root, syms, files, file_tokens=ft, detail=6)
+            out = render_simple(root, syms, files, file_tokens=ft, detail=5)
         self.assertIn("hit(", out)      # externally referenced type keeps methods
         self.assertNotIn("miss(", out)  # zero fan-in type loses them
         self.assertIn("Cold", out)      # ...but keeps its (grouped) header

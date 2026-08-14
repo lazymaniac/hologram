@@ -282,13 +282,34 @@ function of the tracked sources, so a map diff always means the code changed.
 ## Fitting a token budget
 
 The map is already compact (facts are chosen, never truncated), but if you need a
-hard ceiling, `--budget N` applies a deterministic degradation ladder — const
-values first, then test extras, private inventories, `×0` call chains, finally
-methods of unreferenced types — stopping at the first level that fits. The level
-is stamped in the header (`· budget 8000 L2`) and reused by every later rebuild
-until you clear it with `--budget 0`. The same code and budget always produce the
-same map. If even the deepest level doesn't fit, the map is emitted anyway with a
-warning suggesting `--lang` filters — hologram never cuts a fact in half.
+hard ceiling, `--budget N` applies a deterministic degradation ladder, dropping one
+whole fact category per level and stopping at the first level that fits. Measured
+on a private reference corpus (15.7k-token map):
+
+| level | drops | saved |
+|---|---|---|
+| L1 | test-index coverage edges | ~5% |
+| L2 | test-helper method signatures | ~8% |
+| L3 | private-name inventories | ~8% |
+| L4 | call chains of untested functions | ~6% |
+| L5 | methods of types nothing references | ~3% |
+| L6 | all remaining call chains | ~4% |
+| L7 | all method lines and const values — the **skeleton**: type headers with fields, top-level signatures, const names, test file names | ~21% |
+
+The skeleton landed at **−54%** of the full map on that corpus. The applied level is
+stamped in the header (`· budget 8000 L2`) and reused by every later rebuild until
+you clear it with `--budget 0`; the same code and budget always produce the same
+map, and the legend only explains notation that survived. Facts degrade in
+usefulness order — untested paths lose chains before tested ones, unreferenced
+types lose methods before referenced ones, and high-value scalars (const values)
+ride all the way to the skeleton because dropping them early was measured to make
+agents guess. Every degraded map carries a disclosure line naming exactly which
+fact classes were dropped, with an instruction to read the source instead of
+guessing — measured to flip wrong zero-read answers into correct one-read answers
+for route questions, though a terse "just give me the value" prompt can still
+tempt a low-effort model into guessing at the skeleton. If even the skeleton
+exceeds the budget, the map is emitted anyway with a warning suggesting `--lang`
+filters — hologram never cuts a fact in half.
 
 ## Does it actually help? An honest take
 

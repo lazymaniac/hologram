@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-14
+
+Theme: clever token budgeting. `--budget` maps are unchanged at L0 — this
+release only changes what happens under pressure. Unbudgeted maps are
+byte-identical to 0.8.0 (verified on three corpora, modulo the state
+stamp).
+
+### Changed
+
+- **The degradation ladder is repaired and deepened to a skeleton floor.**
+  The old ladder was lumpy (one level dropped −1,921 tokens on the
+  reference corpus while another dropped −116), partly broken (the private
+  wipe left per-class `- name` lines at every level), and shallow (floor
+  −17%; an 8k budget was unreachable). The new ladder (measured per-level
+  on the reference corpus): L1 coverage edges (−5%), L2 helper signatures
+  (−8%), L3 all private inventories (−8%, bug fixed), L4 chains of
+  *untested* functions (−6%, replaces the no-op), L5 methods of types with
+  zero real fan-in (−3%, replaces the name-keyed heuristic), L6 all chains
+  (−4%), L7 the **skeleton** — no method lines, const values gone, type
+  headers with fields and top-level signatures stay (−21%). Floor on the
+  reference corpus: **7,138 tokens, −54%** from the full map. Every level
+  is monotone; facts degrade in usefulness order; the legend only explains
+  what survived; nothing is ever cut mid-fact.
+- **Const values survive to the skeleton, and degraded maps disclose
+  their losses.** The first gate round dropped const values at L1 — the
+  smallest saving (−0.3%) — and produced the worst failure: agents
+  confidently answered value questions off a map that silently omitted
+  the values. Now scalars ride to L7, and every degraded map carries a
+  header disclosure naming the dropped fact classes with an instruction
+  to read the source instead of guessing — measured to flip wrong
+  zero-read route answers into correct one-read answers.
+- The budget ladder no longer re-reads every source file per level
+  (level-invariant work — LOC count, call resolution, helper detection —
+  is computed once).
+
+### Dev
+
+- Benchmark task files accept a top-level `budget`, applied to the
+  map-bearing conditions' build.
+
+### Gates (measured before merge)
+
+- Determinism, monotonicity, floor reachability: pass (numbers above).
+- Refactor invariance: unbudgeted digests identical to v0.8.0 on the
+  reference corpus, this repo, and the polyglot fixtures.
+- Navigation at the skeleton floor: see benchmark/README.md.
+
 ## [0.8.0] - 2026-08-14
 
 Theme: cheaper without being smaller. Every change was built behind a
