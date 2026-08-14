@@ -14,6 +14,16 @@ release only changes what happens under pressure. Unbudgeted maps are
 byte-identical to 0.8.0 (verified on three corpora, modulo the state
 stamp).
 
+### Added
+
+- **Makefile support** — `Makefile`/`makefile`/`GNUmakefile`/`*.mk` render
+  as one node with each target as a command carrying its caller-settable
+  variables: `deploy(ENV,MANIFEST)` means the recipe consumes `$(ENV)`
+  (overridable `?=` or undefined) and `$(MANIFEST)`; variables the file
+  pins with `=`/`:=` are internal and excluded. `.PHONY` and friends,
+  pattern rules, and `define` bodies are skipped; `_name` targets are
+  private. No parser dependency — a line scanner, like Helm.
+
 ### Changed
 
 - **The degradation ladder is repaired and deepened to a skeleton floor.**

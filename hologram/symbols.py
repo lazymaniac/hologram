@@ -34,6 +34,7 @@ LANG_EXTENSIONS = {
     ".yaml": "helm",
     ".yml": "helm",
     ".tpl": "helm",
+    ".mk": "make",
     ".sh": "bash",
     ".bash": "bash",
     ".zsh": "bash",
@@ -135,6 +136,8 @@ def const_signature(name: str, value_text: str | None) -> str:
 
 
 def detect_language(path: Path) -> str | None:
+    if path.name in ("Makefile", "makefile", "GNUmakefile"):
+        return "make"
     return LANG_EXTENSIONS.get(path.suffix)
 
 

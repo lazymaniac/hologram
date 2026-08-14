@@ -11,7 +11,7 @@ from .go import _extract_go
 from .java import _extract_java
 from .kotlin import _extract_kotlin
 from .misc import (_extract_bash, _extract_css, _extract_helm, _extract_html,
-                   _extract_lua)
+                   _extract_lua, _extract_make)
 from .php import _extract_php
 from .python import _extract_python
 from .ruby import _extract_ruby
@@ -38,6 +38,7 @@ EXTRACTORS = {
     "lua": _extract_lua,
     "html": _extract_html,
     "helm": _extract_helm,
+    "make": _extract_make,
     "bash": _extract_bash,
     "css": _extract_css,
     "ruby": _extract_ruby,

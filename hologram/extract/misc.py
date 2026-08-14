@@ -244,3 +244,68 @@ def _extract_helm(text: str, rel: str) -> list[Symbol]:
             signature=f'define "{m.group(1)}"', visibility="pub", lang="helm"))
     return symbols
 
+
+
+# ---------------------------------------------------------------------------
+# Makefile extraction — targets are the commands, recipe variables the knobs
+# ---------------------------------------------------------------------------
+
+_MAKE_TARGETS_RE = re.compile(
+    r"^([A-Za-z0-9_][\w./-]*(?:[ \t]+[A-Za-z0-9_][\w./-]*)*)[ \t]*:(?![=:])")
+_MAKE_VAR_REF_RE = re.compile(r"\$[({]([A-Za-z_]\w*)[)}]")
+_MAKE_DEF_RE = re.compile(r"^([A-Za-z_]\w*)[ \t]*(\?=|:=|\+=|=)")
+
+
+def _extract_make(text: str, rel: str) -> list[Symbol]:
+    """Targets with the variables their recipes consume. A variable counts as
+    a parameter when the Makefile does not pin it itself (undefined or `?=`),
+    i.e. the caller can pass it: `make deploy ENV=prod`."""
+    stem = Path(rel).name
+    lines = text.splitlines()
+    # strip define…endef bodies — their tab lines are not recipes
+    cleaned: list[str] = []
+    in_define = False
+    for line in lines:
+        if re.match(r"^define\b", line):
+            in_define = True
+            continue
+        if in_define:
+            if re.match(r"^endef\b", line):
+                in_define = False
+            continue
+        cleaned.append(line)
+    pinned = {m.group(1) for line in cleaned
+              if (m := _MAKE_DEF_RE.match(line)) and m.group(2) in ("=", ":=", "+=")}
+    symbols: list[Symbol] = [Symbol(
+        name=stem, kind="class", file=rel, line=1,
+        signature=f"makefile {stem}", visibility="pub", lang="make")]
+    i = 0
+    while i < len(cleaned):
+        m = _MAKE_TARGETS_RE.match(cleaned[i])
+        if not m or "%" in m.group(1):
+            i += 1
+            continue
+        line_no = i + 1
+        recipe: list[str] = []
+        i += 1
+        while i < len(cleaned) and (cleaned[i].startswith("\t")
+                                    or not cleaned[i].strip()):
+            if cleaned[i].startswith("\t"):
+                recipe.append(cleaned[i])
+            i += 1
+        params: list[str] = []
+        for rl in recipe:
+            for ref in _MAKE_VAR_REF_RE.findall(rl):
+                if ref not in pinned and ref not in params:
+                    params.append(ref)
+        for name in m.group(1).split():
+            if name.startswith("."):
+                continue  # .PHONY and friends are metadata, not commands
+            vis = "priv" if name.startswith("_") else "pub"
+            symbols.append(Symbol(
+                name=name, kind="method", file=rel, line=line_no,
+                signature=f"{name}({','.join(params)})",
+                params=list(params), param_names=list(params),
+                visibility=vis, container=stem, lang="make",
+                size=len(recipe)))
+    return symbols
