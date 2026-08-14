@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers; run `hologram review` before finishing to catch duplicates and drift.
 
 ```
-# hologram · 9,779 LOC · state 97a24238eb2a
+# hologram · 9,707 LOC · state 615f649fd4c7
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -182,7 +182,7 @@ benchmark
  Task(R{id,kind,prompt,accept_cmd,expect_reuse,expect_answer,expect_in_new_code,scope_in_tests,max_turns,effort})
  - bench.py: _sig_lines,_fn_name,_chain,_setup_sha,_added_lines,_effort_invocation,_digest_of,_dry_runner
 hologram
- build_digest(root,langs,targets,budget):str ✓ > _gather,_dep_lines,_zero_usage_names,render_simple,estimate_tokens
+ build_digest(root,langs,targets,budget):str ✓ > _gather,_zero_usage_names,render_simple,estimate_tokens
  const_signature(name,value_text):str ✓
  context_targets(root):list[Path]
  detect_language(path):str | None
@@ -192,7 +192,7 @@ hologram
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
  render_report(findings,rev):str ✓
- render_simple(root,symbols,files,state,deps,zero_usage,langs,targets,file_tokens,detail,budget):str ~272 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_helper_class_ids,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
+ render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget):str ~270 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_helper_class_ids,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
  review_snapshots(old,new,old_digest,checks):list[Finding] ~167 ✓ > _prod_api,_raw_call_targets,_test_edges,_prod_callables,_zero_usage_names,_is_test_path,_map_line_for,_describe,Finding,_key,_decorator_notes
  run_cli(argv):int ~212 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,_uninstall,run_review,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,_warn_if_large,embed_digest,_target_candidates,_digest_langs,_digest_targets,embedded_digest,_digest_budget,_strip_block,_digest_state
  run_review(root,rev,langs,checks):str !SystemExit > snapshot,render_report,review_snapshots,build_digest
@@ -215,9 +215,9 @@ hologram
  - embed.py: _embed_block,_block_span,_seed_content,_target_candidates
  - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_{state,langs,budget,targets},
               _framework_invoked,_zero_usage_names
- - render.py: _test_stem,_is_test_path,{_tree,_dep,_private,_braced,_test_index}_lines,_strip_exc,_total_loc,
-              _symbol_identity,_target_descriptions,_raw_call_targets,_resolved_project_calls,_decorator_notes,
-              _factored_name_tokens,_helper_class_ids,_informative_targets,_edge_suffix,_legend_line
+ - render.py: _test_stem,_is_test_path,{_tree,_private,_braced,_test_index}_lines,_strip_exc,_total_loc,_symbol_identity,
+              _target_descriptions,_raw_call_targets,_resolved_project_calls,_decorator_notes,_factored_name_tokens,
+              _helper_class_ids,_informative_targets,_edge_suffix,_legend_line
  - review.py: _key,_prod_callables,_prod_api,_test_edges,_sig_lines,_map_line_for,_describe
  - symbols.py: _parse_throws,_split_top_commas,_base_type,_heritage
  - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
@@ -252,7 +252,7 @@ tools
           BudgetTest>build_digest+1,HookPythonSelectionTest}
  test_extract_langs{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}
  test_freshness_and_markers{StateAndCheckTest>run_cli+1,{TestedMarker,SizeMarker,TestIndex}Test>build_digest,
-                            DisplayNameTest>render_simple+1,TestHelperTest>build_digest+2,DepsMapTest>Symbol,
+                            DisplayNameTest>render_simple+1,TestHelperTest>build_digest+2,
                             {Embed,ContextTargets,DiffCommand}Test>run_cli}
  test_more_langs{{Go,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Swift,Scala}ExtractTest>extract_file,
                  {RustExtract,ReactComponent,AngularExtract,PhpExtract}Test>extract_file+1,
