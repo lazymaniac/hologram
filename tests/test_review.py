@@ -199,7 +199,7 @@ class ReportAndCliTest(unittest.TestCase):
             saved = {k: os.environ.get(k) for k in ("GIT_DIR",
                                                     "GIT_INDEX_FILE")}
             os.environ["GIT_DIR"] = ".git"
-            os.environ["GIT_INDEX_FILE"] = ".git/index"
+            os.environ["GIT_INDEX_FILE"] = ".git/index.lock"  # pre-commit shape
             try:
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out):
