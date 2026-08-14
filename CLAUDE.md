@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 8,856 LOC · state 166b98240f48
+# hologram · 8,907 LOC · state 41135abfccd4
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -192,7 +192,7 @@ hologram
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
  render_simple(root,symbols,files,state,deps,zero_usage,langs,targets,file_tokens):str ~242 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_helper_class_ids,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
- run_cli(argv):int ~167 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_target_candidates,_digest_langs,_digest_targets,embedded_digest,_strip_block,_digest_state,estimate_tokens
+ run_cli(argv):int ~192 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_target_candidates,_digest_langs,_digest_targets,embedded_digest,_strip_block,_digest_state,estimate_tokens
  scan_files(root):list[Path] > detect_language
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
@@ -210,8 +210,8 @@ hologram
  - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_{state,langs,targets},_framework_invoked,
               _zero_usage_names
  - render.py: _test_stem,_is_test_path,{_tree,_dep,_private,_braced,_test_index}_lines,_strip_exc,_total_loc,
-              _symbol_identity,_target_descriptions,_resolved_project_calls,_decorator_notes,_factored_name_tokens,
-              _helper_class_ids,_informative_targets,_edge_suffix,_legend_line
+              _symbol_identity,_target_descriptions,_raw_call_targets,_resolved_project_calls,_decorator_notes,
+              _factored_name_tokens,_helper_class_ids,_informative_targets,_edge_suffix,_legend_line
  - symbols.py: _parse_throws,_split_top_commas,_base_type,_heritage
  - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
  extract

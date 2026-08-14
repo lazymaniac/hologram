@@ -161,12 +161,9 @@ def _target_descriptions(targets: list[Symbol]) -> dict[int, str]:
     return out
 
 
-def _resolved_project_calls(symbols: list[Symbol]
-                            ) -> tuple[dict[int, list[str]], set[int]]:
-    """Resolve raw calls to project symbols; omit external and ambiguous targets.
-
-    Returns display calls by caller identity plus production targets called by tests.
-    """
+def _raw_call_targets(symbols: list[Symbol]) -> dict[int, list[Symbol]]:
+    """Each symbol's raw calls resolved to project Symbol targets — the shared
+    resolution core under both rendering and `hologram review`."""
     production = [s for s in symbols if not _is_test_path(s.file)]
     targets = [s for s in production if s.kind in TYPE_KINDS + ("fn", "method")]
     types = [s for s in targets if s.kind in TYPE_KINDS]
@@ -266,6 +263,18 @@ def _resolved_project_calls(symbols: list[Symbol]
                 seen.add(key)
                 found.append(target)
         raw_targets[id(caller)] = found
+    return raw_targets
+
+
+def _resolved_project_calls(symbols: list[Symbol]
+                            ) -> tuple[dict[int, list[str]], set[int]]:
+    """Resolve raw calls to project symbols; omit external and ambiguous targets.
+
+    Returns display calls by caller identity plus production targets called by tests.
+    """
+    production = [s for s in symbols if not _is_test_path(s.file)]
+    targets = [s for s in production if s.kind in TYPE_KINDS + ("fn", "method")]
+    raw_targets = _raw_call_targets(symbols)
 
     public_callers = {
         _symbol_identity(s): s for s in production

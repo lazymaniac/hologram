@@ -71,7 +71,10 @@ def _managed_hook_line(line: str, repo: Path) -> bool:
     pattern = (
         rf'^{executable} {invocation} build --root '
         rf'"(?:{root_alt})"(?: --lang \S+)*'
-        rf'(?: --(?:no-)?embed)? --quiet \|\| true'
+        rf'(?: --(?:no-)?embed)? --quiet'
+        rf'(?: && {executable} {invocation} review \S+ --root '
+        rf'"(?:{root_alt})" --quiet-if-clean)?'
+        rf' \|\| true'
         rf'(?: {re.escape(_HOOK_MARKER)})?$'
     )
     return re.fullmatch(pattern, line) is not None
@@ -95,11 +98,20 @@ def _dead_hook_scripts(repo: Path) -> set[str]:
 
 def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None) -> None:
     lang_args = "".join(f' --lang {l}' for l in sorted(langs)) if langs else ""
-    hook_line = (f'{_tool_invocation()} build --root "{_sh_dq(str(repo.resolve()))}"'
-                 f'{lang_args} --quiet || true {_HOOK_MARKER}\n')
+    root_q = _sh_dq(str(repo.resolve()))
+    build_part = (f'{_tool_invocation()} build --root "{root_q}"'
+                  f'{lang_args} --quiet')
+    # only the post-commit hook reviews: HEAD~1 is meaningless after a merge
+    # or checkout, and its stdout is what lands in the committing agent's
+    # context when there are findings
+    review_part = (f' && {_tool_invocation()} review HEAD~1 --root "{root_q}"'
+                   f' --quiet-if-clean')
     hooks_dir = repo / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     for name in HOOK_NAMES:
+        hook_line = (build_part
+                     + (review_part if name == "post-commit" else "")
+                     + f' || true {_HOOK_MARKER}\n')
         hook = hooks_dir / name
         if hook.exists():
             content = hook.read_text()
@@ -217,6 +229,15 @@ def run_cli(argv: list[str] | None = None) -> int:
     p_diff = sub.add_parser("diff", parents=[common],
                             help="diff the map against another git revision")
     p_diff.add_argument("rev", nargs="?", default="HEAD~1")
+    p_rev = sub.add_parser("review", parents=[common],
+                           help="deterministic drift review of the working tree "
+                                "vs a revision: duplicates, re-coverage, dead "
+                                "arrivals, orphaned tests, API drift, placement")
+    p_rev.add_argument("rev", nargs="?", default="HEAD")
+    p_rev.add_argument("--quiet-if-clean", action="store_true",
+                       help="print nothing when there are no findings")
+    p_rev.add_argument("--brief", type=int, default=None, metavar="K",
+                       help="API-drift summary over the last K commits only")
     sub.add_parser("print", parents=[common],
                    help="write the map to stdout without touching any file")
     p_un = sub.add_parser("uninstall", parents=[common],
@@ -298,6 +319,22 @@ def run_cli(argv: list[str] | None = None) -> int:
         if not args.quiet:
             print("fresh, skipping rebuild")
         return 0
+    if args.cmd == "review":
+        from .review import run_review
+        rev = args.rev
+        checks = None
+        if args.brief is not None:
+            if args.rev != "HEAD":
+                raise SystemExit("--brief K and an explicit revision are "
+                                 "mutually exclusive")
+            rev = f"HEAD~{args.brief}"
+            checks = frozenset({"api"})
+        report = run_review(root, rev, langs=langs, checks=checks)
+        if report:
+            print(report, end="")
+        elif not args.quiet_if_clean:
+            print(f"hologram review: no findings vs {rev}")
+        return 0  # informational, never a gate
 
     files = scan_files(root)
     if langs is not None:
