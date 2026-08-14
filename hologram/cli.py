@@ -15,7 +15,8 @@ from .bootstrap import (_bootstrap_or_die, _missing_parser_langs, _pyz_path,
 from .embed import (_block_span, _target_candidates, context_targets,
                     embed_digest, embedded_digest)
 from .extract import EXTRACTORS
-from .gather import (_digest_langs, _digest_state, _digest_targets,
+from .gather import (_digest_budget, _digest_langs, _digest_state,
+                     _digest_targets,
                      _state_hash, scan_files)
 from .render import build_digest, estimate_tokens
 from .symbols import detect_language
@@ -208,6 +209,13 @@ def run_cli(argv: list[str] | None = None) -> int:
                              "Recorded in the map and reused by later "
                              "rebuilds; blocks in deselected files are "
                              "removed; --target all restores auto-detection")
+    common.add_argument("--budget", type=int, default=None, metavar="N",
+                        help="token target for the map; over budget, whole "
+                             "fact categories drop in a deterministic ladder "
+                             "(const values, test extras, privates, cold "
+                             "chains, cold methods) until it fits. Recorded "
+                             "in the map and reused by later rebuilds; "
+                             "--budget 0 clears")
     common.add_argument("--quiet", action="store_true")
     common.add_argument("--warn-tokens", type=int, default=25000, metavar="N",
                         help="warn on stderr when the map exceeds N estimated "
@@ -296,6 +304,15 @@ def run_cli(argv: list[str] | None = None) -> int:
             if stored_t:
                 target_names = stored_t
                 break
+    budget = getattr(args, "budget", None)
+    if budget == 0:
+        budget = None  # explicit reset of a stored budget
+    elif budget is None:
+        for t in targets:
+            stored_b = _digest_budget(embedded_digest(t))
+            if stored_b:
+                budget = stored_b
+                break
     if target_names is not None:
         deselected = [t for t in targets
                       if str(t.relative_to(root)) not in target_names]
@@ -366,8 +383,10 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "print":
-        digest = build_digest(root, langs=langs, targets=target_names)
-        _warn_if_large(digest, args.warn_tokens)
+        digest = build_digest(root, langs=langs, targets=target_names,
+                              budget=budget)
+        if not budget:
+            _warn_if_large(digest, args.warn_tokens)
         print(digest, end="")
         return 0
 
@@ -377,8 +396,10 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(f"hologram: warning: a git hook still points at {script}, which no "
               f"longer exists — run `hologram init --root {root}` to repair it",
               file=sys.stderr)
-    digest = build_digest(root, langs=langs, targets=target_names)
-    _warn_if_large(digest, args.warn_tokens)
+    digest = build_digest(root, langs=langs, targets=target_names,
+                          budget=budget)
+    if not budget:
+        _warn_if_large(digest, args.warn_tokens)
     for t in targets:
         embed_digest(t, digest)
     if not args.quiet:
