@@ -64,9 +64,9 @@ class SimpleDigestTest(unittest.TestCase):
         self.assertIn("> ", ev)
         self.assertIn("UnknownItemException", ev)
 
-    def test_public_ctor_rendered_without_return_type(self):
-        self.assertIn("PricingEngine(basePrices)", self.out)
-        self.assertNotIn("PricingEngine(basePrices):PricingEngine", self.out)
+    def test_field_restating_ctor_suppressed_informative_ctor_kept(self):
+        # PricingEngine(basePrices) restates PricingEngine(C{basePrices})
+        self.assertNotIn("PricingEngine(basePrices)", self.out)
         self.assertIn("UnknownItemException(item)", self.out)
 
     def test_no_docs_no_sections(self):
@@ -853,6 +853,93 @@ class ZeroUsageMarkerTest(unittest.TestCase):
 
         self.assertIn("_orphan×0", out)
         self.assertIn("×0=no static use", out)
+
+
+def _ctor_fixture(ctor_kw=None, fields=("basePrices",), args=("basePrices",)):
+    cls = Symbol(name="Engine", kind="class", file="a/Engine.java", line=1,
+                 visibility="pub", lang="java", fields=list(fields))
+    ctor = Symbol(name="Engine", kind="ctor", file="a/Engine.java", line=2,
+                  container="Engine", visibility="pub", lang="java",
+                  signature=f"Engine({','.join(args)})", params=list(args),
+                  param_names=list(args), **(ctor_kw or {}))
+    return [cls, ctor]
+
+
+class CtorSuppressionTest(unittest.TestCase):
+    def _render(self, syms):
+        with tempfile.TemporaryDirectory() as tmp:
+            return render_simple(Path(tmp), syms, [])
+
+    def test_bare_field_restating_ctor_suppressed(self):
+        out = self._render(_ctor_fixture())
+        self.assertIn("Engine(C{basePrices})", out)
+        self.assertNotIn("\n Engine(basePrices)", out)
+
+    def test_ctor_with_extra_fact_kept(self):
+        out = self._render(_ctor_fixture(ctor_kw={"raises": ["BadPrice"]}))
+        self.assertIn("Engine(basePrices) !BadPrice", out)
+
+    def test_ctor_with_different_args_kept(self):
+        out = self._render(_ctor_fixture(args=("prices", "clock")))
+        self.assertIn("Engine(prices,clock)", out)
+
+    def test_no_arg_ctor_of_componentless_class_kept(self):
+        cls = Symbol(name="App", kind="class", file="a/App.java", line=1,
+                     visibility="pub", lang="java")
+        ctor = Symbol(name="App", kind="ctor", file="a/App.java", line=2,
+                      container="App", visibility="pub", lang="java",
+                      signature="App()")
+        out = self._render([cls, ctor])
+        self.assertIn("App()\n", out)
+
+    def test_grouped_same_shape_ctor_suppressed(self):
+        syms = []
+        for n in ("ItemId", "OrderId"):
+            syms.append(Symbol(name=n, kind="record", file="ids/Ids.java",
+                               line=1, visibility="pub", lang="java",
+                               fields=["value"]))
+            syms.append(Symbol(name=n, kind="ctor", file="ids/Ids.java", line=2,
+                               container=n, visibility="pub", lang="java",
+                               signature=f"{n}(value)", params=["value"],
+                               param_names=["value"]))
+        out = self._render(syms)
+        self.assertIn("ItemId,OrderId(R{value})", out)
+        self.assertNotIn("Self(value)", out)
+
+
+class DunderPrivateTest(unittest.TestCase):
+    def _render(self, syms):
+        with tempfile.TemporaryDirectory() as tmp:
+            return render_simple(Path(tmp), syms, [])
+
+    def test_dunder_methods_out_helper_stays(self):
+        syms = [Symbol(name="Box", kind="class", file="a/box.py", line=1,
+                       visibility="pub", lang="python")]
+        for n in ("__init__", "__repr__", "_pack"):
+            syms.append(Symbol(name=n, kind="method", file="a/box.py", line=2,
+                               container="Box", visibility="priv",
+                               lang="python", signature=f"{n}(self)"))
+        out = self._render(syms)
+        self.assertIn("- _pack", out)
+        self.assertNotIn("__init__", out)
+        self.assertNotIn("__repr__", out)
+
+    def test_class_with_only_init_loses_its_line(self):
+        syms = [Symbol(name="Box", kind="class", file="a/box.py", line=1,
+                       visibility="pub", lang="python"),
+                Symbol(name="__init__", kind="method", file="a/box.py", line=2,
+                       container="Box", visibility="priv", lang="python",
+                       signature="__init__(self)")]
+        out = self._render(syms)
+        self.assertNotIn("- ", "\n".join(
+            l for l in out.splitlines() if l.strip().startswith("- ")))
+
+    def test_module_level_dunder_function_stays(self):
+        syms = [Symbol(name="__getattr__", kind="fn", file="a/mod.py", line=1,
+                       visibility="priv", lang="python",
+                       signature="__getattr__(name)")]
+        out = self._render(syms)
+        self.assertIn("__getattr__", out)
 
 
 if __name__ == "__main__":
