@@ -715,6 +715,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         marked = s.kind in ("fn", "method", "class") and s.name in zero_usage
         name = f"{s.name}×0" if marked else s.name
         if s.container and s.kind in ("method", "ctor"):
+            if s.name.startswith("__") and s.name.endswith("__"):
+                continue  # __init__/__repr__ restate the class protocol
             owner_key = (str(Path(s.file).parent), s.container, s.lang)
             priv_methods_by_owner.setdefault(owner_key, []).append(name)
         elif s.container is None and s.kind in TYPE_KINDS + ("fn",):
@@ -777,6 +779,15 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             sig = _norm(sig, own)
         return f"{sig} > {','.join(kept)}" if kept else sig
 
+    def _redundant_ctor(ms: Symbol, kind: str, components: tuple) -> bool:
+        # a bare ctor whose rendered arg list equals the type header's field
+        # list restates the header; comparing the full _sig_line output keeps
+        # any ctor that carries notes, ✓, ~size, !raises, calls, or typed args
+        return (kind in ("class", "record") and bool(components)
+                and ms.kind == "ctor"
+                and _sig_line(ms, ms.container or ms.name, False)
+                == f"{ms.name}({','.join(components)})")
+
     # Interface relations stated once, on the interface: `I ←Impl|Impl` replaces
     # each implementor's `: I` suffix (sealed permits already carry the list).
     iface_index = {(s.lang, s.name) for s in prod if s.kind == "interface"}
@@ -835,8 +846,10 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                            f"{permit_suffix}{impl_suffix}{hot_suffix}{call_suffix}")
             # Methods shared by every member print once (Self-normalized); each
             # member's remaining methods print on its own `Name: …` line.
-            member_methods = {id(m): methods_by_owner.get((d, m.name, m.lang), [])
-                              for m in members}
+            member_methods = {
+                id(m): [ms for ms in methods_by_owner.get((d, m.name, m.lang), [])
+                        if not _redundant_ctor(ms, kind, components)]
+                for m in members}
             head_member = members[0]
             def _priv_lines(m: Symbol, prefix: str = "", directory: str = d
                             ) -> list[str]:

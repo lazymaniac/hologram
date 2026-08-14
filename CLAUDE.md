@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers; run `hologram review` before finishing to catch duplicates and drift.
 
 ```
-# hologram · 9,618 LOC · state 1ec834cea4b2
+# hologram · 9,718 LOC · state e85fe47cb589
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -192,7 +192,7 @@ hologram
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
  render_report(findings,rev):str ✓
- render_simple(root,symbols,files,state,deps,zero_usage,langs,targets,file_tokens,detail,budget):str ~259 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_helper_class_ids,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
+ render_simple(root,symbols,files,state,deps,zero_usage,langs,targets,file_tokens,detail,budget):str ~272 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_helper_class_ids,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
  review_snapshots(old,new,old_digest,checks):list[Finding] ~167 ✓ > _prod_api,_raw_call_targets,_test_edges,_prod_callables,_zero_usage_names,_is_test_path,_map_line_for,_describe,Finding,_key,_decorator_notes
  run_cli(argv):int ~212 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,_uninstall,run_review,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,_warn_if_large,embed_digest,_target_candidates,_digest_langs,_digest_targets,embedded_digest,_digest_budget,_strip_block,_digest_state
  run_review(root,rev,langs,checks):str !SystemExit > snapshot,render_report,review_snapshots,build_digest
@@ -263,8 +263,8 @@ tools
                      RenderUnitTest>Symbol+2,{EnumValues,InterfaceMethod,QualifiedCall,Throws}Test>extract_file+1,
                      LanguageFilterTest>build_digest+2,RelationsTest>extract_file+2,
                      {InterfaceImplementors,TransitiveReduction,GroupExtras,CompactMapContract}Test>Symbol+1,
-                     SecretRedactionTest>build_digest+1,RouteRenderTest>render_simple+1,VoidOmissionTest>extract_file,
-                     PrivateMembersTest>Symbol+2,ZeroUsageMarkerTest>build_digest+2}
+                     SecretRedactionTest>build_digest+1,{RouteRender,CtorSuppression,DunderPrivate}Test>render_simple+1,
+                     VoidOmissionTest>extract_file,PrivateMembersTest>Symbol+2,ZeroUsageMarkerTest>build_digest+2} > Symbol
  test_treesitter.py{TreeSitterJavaTest,MissingParserErrorTest}
 ```
 <!-- hologram:end -->
