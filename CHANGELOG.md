@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-14
+
+Theme: the map talks back. Until now the map was a passive briefing; the
+0.6.0 rounds showed the remaining failures happen at *write time* — an
+agent duplicates a helper or re-covers a tested path in the same session
+that read the map. `hologram review` closes that loop: a deterministic
+map-diff engine that runs from the post-commit hook, so its findings land
+inside the committing agent's own context.
+
+### Added
+
+- **`hologram review [REV]`** — compares the map-level facts of the working
+  tree against any revision (default `HEAD`) and reports drift findings:
+  near-duplicate additions (with the original's map line as the pointer),
+  tests re-covering already-covered paths, dead-on-arrival public symbols,
+  orphaned test references to deleted production code, an API drift
+  summary, and placement advice when a new symbol's call affinity points at
+  a different module. Advisory only — always exits 0, prints nothing on a
+  clean diff with `--quiet-if-clean`. `--brief K` prints just the API drift
+  of the last K commits. Findings are never embedded into context files —
+  the map stays a pure function of the tracked sources.
+- **Review in the post-commit hook** — `init` now installs
+  `build && review HEAD~1 --quiet-if-clean` after each commit, so a
+  committing agent sees what its own commit drifted. Existing installs keep
+  working; run `hologram init` again to upgrade the hook line in place.
+- **Class-level `@DisplayName` strings in the test index** — quoted
+  behavior sub-lines under each test file, so covered *behaviors* (not just
+  symbol names) are visible: `"pricing engine behaviours"`. Legend:
+  `"…"=@DisplayName`.
+- **Coaching sentence in the embed note** — the map's in-band note now
+  tells the agent to check `? tests` before writing tests or helpers and to
+  run `hologram review` before finishing.
+- **`--budget N`** — optional token target for `build`/`init`/`print`. When
+  the full map exceeds the budget, a deterministic degradation ladder drops
+  whole fact categories (const values → test extras → private inventories →
+  `×0` call chains → methods of unreferenced types) until it fits; the
+  applied level is stamped in the header (`· budget N L2`), recalled on
+  flagless rebuilds, cleared with `--budget 0`. Never truncates mid-fact;
+  if even the last level exceeds the budget it emits anyway with a warning
+  pointing at `--lang`.
+
+### Fixed
+
+- Annotation arguments with string literals keep their interior spacing —
+  `@DisplayName("a, b")` no longer renders as `"a,b"`.
+
+### Dev
+
+- Benchmark harness: `AC` (map + coaching note) and `AR` (map + live
+  review hook) conditions, a `review_seen` transcript metric, and
+  workspace confinement — every condition now uses a local clone with the
+  origin remote removed, and absolute paths in corpus context files that
+  point outside the workspace are rewritten (an agent once followed one
+  into the real corpus).
+
 ## [0.6.0] - 2026-08-13
 
 Theme: the 0.5.0 benchmark findings become features. Measured misses —
