@@ -210,6 +210,25 @@ class WorkspaceTest(unittest.TestCase):
             finally:
                 bench.drop_workspace(repo, ws)
 
+    def test_outside_paths_in_context_files_are_confined(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _mini_corpus(Path(tmp))
+            (repo / "CLAUDE.md").write_text(
+                "# Corpus conventions\n"
+                "Work directly in /Users/somebody/workspace/realproj on main.\n"
+                "Inside ref: /Users/somebody/workspace/realproj/docs/x.md\n")
+            subprocess.run(["git", "-c", "user.email=b@b", "-c",
+                            "user.name=b", "commit", "-aqm", "paths"],
+                           cwd=repo, check=True)
+            ws = bench.make_workspace(repo, Path(tmp) / "wsP", "B")
+            try:
+                text = (ws / "CLAUDE.md").read_text()
+                self.assertNotIn("/Users/somebody", text)
+                self.assertIn(str(ws), text)
+                self.assertIn("Work ONLY inside", text)  # confinement note
+            finally:
+                bench.drop_workspace(repo, ws)
+
     def test_corpus_claude_md_preserved_and_setup_committed(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _mini_corpus(Path(tmp))
