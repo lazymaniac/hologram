@@ -202,6 +202,13 @@ def tight_type(t: str) -> str:
     return re.sub(r",\s+", ",", t)
 
 
+def tight_annotation(text: str) -> str:
+    """tight_type for annotation text — but verbatim when it carries a string
+    literal, so quoted arguments like @DisplayName("a, b") keep their interior
+    spacing."""
+    return text if '"' in text or "'" in text else tight_type(text)
+
+
 def _base_type(t: str) -> str:
     """Bare type name: Map<K,V> -> Map, list[X] -> list, String[] -> String."""
     return re.sub(r"[<\[(].*", "", t).strip()

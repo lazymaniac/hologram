@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from ..symbols import (Symbol, _base_type, _heritage, _parse_throws,
-                       const_signature, split_params, tight_type)
+                       const_signature, split_params, tight_annotation, tight_type)
 from ..treesitter import (_PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text, _body_lines)
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ def _ast_modifiers(node) -> str:
 
 def _java_annotations(node) -> list[str]:
     mods = next((c for c in node.children if c.type == "modifiers"), None)
-    return [tight_type(_ast_text(a).lstrip("@"))
+    return [tight_annotation(_ast_text(a).lstrip("@"))
             for a in (mods.children if mods is not None else ())
             if a.type in ("marker_annotation", "annotation")]
 

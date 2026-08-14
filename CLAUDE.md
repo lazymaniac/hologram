@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 8,773 LOC · state 787b385a8c76
+# hologram · 8,794 LOC · state acc1650601f9
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -196,6 +196,7 @@ hologram
  scan_files(root):list[Path] > detect_language
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
+ tight_annotation(text):str > tight_type
  tight_type(t):str
  Symbol(R{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,decorators,size})
  = cli.py: HOOK_NAMES

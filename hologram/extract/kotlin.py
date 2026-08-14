@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 
 from ..symbols import (Symbol, _IDENT_RE, _base_type, const_signature,
-                       tight_type)
+                       tight_annotation, tight_type)
 from ..treesitter import _PARSERS, _ast_calls, _ast_collect, _ast_field, _ast_text
 
 # ---------------------------------------------------------------------------
@@ -138,12 +138,12 @@ def _kt_annotations(node) -> list[str]:
     decs: list[str] = []
     sib = node.prev_named_sibling
     while sib is not None and sib.type in ("annotation", "annotated_expression"):
-        decs[:0] = [tight_type(_ast_text(a).lstrip("@"))
+        decs[:0] = [tight_annotation(_ast_text(a).lstrip("@"))
                     for a in ([sib] if sib.type == "annotation"
                               else _ast_collect(sib, ("annotation",)))]
         sib = sib.prev_named_sibling
     mods = next((c for c in node.children if c.type == "modifiers"), None)
-    decs.extend(tight_type(_ast_text(a).lstrip("@"))
+    decs.extend(tight_annotation(_ast_text(a).lstrip("@"))
                 for a in (mods.children if mods is not None else ())
                 if a.type == "annotation")
     return decs
