@@ -54,8 +54,13 @@ class InitHooksTest(unittest.TestCase):
             hook = repo / ".git" / "hooks" / "post-commit"
             self.assertTrue(hook.exists())
             content = hook.read_text()
-            self.assertEqual(content.count("hologram.py"), 1)
+            # post-commit carries build + review invocations
+            self.assertEqual(content.count("hologram.py"), 2)
+            self.assertIn("review HEAD~1", content)
             self.assertNotIn("--embed", content)     # embedding is the only mode
+            merge = (repo / ".git" / "hooks" / "post-merge").read_text()
+            self.assertEqual(merge.count("hologram.py"), 1)
+            self.assertNotIn("review", merge)        # review is commit-time only
             self.assertIn("hologram:start", (repo / "CLAUDE.md").read_text())
 
     def test_init_replaces_hook_line_from_older_versions(self):
@@ -69,7 +74,7 @@ class InitHooksTest(unittest.TestCase):
             run_cli(["init", "--root", str(repo), "--quiet"])
             content = hook.read_text()
             self.assertNotIn("--no-embed", content)
-            self.assertEqual(content.count("hologram.py"), 1)
+            self.assertEqual(content.count("hologram.py"), 2)  # build + review
 
     def test_init_preserves_custom_wrapped_hologram_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -82,7 +87,7 @@ class InitHooksTest(unittest.TestCase):
             run_cli(["init", "--root", str(repo), "--quiet"])
             content = hook.read_text()
             self.assertIn(custom, content)
-            self.assertEqual(content.count("hologram.py"), 2)
+            self.assertEqual(content.count("hologram.py"), 3)  # custom + build + review
 
     def test_init_chains_existing_hook(self):
         with tempfile.TemporaryDirectory() as tmp:
