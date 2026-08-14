@@ -166,6 +166,50 @@ class TestIndexTest(unittest.TestCase):
         self.assertIn("+N=more", out.splitlines()[1])
 
 
+class DisplayNameTest(unittest.TestCase):
+    def _syms(self, **kw):
+        base = dict(kind="class", file="tests/EngineTest.java", line=1,
+                    visibility="pub", lang="java")
+        base.update(kw)
+        return Symbol(**base)
+
+    def test_class_display_name_renders_as_quoted_subline(self):
+        from hologram import render_simple
+        syms = [self._syms(name="EngineTest",
+                           decorators=['DisplayName("engine behaviours, end to end")'])]
+        out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
+        self.assertIn('  "engine behaviours, end to end"', out)
+        self.assertIn('"…"=@DisplayName', out.splitlines()[1])
+
+    def test_multi_class_file_prefixes_names(self):
+        from hologram import render_simple
+        syms = [self._syms(name="EngineTest",
+                           decorators=['DisplayName("engine")']),
+                self._syms(name="Skewed", line=9,
+                           decorators=['Nested', 'DisplayName("when skewed")'])]
+        out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
+        self.assertIn('EngineTest "engine"', out)
+        self.assertIn('Skewed "when skewed"', out)
+
+    def test_method_level_display_name_not_rendered(self):
+        from hologram import render_simple
+        syms = [self._syms(name="EngineTest"),
+                Symbol(name="go", kind="method", file="tests/EngineTest.java",
+                       line=3, container="EngineTest", visibility="pub",
+                       lang="java",
+                       decorators=['Test', 'DisplayName("method behaviour")'])]
+        out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
+        self.assertNotIn("method behaviour", out)
+
+    def test_long_names_summarized_never_cut_midword_marker(self):
+        from hologram import render_simple
+        long = "x" * 80
+        syms = [self._syms(name="EngineTest",
+                           decorators=[f'DisplayName("{long}")'])]
+        out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
+        self.assertIn('"' + "x" * 63 + '…"', out)
+
+
 class TestHelperTest(unittest.TestCase):
     def _proj(self, tmp: Path) -> Path:
         root = tmp / "p"

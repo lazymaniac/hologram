@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
 
 ```
-# hologram · 8,794 LOC · state acc1650601f9
+# hologram · 8,856 LOC · state 166b98240f48
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -244,7 +244,7 @@ tools
              HookPythonSelectionTest}
  test_extract_langs.py{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}
  test_freshness_and_markers.py{StateAndCheckTest>run_cli+1,{TestedMarker,SizeMarker,TestIndex}Test>build_digest,
-                               TestHelperTest>build_digest+2,DepsMapTest>Symbol,
+                               DisplayNameTest>Symbol+1,TestHelperTest>build_digest+2,DepsMapTest>Symbol,
                                {Embed,ContextTargets,DiffCommand}Test>run_cli}
  test_more_langs.py{{Go,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Swift,Scala}ExtractTest>extract_file,
                     {RustExtract,ReactComponent,AngularExtract,PhpExtract}Test>extract_file+1,
