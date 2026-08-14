@@ -254,6 +254,66 @@ class BudgetTest(unittest.TestCase):
         for earlier, later in zip(sizes, sizes[1:]):
             self.assertLessEqual(later, earlier)
 
+    def test_skeleton_floor(self):
+        from hologram import build_digest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "p"
+            root.mkdir()
+            (root / "engine.py").write_text(
+                "class Engine:\n"
+                "    def __init__(self, prices):\n        self.prices = prices\n"
+                "    def evaluate(self, order):\n        return self.check(order)\n"
+                "    def check(self, order):\n        return order\n\n"
+                "def top_level(x):\n    return Engine(x).evaluate(x)\n")
+            (root / "test_engine.py").write_text(
+                "from engine import Engine\n\n"
+                "def test_e():\n    assert Engine({}).evaluate(1) == 1\n")
+            import contextlib
+            import io
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                a = build_digest(root, budget=1)
+        self.assertIn("Engine(C", a)               # type header stays
+        self.assertIn("top_level(x)", a)           # top-level fn sig stays
+        self.assertNotIn("evaluate", a)            # method lines gone
+        self.assertNotIn(" > ", a)                 # no chains anywhere
+        self.assertNotIn("- ", "\n".join(
+            l for l in a.splitlines() if l.strip().startswith("- ")))
+        self.assertIn("· budget 1 L8", a.splitlines()[0])
+        self.assertNotIn("project calls", a.splitlines()[1])  # legend honest
+        self.assertIn("even the skeleton map", err.getvalue())
+
+    def test_floor_warning_only_below_skeleton(self):
+        from hologram import build_digest, estimate_tokens
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            floor = build_digest(root, budget=1)
+            generous = estimate_tokens(floor) + 50
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                build_digest(root, budget=generous)
+        self.assertNotIn("warning", err.getvalue())
+
+    def test_cold_type_fan_in(self):
+        from hologram.gather import _gather
+        from hologram.render import render_simple
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "p"
+            root.mkdir()
+            (root / "app.py").write_text(
+                "class Warm:\n"
+                "    def hit(self):\n        return 1\n\n"
+                "class Cold:\n"
+                "    def miss(self):\n        return 2\n\n"
+                "def caller():\n    return Warm().hit()\n")
+            files, syms, ft, ut, state = _gather(root, None)
+            out = render_simple(root, syms, files, file_tokens=ft, detail=6)
+        self.assertIn("hit(", out)      # externally referenced type keeps methods
+        self.assertNotIn("miss(", out)  # zero fan-in type loses them
+        self.assertIn("Cold", out)      # ...but keeps its (grouped) header
+
     def test_budget_stamp_recalled_and_cleared(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._proj(Path(tmp))

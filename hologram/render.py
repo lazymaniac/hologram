@@ -276,7 +276,7 @@ def _resolved_project_calls(symbols: list[Symbol]
     return displayed, tested, raw_targets
 
 
-_MAX_LEVEL = 6  # deepest budget-ladder degradation level
+_MAX_LEVEL = 8  # deepest budget-ladder degradation level (the skeleton)
 
 _FIRST_STRING_RE = re.compile(r"""['"]([^'"]+)['"]""")
 _METHODS_VERB_RE = re.compile(r"""['"](GET|POST|PUT|DELETE|PATCH)['"]""")
@@ -594,7 +594,8 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
         first += " E{values}"
     if "(T:" in text:
         first += " T:target"
-    items = [first, "f(args):Ret > project calls"]
+    items = [first, "f(args):Ret > project calls" if " > " in text
+             else "f(args):Ret"]  # skeleton maps carry no chains
     if has_priv:
         items.append("-=private")
     if has_tests:
@@ -668,11 +669,33 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             types_by_dir.setdefault(str(Path(s.file).parent), []).append(s)
     # owner keys carry lang so same-named types from different languages in one
     # dir (Pricer in go + rust) don't merge their method lists
+    # L6 cold types: real fan-in from the raw call edges — a type is cold
+    # only when neither it nor any of its methods is referenced from outside
+    # the type (name-keyed since container is a string, so same-named twins
+    # only read cold when ALL of them are).
+    cold_types: set[tuple[str, str]] = set()
+    if detail >= 6:
+        all_types = {(s.name, s.lang) for s in prod
+                     if s.kind in TYPE_KINDS and s.container is None}
+        warm: set[tuple[str, str]] = set()
+        by_id = {id(s): s for s in symbols}
+        for caller_id, targets_ in raw_targets.items():
+            caller = by_id.get(caller_id)
+            for t in targets_:
+                owner = t.container or (t.name if t.kind in TYPE_KINDS
+                                        else None)
+                if owner is None:
+                    continue
+                if caller is None or caller.container != owner:
+                    warm.add((owner, t.lang))
+        cold_types = all_types - warm
     methods_by_owner: dict[tuple[str, str, str], list[Symbol]] = {}
     for s in prod:
         if (s.container and s.kind in ("method", "ctor")
                 and s.visibility == "pub"):
-            if detail >= 6 and s.container in zero_usage:
+            if detail >= 8:
+                continue  # budget: skeleton — no method lines at all
+            if detail >= 6 and (s.container, s.lang) in cold_types:
                 continue  # budget: cold types keep their header, lose methods
             methods_by_owner.setdefault(
                 (str(Path(s.file).parent), s.container, s.lang), []).append(s)
@@ -796,7 +819,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                          shown_supers, tuple(t.permits), impls, unused,
                          bool(t.fields),
                          tuple(_decorator_notes(t.decorators, t.lang)),
-                         tuple(resolved_calls.get(id(t), ())))
+                         tuple(resolved_calls.get(id(t), ()))
+                         if detail < 7 else ())  # L7: chains leave group keys too
             groups.setdefault(group_key, []).append(t)
         for (_, kind, vis, components, supers, permits, impls, unused,
              named_fields, deco_notes, type_calls), members in groups.items():
@@ -946,7 +970,7 @@ def build_digest(root: Path, langs: set[str] | None = None,
         digest = render(level)
     if estimate_tokens(digest) > budget:
         import sys
-        print(f"hologram: warning: even the sparsest map is "
+        print(f"hologram: warning: even the skeleton map is "
               f"~{estimate_tokens(digest):,} tokens against a budget of "
               f"{budget:,}; emitting it whole — narrowing with --lang may "
               f"help", file=sys.stderr)
