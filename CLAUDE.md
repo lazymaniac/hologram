@@ -162,19 +162,19 @@ reintroduce it. Private-corpus numbers stay out of tracked files; keep it that w
 editing `README.md` or `benchmark/*.md`.
 
 <!-- hologram:start — generated, do not edit; refreshed by git hooks -->
-This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend.
+This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers; run `hologram review` before finishing to catch duplicates and drift.
 
 ```
-# hologram · 8,907 LOC · state 41135abfccd4
+# hologram · 9,424 LOC · state 5016bc8d883a
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
  drop_workspace(corpus,ws) ✓
- judge_reuse(before,after,expect_reuse):dict ✓ > _sig_lines,_fn_name,_chain
+ judge_reuse(before,after,expect_reuse):dict ✓ > bench._sig_lines,_fn_name,_chain
  judge_scope(ws,expect,test_only):bool | None ✓ > _added_lines
  load_tasks(path):Config ✓ !SystemExit > Config,Task
  bench.py:main(argv):int ~58 ✓ > load_tasks,report,run_one
- make_workspace(corpus,ws,condition,lang):Path ✓ > _block_span
+ make_workspace(corpus,ws,condition,lang):Path ~46 ✓ > _block_span
  parse_transcript(text):dict ~45 ✓
  report(rows,anon):str ~54 ✓
  run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,effort):dict ✓ > make_workspace,_digest_of,judge_reuse,judge_scope,parse_transcript,drop_workspace,_setup_sha
@@ -191,13 +191,19 @@ hologram
  estimate_tokens(text):int
  has_parser(lang):bool
  cli.py:main() !SystemExit > run_cli
+ render_report(findings,rev):str ✓
  render_simple(root,symbols,files,state,deps,zero_usage,langs,targets,file_tokens):str ~242 ✓ > _resolved_project_calls,_total_loc,_tree_lines,_helper_class_ids,_test_index_lines,_legend_line,_decorator_notes,_private_lines,_is_test_path,_strip_exc
- run_cli(argv):int ~192 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,build_digest,_warn_if_large,_uninstall,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_target_candidates,_digest_langs,_digest_targets,embedded_digest,_strip_block,_digest_state,estimate_tokens
+ review_snapshots(old,new,old_digest,checks):list[Finding] ~160 ✓ > _prod_api,_raw_call_targets,_test_edges,_prod_callables,_zero_usage_names,_map_line_for,_describe,Finding,_key,_is_test_path,_decorator_notes
+ run_cli(argv):int ~192 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,_warn_if_large,_uninstall,run_review,_bootstrap_or_die,_install_hooks,_dead_hook_scripts,embed_digest,_target_candidates,_digest_langs,_digest_targets,embedded_digest,_strip_block,_digest_state,estimate_tokens
+ run_review(root,rev,langs,checks):str !SystemExit > snapshot,render_report,review_snapshots,build_digest
  scan_files(root):list[Path] > detect_language
+ snapshot(root,langs):Snapshot > _gather,Snapshot
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
  tight_annotation(text):str > tight_type
  tight_type(t):str
+ Finding(R{check,subject,detail})
+ Snapshot(R{symbols,file_tokens,usage_tokens})
  Symbol(R{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,decorators,size})
  = cli.py: HOOK_NAMES
  = embed.py: CONTEXT_FILES,CONTEXT_DIRS
@@ -212,6 +218,7 @@ hologram
  - render.py: _test_stem,_is_test_path,{_tree,_dep,_private,_braced,_test_index}_lines,_strip_exc,_total_loc,
               _symbol_identity,_target_descriptions,_raw_call_targets,_resolved_project_calls,_decorator_notes,
               _factored_name_tokens,_helper_class_ids,_informative_targets,_edge_suffix,_legend_line
+ - review.py: _key,_prod_callables,_prod_api,_test_edges,_sig_lines,_map_line_for,_describe
  - symbols.py: _parse_throws,_split_top_commas,_base_type,_heritage
  - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
  extract
@@ -239,7 +246,8 @@ tools
  measure_tokens.py:main(argv):int
 ? tests
  test_bench.py{TaskLoaderTest>load_tasks,TranscriptMetricsTest>parse_transcript,DuplicationDetectorTest>judge_reuse,
-               WorkspaceTest>make_workspace+1,RunOneTest,ScopeJudgeTest>judge_scope,ReportTest,CliTest>bench.main}
+               WorkspaceTest>make_workspace+1,CoachConditionTest>make_workspace+1,RunOneTest,ScopeJudgeTest>judge_scope,
+               ReportTest,CliTest>bench.main}
  test_cli.py{{CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,SizeWarning}Test>run_cli,
              HookPythonSelectionTest}
  test_extract_langs.py{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}
@@ -249,6 +257,7 @@ tools
  test_more_langs.py{{Go,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Swift,Scala}ExtractTest>extract_file,
                     {RustExtract,ReactComponent,AngularExtract,PhpExtract}Test>extract_file+1,
                     {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test>extract_file}
+ test_review.py{{DupCheck,RecoverCheck,DeadOrphanApi,PlaceCheck}Test>review_snapshots,ReportAndCliTest>render_report+2} > Snapshot +1
  test_simple_mode.py{CallExtractionTest>extract_file,
                      {SimpleDigest,SameShapeGrouping,FieldNames,ReconstructablePath,Legend,ConstExtract,TightFormat}Test>build_digest,
                      RenderUnitTest>Symbol+2,{EnumValues,InterfaceMethod,QualifiedCall,Throws}Test>extract_file+1,

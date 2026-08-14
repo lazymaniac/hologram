@@ -14,11 +14,17 @@ _EMBED_START = "<!-- hologram:start — generated, do not edit; refreshed by git
 _EMBED_END = "<!-- hologram:end -->"
 
 
+_COACH_SENTENCE = (
+    " Before writing tests or helpers, check `? tests` for existing coverage "
+    "and *-marked helpers; run `hologram review` before finishing to catch "
+    "duplicates and drift."
+)
+
 _EMBED_NOTE = (
     "This is a hologram map of this repository: a deterministic index of its "
     "public API — signatures, fields, call chains, private names, test "
     "locations. Read it before exploring to find what exists and open the "
-    "right file first. Line 2 is the legend."
+    "right file first. Line 2 is the legend." + _COACH_SENTENCE
 )
 
 

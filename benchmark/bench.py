@@ -257,12 +257,19 @@ def make_workspace(corpus: Path, ws: Path, condition: str,
     existing = claude_path.read_text() if claude_path.exists() else ""
     claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
     claude_path.write_text(claude_md)
-    if condition == "A":
+    if condition in ("A", "AC"):
         cmd = [sys.executable, str(HOLOGRAM), "build", "--root", str(ws),
                "--quiet", "--warn-tokens", "0"]
         for l in (lang or []):
             cmd += ["--lang", l]
         subprocess.run(cmd, check=True)
+        if condition == "A":
+            # A = map without the coaching sentence; AC = shipped note
+            from hologram.embed import _COACH_SENTENCE
+            for target in hologram.context_targets(ws):
+                if target.is_file():
+                    target.write_text(
+                        target.read_text().replace(_COACH_SENTENCE, ""))
     subprocess.run(["git", "-C", str(ws), "add", "-A"],
                    check=True, capture_output=True)
     subprocess.run(["git", "-C", str(ws), "-c", "user.email=bench@bench",
