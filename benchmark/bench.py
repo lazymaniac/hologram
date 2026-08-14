@@ -90,6 +90,10 @@ def parse_transcript(text: str) -> dict:
          "turns": 0, "tokens_in": 0, "tokens_out": 0,
          "files_read": 0, "result_text": ""}
     read_paths: set[str] = set()
+    # ordered event stream for the acted-on-findings verdict: pre-commit
+    # review reports (they land in user-event tool_results, rev "vs HEAD:"),
+    # edits, and commits
+    events: list[tuple] = []
     for line in text.splitlines():
         try:
             ev = json.loads(line)
@@ -109,12 +113,22 @@ def parse_transcript(text: str) -> dict:
                     m["searches"] += 1
                 elif name in _EDIT_TOOLS:
                     m["edits"] += 1
+                    fp = (block.get("input") or {}).get("file_path")
+                    if fp:
+                        events.append(("edit", fp))
                 elif name == "Bash":
                     cmd = (block.get("input") or {}).get("command", "")
                     if _BASH_SEARCH.search(cmd):
                         m["searches"] += 1
                     elif _BASH_READ.search(cmd):
                         m["reads"] += 1
+                    if re.search(r"\bgit\b[^\n|;&]*\bcommit\b", cmd):
+                        events.append(("commit", ""))
+        elif ev.get("type") == "user":
+            blob = json.dumps(ev)
+            if re.search(r"hologram review vs HEAD: \d+ finding", blob):
+                events.append(
+                    ("review", re.findall(r" in (\S+\.\w+)", blob)))
         elif ev.get("type") == "result":
             usage = ev.get("usage") or {}
             m["turns"] = int(ev.get("num_turns", 0))
@@ -125,7 +139,27 @@ def parse_transcript(text: str) -> dict:
             m["result_text"] = str(ev.get("result", ""))
     m["files_read"] = len(read_paths)
     m["review_seen"] = "hologram review vs" in text
+    m["acted_on_findings"] = _acted_on_findings(events)
     return m
+
+
+def _acted_on_findings(events: list[tuple]) -> bool:
+    """True when a pre-commit review report is followed by an edit touching a
+    file the findings named (any edit when they named none — recover/place
+    findings carry no path), and a commit lands after that edit."""
+    for i, (kind, payload) in enumerate(events):
+        if kind != "review":
+            continue
+        for j in range(i + 1, len(events)):
+            if events[j][0] != "edit":
+                continue
+            path = events[j][1]
+            named = payload
+            if named and not any(path.endswith(f) for f in named):
+                continue
+            if any(k[0] == "commit" for k in events[j + 1:]):
+                return True
+    return False
 
 
 def _sig_lines(digest: str) -> list[str]:
@@ -423,8 +457,11 @@ def report(rows: list[dict], anon: bool = False) -> str:
                        "scoped" if r.get("scope_ok") else
                        "ok" if r.get("answer_ok") else
                        "miss" if r.get("answer_ok") is False else "—")
+            review = ("rv+acted" if r.get("acted_on_findings") else
+                      "rv" if r.get("review_seen") else "")
             lines.append(f"- {r['task']} [{r['condition']}#{r['rep']}] "
-                         f"{verdict} turns={r['turns']} reads={r['reads']}")
+                         f"{verdict} turns={r['turns']} reads={r['reads']}"
+                         + (f" {review}" if review else ""))
     return "\n".join(lines) + "\n"
 
 
