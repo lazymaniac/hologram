@@ -1,7 +1,6 @@
 """All digest layout: render_simple owns every formatting decision."""
 from __future__ import annotations
 
-import difflib
 import os
 import re
 from collections import Counter
@@ -329,16 +328,6 @@ def _resolved_project_calls(symbols: list[Symbol]
 
 
 _FIRST_STRING_RE = re.compile(r"""['"]([^'"]+)['"]""")
-
-
-def _display_restates_name(text: str, class_name: str) -> bool:
-    """True when a @DisplayName only re-spaces its class name — a fact the
-    map already states, so it earns no tokens."""
-    norm_text = re.sub(r"[^a-z0-9]", "", text.lower())
-    norm_cls = re.sub(r"[^a-z0-9]", "",
-                      re.sub(r"(Tests|Test|IT)$", "", class_name).lower())
-    return difflib.SequenceMatcher(None, norm_text,
-                                   norm_cls).ratio() >= 0.9
 _METHODS_VERB_RE = re.compile(r"""['"](GET|POST|PUT|DELETE|PATCH)['"]""")
 
 
@@ -572,7 +561,7 @@ def _edge_suffix(owner: str, targets: list[str], braced: bool = False) -> str:
 def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       resolved_calls: dict[int, list[str]] | None = None,
                       helper_ids: dict[int, bool] | None = None,
-                      sig_line=None, with_display: bool = True) -> list[str]:
+                      sig_line=None) -> list[str]:
     test_paths = sorted(str(path.relative_to(root)) for path in files
                         if _is_test_path(str(path.relative_to(root))))
     if not test_paths:
@@ -581,8 +570,6 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     # (file, class) -> production symbols the class's methods resolve to; the
     # per-class view of the same edges the ✓ marker flattens
     edges: dict[tuple[str, str], list[str]] = {}
-    # (file, class) -> @DisplayName text: the behavior in the author's words
-    display: dict[tuple[str, str], str] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
         if not _is_test_path(symbol.file):
             continue
@@ -590,15 +577,6 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
             names = classes.setdefault(symbol.file, [])
             if symbol.name not in names:
                 names.append(symbol.name)
-            for d in symbol.decorators:
-                if d.split("(", 1)[0].split(".")[-1] == "DisplayName":
-                    m = _FIRST_STRING_RE.search(d.split("(", 1)[-1])
-                    if m and (symbol.file, symbol.name) not in display:
-                        text = m.group(1)
-                        if _display_restates_name(text, symbol.name):
-                            continue  # "Pricing engine test" on PricingEngineTest earns no tokens
-                        display[(symbol.file, symbol.name)] = (
-                            text[:63] + "…" if len(text) > 64 else text)
         elif symbol.kind in ("fn", "method", "ctor") and resolved_calls:
             key = (symbol.file, symbol.container or "")
             merged = edges.setdefault(key, [])
@@ -623,14 +601,6 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
         file_line = _braced_lines(display_path.name, in_braces)
         file_line[-1] += _edge_suffix(Path(path).stem, edges.get((path, ""), []))
         own_lines: list[str] = []
-        named = ([n for n in classes.get(path, [])
-                  if (path, n) in display and (path, n) not in helper_names]
-                 if with_display else [])
-        for n in named:
-            prefix = f"{n} " if len(named) > 1 or len(
-                [c for c in classes.get(path, [])
-                 if (path, c) not in helper_names]) > 1 else ""
-            own_lines.append(f' {prefix}"{display[(path, n)]}"')
         helper_lines: list[str] = []
         for h in helpers.get(path, []):
             # helper fields are internals; the public methods are the API
@@ -685,8 +655,6 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
         items.append("{a,b}s=as,bs")
     if re.search(r"\+\d+\b", text):
         items.append("+N=more")
-    if re.search(r'(?m)^\s+(?:[\w$.]+ )?"[^"\n]+"$', text):
-        items.append('"…"=@DisplayName')
     if " : " in text:
         items.append(":T=supers")
     if "sealed:" in text:
@@ -951,7 +919,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                               resolved_calls if detail < 2 else None,
                               helper_ids if detail < 2 else
                               {k: False for k in helper_ids},
-                              _sig_line, with_display=detail < 2)
+                              _sig_line)
     if tests:
         body.extend(tests)
     has_priv = bool(priv_top_by_file or priv_methods_by_owner)

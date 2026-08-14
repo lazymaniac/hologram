@@ -114,9 +114,6 @@ any LLM:
   coverage edge to the first non-obvious production symbol it exercises
   (`{WorkspaceTest>make_workspace+1,…}`; `+N` = more targets). Test functions are
   omitted because their names cost tokens without improving placement guidance.
-  Class-level `@DisplayName` strings render as quoted sub-lines
-  (`"pricing engine behaviours"`) — the covered behaviors in prose, not just
-  symbol names.
 - **Test helpers** — reusable drivers/builders/shared bases — render with a `*`
   sigil and, when referenced by other test files, their full public signatures:
   the reuse targets agents otherwise re-invent. Helpers living under directories

@@ -167,55 +167,17 @@ class TestIndexTest(unittest.TestCase):
 
 
 class DisplayNameTest(unittest.TestCase):
-    def _syms(self, **kw):
-        base = dict(kind="class", file="tests/EngineTest.java", line=1,
-                    visibility="pub", lang="java")
-        base.update(kw)
-        return Symbol(**base)
-
-    def test_class_display_name_renders_as_quoted_subline(self):
+    def test_display_name_strings_are_not_rendered(self):
+        # measured at +7% on an annotated corpus with no demonstrated
+        # behavioral benefit — extraction keeps the decorator, render skips it
         from hologram import render_simple
-        syms = [self._syms(name="EngineTest",
-                           decorators=['DisplayName("engine behaviours, end to end")'])]
-        out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
-        self.assertIn('  "engine behaviours, end to end"', out)
-        self.assertIn('"…"=@DisplayName', out.splitlines()[1])
-
-    def test_multi_class_file_prefixes_names(self):
-        from hologram import render_simple
-        syms = [self._syms(name="EngineTest",
-                           decorators=['DisplayName("engine pricing rules")']),
-                self._syms(name="Skewed", line=9,
-                           decorators=['Nested', 'DisplayName("when skewed")'])]
-        out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
-        self.assertIn('EngineTest "engine pricing rules"', out)
-        self.assertIn('Skewed "when skewed"', out)
-
-    def test_display_name_restating_class_name_suppressed(self):
-        from hologram import render_simple
-        syms = [self._syms(name="PricingEngineTest",
-                           decorators=['DisplayName("Pricing engine")'])]
-        out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
-        self.assertNotIn('"Pricing engine"', out)
-        self.assertNotIn("@DisplayName", out.splitlines()[1])
-
-    def test_method_level_display_name_not_rendered(self):
-        from hologram import render_simple
-        syms = [self._syms(name="EngineTest"),
-                Symbol(name="go", kind="method", file="tests/EngineTest.java",
-                       line=3, container="EngineTest", visibility="pub",
+        syms = [Symbol(name="EngineTest", kind="class",
+                       file="tests/EngineTest.java", line=1, visibility="pub",
                        lang="java",
-                       decorators=['Test', 'DisplayName("method behaviour")'])]
+                       decorators=['DisplayName("engine behaviours, end to end")'])]
         out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
-        self.assertNotIn("method behaviour", out)
-
-    def test_long_names_summarized_never_cut_midword_marker(self):
-        from hologram import render_simple
-        long = "x" * 80
-        syms = [self._syms(name="EngineTest",
-                           decorators=[f'DisplayName("{long}")'])]
-        out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
-        self.assertIn('"' + "x" * 63 + '…"', out)
+        self.assertNotIn("engine behaviours", out)
+        self.assertNotIn("@DisplayName", out.splitlines()[1])
 
 
 class TestHelperTest(unittest.TestCase):
