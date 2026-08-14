@@ -276,6 +276,8 @@ def _resolved_project_calls(symbols: list[Symbol]
     return displayed, tested, raw_targets
 
 
+_MAX_LEVEL = 6  # deepest budget-ladder degradation level
+
 _FIRST_STRING_RE = re.compile(r"""['"]([^'"]+)['"]""")
 _METHODS_VERB_RE = re.compile(r"""['"](GET|POST|PUT|DELETE|PATCH)['"]""")
 
@@ -670,15 +672,18 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     for s in prod:
         if (s.container and s.kind in ("method", "ctor")
                 and s.visibility == "pub"):
-            if detail >= 5 and s.container in zero_usage:
+            if detail >= 6 and s.container in zero_usage:
                 continue  # budget: cold types keep their header, lose methods
             methods_by_owner.setdefault(
                 (str(Path(s.file).parent), s.container, s.lang), []).append(s)
-    # Lossless names-only private inventory.
+    # Lossless names-only private inventory. Gated at build time so the
+    # per-class inventories consumed inside the types loop drop too — the
+    # old post-loop wipe left `- name` lines under public headers at every
+    # budget level.
     priv_methods_by_owner: dict[tuple[str, str, str], list[str]] = {}
     priv_top_by_file: dict[tuple[str, str], list[str]] = {}
     for s in prod:
-        if s.visibility != "priv":
+        if detail >= 4 or s.visibility != "priv":
             continue
         marked = s.kind in ("fn", "method", "class") and s.name in zero_usage
         name = f"{s.name}×0" if marked else s.name
@@ -738,8 +743,10 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if sym.kind in ("fn", "method") and sym.name in zero_usage:
             sig = f"{sig} ×0"
         kept = resolved_calls.get(id(sym), [])
-        if detail >= 4 and sym.name in zero_usage:
-            kept = []  # budget: unreferenced symbols lose their chains first
+        if detail >= 7:
+            kept = []  # budget: all chains gone
+        elif detail >= 5 and id(sym) not in tested:
+            kept = []  # budget: untested paths lose their chains first
         if sym.raises:
             sig = f"{sig} !{','.join(_strip_exc(r) for r in sym.raises)}"
         if grouped:
@@ -862,9 +869,6 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         payload_by_dir.setdefault(d, []).extend(
             _private_lines(f"= {fname}: ", vals))
 
-    if detail >= 3:
-        priv_top_by_file = {}
-        priv_methods_by_owner = {}
     for (d, stem), names_only in sorted(priv_top_by_file.items()):
         payload_by_dir.setdefault(d, []).extend(
             _private_lines(f"- {stem}: ", names_only))
@@ -899,7 +903,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   else _helper_class_ids(symbols, file_tokens))
     tests = _test_index_lines(files, symbols, root,
                               resolved_calls if detail < 2 else None,
-                              helper_ids if detail < 2 else
+                              helper_ids if detail < 3 else
                               {k: False for k in helper_ids},
                               _sig_line)
     if tests:
@@ -937,7 +941,7 @@ def build_digest(root: Path, langs: set[str] | None = None,
     # deterministic degradation ladder: drop whole fact categories, never
     # truncate — stop at the first level that fits the budget
     level = 0
-    while estimate_tokens(digest) > budget and level < 5:
+    while estimate_tokens(digest) > budget and level < _MAX_LEVEL:
         level += 1
         digest = render(level)
     if estimate_tokens(digest) > budget:
