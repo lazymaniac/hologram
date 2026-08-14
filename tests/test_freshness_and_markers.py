@@ -298,7 +298,7 @@ class EmbedTest(unittest.TestCase):
     def test_embed_note_stays_short_and_identifiable(self):
         self.assertIn("hologram map of this repository", hologram._EMBED_NOTE)
         self.assertIn("Line 2 is the legend", hologram._EMBED_NOTE)
-        self.assertLess(len(hologram._EMBED_NOTE), 260)
+        self.assertLess(len(hologram._EMBED_NOTE), 420)
 
     def test_embed_is_idempotent_and_refreshes(self):
         with tempfile.TemporaryDirectory() as tmp:

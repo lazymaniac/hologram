@@ -224,6 +224,25 @@ class WorkspaceTest(unittest.TestCase):
                 bench.drop_workspace(repo, ws)
 
 
+class CoachConditionTest(unittest.TestCase):
+    def test_ac_keeps_coaching_a_strips_it(self):
+        from hologram.embed import _COACH_SENTENCE
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _mini_corpus(Path(tmp))
+            ws_a = Path(tmp) / "wsA"
+            bench.make_workspace(corpus, ws_a, "A")
+            a_text = (ws_a / "CLAUDE.md").read_text()
+            bench.drop_workspace(corpus, ws_a)
+            ws_ac = Path(tmp) / "wsAC"
+            bench.make_workspace(corpus, ws_ac, "AC")
+            ac_text = (ws_ac / "CLAUDE.md").read_text()
+            bench.drop_workspace(corpus, ws_ac)
+        self.assertIn("hologram:start", a_text)
+        self.assertNotIn(_COACH_SENTENCE.strip(), a_text)
+        self.assertIn("hologram:start", ac_text)
+        self.assertIn(_COACH_SENTENCE.strip(), ac_text)
+
+
 class RunOneTest(unittest.TestCase):
     def test_full_cycle_with_fake_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
