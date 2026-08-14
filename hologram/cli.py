@@ -26,7 +26,7 @@ from .symbols import detect_language
 # CLI: build / init (self-installing git hooks)
 # ---------------------------------------------------------------------------
 
-HOOK_NAMES = ("post-commit", "post-merge", "post-checkout")
+HOOK_NAMES = ("pre-commit", "post-commit", "post-merge", "post-checkout")
 _HOOK_MARKER = "# hologram:managed"
 
 
@@ -69,16 +69,22 @@ def _managed_hook_line(line: str, repo: Path) -> bool:
     except SystemExit:
         pass
     root_alt = "|".join(re.escape(r) for r in sorted(roots))
-    pattern = (
+    tail = rf' \|\| true(?: {re.escape(_HOOK_MARKER)})?$'
+    build_form = (
         rf'^{executable} {invocation} build --root '
         rf'"(?:{root_alt})"(?: --lang \S+)*'
         rf'(?: --(?:no-)?embed)? --quiet'
         rf'(?: && {executable} {invocation} review \S+ --root '
-        rf'"(?:{root_alt})" --quiet-if-clean)?'
-        rf' \|\| true'
-        rf'(?: {re.escape(_HOOK_MARKER)})?$'
+        rf'"(?:{root_alt})" --quiet-if-clean)?'  # 0.7.0 post-commit form
+        + tail
     )
-    return re.fullmatch(pattern, line) is not None
+    review_form = (
+        rf'^{executable} {invocation} review \S+ --root '
+        rf'"(?:{root_alt})" --quiet-if-clean'
+        + tail
+    )
+    return (re.fullmatch(build_form, line) is not None
+            or re.fullmatch(review_form, line) is not None)
 
 
 def _dead_hook_scripts(repo: Path) -> set[str]:
@@ -91,7 +97,9 @@ def _dead_hook_scripts(repo: Path) -> set[str]:
             continue
         for line in hook.read_text().splitlines():
             if _managed_hook_line(line, repo):
-                m = re.search(r' "([^"\n]+hologram\.pyz?)" build --root ', line)
+                m = re.search(
+                    r' "([^"\n]+hologram\.pyz?)" (?:build|review \S+) --root ',
+                    line)
                 if m and not Path(m.group(1)).exists():
                     dead.add(m.group(1))
     return dead
@@ -102,17 +110,17 @@ def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None) -> No
     root_q = _sh_dq(str(repo.resolve()))
     build_part = (f'{_tool_invocation()} build --root "{root_q}"'
                   f'{lang_args} --quiet')
-    # only the post-commit hook reviews: HEAD~1 is meaningless after a merge
-    # or checkout, and its stdout is what lands in the committing agent's
-    # context when there are findings
-    review_part = (f' && {_tool_invocation()} review HEAD~1 --root "{root_q}"'
+    # review runs pre-commit: findings print BEFORE the commit lands, at the
+    # moment the committing agent can still cheaply act; it reviews the
+    # working tree vs HEAD (exactly the change about to be committed) and
+    # never blocks. The other hooks only rebuild the map.
+    review_line = (f'{_tool_invocation()} review HEAD --root "{root_q}"'
                    f' --quiet-if-clean')
     hooks_dir = repo / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     for name in HOOK_NAMES:
-        hook_line = (build_part
-                     + (review_part if name == "post-commit" else "")
-                     + f' || true {_HOOK_MARKER}\n')
+        core = review_line if name == "pre-commit" else build_part
+        hook_line = core + f' || true {_HOOK_MARKER}\n'
         hook = hooks_dir / name
         if hook.exists():
             content = hook.read_text()

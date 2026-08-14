@@ -254,7 +254,9 @@ class EmbedTest(unittest.TestCase):
     def test_embed_note_stays_short_and_identifiable(self):
         self.assertIn("hologram map of this repository", hologram._EMBED_NOTE)
         self.assertIn("Line 2 is the legend", hologram._EMBED_NOTE)
-        self.assertLess(len(hologram._EMBED_NOTE), 420)
+        # raised 420 -> 500 for the act-on-findings coaching sentence; the
+        # pin exists so the in-band note never creeps toward a manual
+        self.assertLess(len(hologram._EMBED_NOTE), 500)
 
     def test_embed_is_idempotent_and_refreshes(self):
         with tempfile.TemporaryDirectory() as tmp:

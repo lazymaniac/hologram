@@ -16,8 +16,9 @@ _EMBED_END = "<!-- hologram:end -->"
 
 _COACH_SENTENCE = (
     " Before writing tests or helpers, check `? tests` for existing coverage "
-    "and *-marked helpers; run `hologram review` before finishing to catch "
-    "duplicates and drift."
+    "and *-marked helpers. When `hologram review` reports findings, address "
+    "them before finishing: reuse the named original instead of a duplicate; "
+    "consolidate re-covered tests."
 )
 
 _EMBED_NOTE = (

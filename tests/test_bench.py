@@ -250,10 +250,14 @@ class ReviewConditionTest(unittest.TestCase):
             corpus = _mini_corpus(Path(tmp))
             ws = Path(tmp) / "wsAR"
             bench.make_workspace(corpus, ws, "AR")
-            hook = ws / ".git" / "hooks" / "post-commit"
+            hook = ws / ".git" / "hooks" / "pre-commit"
             self.assertTrue(hook.exists())
-            self.assertIn("review HEAD~1", hook.read_text())
+            self.assertIn("review HEAD ", hook.read_text())
+            post = ws / ".git" / "hooks" / "post-commit"
+            self.assertNotIn("review", post.read_text())  # build-only
             self.assertIn("hologram:start", (ws / "CLAUDE.md").read_text())
+            self.assertFalse(
+                (corpus / ".git" / "hooks" / "pre-commit").exists())
             self.assertFalse(
                 (corpus / ".git" / "hooks" / "post-commit").exists())
             bench.drop_workspace(corpus, ws)

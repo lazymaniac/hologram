@@ -54,10 +54,16 @@ class InitHooksTest(unittest.TestCase):
             hook = repo / ".git" / "hooks" / "post-commit"
             self.assertTrue(hook.exists())
             content = hook.read_text()
-            # post-commit carries build + review invocations
-            self.assertEqual(content.count("hologram.py"), 2)
-            self.assertIn("review HEAD~1", content)
+            # post-commit only rebuilds the map; review moved to pre-commit
+            self.assertEqual(content.count("hologram.py"), 1)
+            self.assertNotIn("review", content)
             self.assertNotIn("--embed", content)     # embedding is the only mode
+            pre = (repo / ".git" / "hooks" / "pre-commit").read_text()
+            self.assertEqual(pre.count("hologram.py"), 1)
+            self.assertIn("review HEAD ", pre)
+            self.assertIn("--quiet-if-clean", pre)
+            self.assertNotIn(" build ", pre)
+            self.assertEqual(pre.count("review HEAD"), 1)  # idempotent
             merge = (repo / ".git" / "hooks" / "post-merge").read_text()
             self.assertEqual(merge.count("hologram.py"), 1)
             self.assertNotIn("review", merge)        # review is commit-time only
@@ -74,7 +80,10 @@ class InitHooksTest(unittest.TestCase):
             run_cli(["init", "--root", str(repo), "--quiet"])
             content = hook.read_text()
             self.assertNotIn("--no-embed", content)
-            self.assertEqual(content.count("hologram.py"), 2)  # build + review
+            self.assertEqual(content.count("hologram.py"), 1)  # build only
+            # the 0.8.0 migration also lands the pre-commit review hook
+            pre = repo / ".git" / "hooks" / "pre-commit"
+            self.assertIn("review HEAD ", pre.read_text())
 
     def test_init_preserves_custom_wrapped_hologram_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,7 +96,7 @@ class InitHooksTest(unittest.TestCase):
             run_cli(["init", "--root", str(repo), "--quiet"])
             content = hook.read_text()
             self.assertIn(custom, content)
-            self.assertEqual(content.count("hologram.py"), 3)  # custom + build + review
+            self.assertEqual(content.count("hologram.py"), 2)  # custom + build
 
     def test_init_chains_existing_hook(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,8 +128,11 @@ class HookQuotingTest(unittest.TestCase):
             repo = _make_repo(outer)
             run_cli(["init", "--root", str(repo), "--quiet"])
             hook = (repo / ".git" / "hooks" / "post-commit").read_text()
+            pre = (repo / ".git" / "hooks" / "pre-commit").read_text()
         self.assertIn("x\\$(touch pwned)", hook)
         self.assertNotIn('"' + str(repo) + '"', hook)  # raw form absent
+        self.assertIn("x\\$(touch pwned)", pre)
+        self.assertNotIn('"' + str(repo) + '"', pre)
 
     def test_reinit_replaces_escaped_line_not_duplicates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -130,7 +142,66 @@ class HookQuotingTest(unittest.TestCase):
             run_cli(["init", "--root", str(repo), "--quiet"])
             run_cli(["init", "--root", str(repo), "--quiet"])
             hook = (repo / ".git" / "hooks" / "post-commit").read_text()
+            pre = (repo / ".git" / "hooks" / "pre-commit").read_text()
         self.assertEqual(hook.count("build --root"), 1)
+        self.assertEqual(pre.count("review HEAD"), 1)
+
+
+class ManagedHookLineTest(unittest.TestCase):
+    def test_review_only_line_recognized_and_near_misses_rejected(self):
+        from hologram.cli import _managed_hook_line, _sh_dq
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_repo(Path(tmp))
+            script = Path(hologram.__file__).resolve().parent.parent / "hologram.py"
+            root_q = _sh_dq(str(repo.resolve()))
+            good = (f'python3 "{script}" review HEAD --root "{root_q}"'
+                    f' --quiet-if-clean || true # hologram:managed')
+            self.assertTrue(_managed_hook_line(good, repo))
+            for bad in (good.replace(" --quiet-if-clean", ""),
+                        good.replace(" || true", ""),
+                        good.replace("review HEAD ", "review HEAD --force ")):
+                self.assertFalse(_managed_hook_line(bad, repo), bad)
+
+    def test_escaped_root_review_line_recognized(self):
+        from hologram.cli import _managed_hook_line, _sh_dq
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp) / "d$r"
+            outer.mkdir()
+            repo = _make_repo(outer)
+            script = Path(hologram.__file__).resolve().parent.parent / "hologram.py"
+            line = (f'python3 "{script}" review HEAD --root '
+                    f'"{_sh_dq(str(repo.resolve()))}" --quiet-if-clean || true')
+            self.assertTrue(_managed_hook_line(line, repo))
+
+
+class PreCommitHookE2ETest(unittest.TestCase):
+    def test_findings_print_before_commit_and_never_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "r"
+            repo.mkdir()
+            (repo / "util.py").write_text(
+                "def normalize_amount(v):\n    return int(v)\n")
+            for cmd in (["git", "init", "-q"], ["git", "add", "-A"],
+                        ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                         "commit", "-qm", "base"]):
+                subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+            run_cli(["init", "--root", str(repo), "--quiet"])
+            (repo / "money.py").write_text(
+                "def normalise_amounts(vs):\n    return [int(v) for v in vs]\n")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True,
+                           capture_output=True)
+            r = subprocess.run(["git", "-c", "user.email=t@t", "-c",
+                                "user.name=t", "commit", "-m", "dup"],
+                               cwd=repo, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0)  # advisory: never blocks
+            # git routes hook stdout to its own stderr; the findings still
+            # land in a committing agent's tool result, and pre-commit
+            # semantics guarantee they were produced before the commit
+            self.assertIn("hologram review vs HEAD:", r.stderr)
+            self.assertIn("normalize_amount", r.stderr)
+            log = subprocess.run(["git", "log", "--oneline"], cwd=repo,
+                                 capture_output=True, text=True).stdout
+            self.assertIn("dup", log)  # the commit landed
 
 
 class BudgetTest(unittest.TestCase):
@@ -349,6 +420,7 @@ class UninstallTest(unittest.TestCase):
             self.assertNotIn("hologram:start", content)
             self.assertIn("Hand-written guidance.", content)
             self.assertFalse((repo / ".git" / "hooks" / "post-commit").exists())
+            self.assertFalse((repo / ".git" / "hooks" / "pre-commit").exists())
 
     def test_uninstall_keeps_foreign_hook_lines(self):
         with tempfile.TemporaryDirectory() as tmp:

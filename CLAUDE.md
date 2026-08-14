@@ -162,10 +162,10 @@ reintroduce it. Private-corpus numbers stay out of tracked files; keep it that w
 editing `README.md` or `benchmark/*.md`.
 
 <!-- hologram:start — generated, do not edit; refreshed by git hooks -->
-This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers; run `hologram review` before finishing to catch duplicates and drift.
+This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers. When `hologram review` reports findings, address them before finishing: reuse the named original instead of a duplicate; consolidate re-covered tests.
 
 ```
-# hologram · 9,707 LOC · state 615f649fd4c7
+# hologram · 9,794 LOC · state 7d9d48b8bd7e
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -249,7 +249,7 @@ tools
             WorkspaceTest>make_workspace+1,ReviewConditionTest>make_workspace+2,CoachConditionTest>make_workspace+1,
             RunOneTest,ScopeJudgeTest>judge_scope,ReportTest,CliTest>bench.main}
  test_cli{{CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,SizeWarning}Test>run_cli,
-          BudgetTest>build_digest+1,HookPythonSelectionTest}
+          ManagedHookLineTest>_sh_dq+1,PreCommitHookE2ETest>run_cli,BudgetTest>build_digest+1,HookPythonSelectionTest}
  test_extract_langs{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}
  test_freshness_and_markers{StateAndCheckTest>run_cli+1,{TestedMarker,SizeMarker,TestIndex}Test>build_digest,
                             DisplayNameTest>render_simple+1,TestHelperTest>build_digest+2,
