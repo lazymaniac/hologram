@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers; run `hologram review` before finishing to catch duplicates and drift.
 
 ```
-# hologram · 9,532 LOC · state 7d59013de51b
+# hologram · 9,568 LOC · state 11a71d03bca5
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -174,8 +174,8 @@ benchmark
  judge_scope(ws,expect,test_only):bool | None ✓ > _added_lines
  load_tasks(path):Config ✓ !SystemExit > Config,Task
  bench.py:main(argv):int ~58 ✓ > load_tasks,report,run_one
- make_workspace(corpus,ws,condition,lang):Path ~46 ✓ > _block_span
- parse_transcript(text):dict ~45 ✓
+ make_workspace(corpus,ws,condition,lang):Path ~58 ✓ > _block_span
+ parse_transcript(text):dict ~46 ✓
  report(rows,anon):str ~54 ✓
  run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,effort):dict ✓ > make_workspace,_digest_of,judge_reuse,judge_scope,parse_transcript,drop_workspace,_setup_sha
  Config(R{corpus,tasks,model,max_turns,lang,effort})
@@ -246,8 +246,8 @@ tools
  measure_tokens.py:main(argv):int
 ? tests
  test_bench.py{TaskLoaderTest>load_tasks,TranscriptMetricsTest>parse_transcript,DuplicationDetectorTest>judge_reuse,
-               WorkspaceTest>make_workspace+1,CoachConditionTest>make_workspace+1,RunOneTest,ScopeJudgeTest>judge_scope,
-               ReportTest,CliTest>bench.main}
+               WorkspaceTest>make_workspace+1,ReviewConditionTest>make_workspace+2,CoachConditionTest>make_workspace+1,
+               RunOneTest,ScopeJudgeTest>judge_scope,ReportTest,CliTest>bench.main}
  test_cli.py{{CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,SizeWarning}Test>run_cli,
              BudgetTest>build_digest+1,HookPythonSelectionTest}
  test_extract_langs.py{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}

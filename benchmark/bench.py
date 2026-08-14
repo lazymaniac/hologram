@@ -124,6 +124,7 @@ def parse_transcript(text: str) -> dict:
             m["tokens_out"] = int(usage.get("output_tokens", 0))
             m["result_text"] = str(ev.get("result", ""))
     m["files_read"] = len(read_paths)
+    m["review_seen"] = "hologram review vs" in text
     return m
 
 
@@ -240,8 +241,19 @@ def make_workspace(corpus: Path, ws: Path, condition: str,
     from turn zero); B = control. The corpus's own CLAUDE.md is preserved, and
     the setup is committed in the detached worktree so that any later
     `git diff` shows exactly what the agent changed."""
-    subprocess.run(["git", "-C", str(corpus), "worktree", "add", "--detach",
-                    "-f", str(ws), "HEAD"], check=True, capture_output=True)
+    if condition == "AR":
+        # AR needs real hooks; a worktree's .git is a pointer file, so use a
+        # local clone detached at the corpus HEAD instead
+        head = subprocess.run(["git", "-C", str(corpus), "rev-parse", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "clone", "--no-hardlinks", "-q", str(corpus),
+                        str(ws)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(ws), "checkout", "-q", "--detach",
+                        head], check=True, capture_output=True)
+    else:
+        subprocess.run(["git", "-C", str(corpus), "worktree", "add",
+                        "--detach", "-f", str(ws), "HEAD"],
+                       check=True, capture_output=True)
     # A corpus whose committed context files already carry an embedded map
     # would contaminate the control condition — strip any pre-existing
     # blocks in both conditions; A rebuilds its own below.
@@ -257,8 +269,9 @@ def make_workspace(corpus: Path, ws: Path, condition: str,
     existing = claude_path.read_text() if claude_path.exists() else ""
     claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
     claude_path.write_text(claude_md)
-    if condition in ("A", "AC"):
-        cmd = [sys.executable, str(HOLOGRAM), "build", "--root", str(ws),
+    if condition in ("A", "AC", "AR"):
+        verb = "init" if condition == "AR" else "build"  # AR installs hooks
+        cmd = [sys.executable, str(HOLOGRAM), verb, "--root", str(ws),
                "--quiet", "--warn-tokens", "0"]
         for l in (lang or []):
             cmd += ["--lang", l]

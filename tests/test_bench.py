@@ -99,7 +99,8 @@ class TranscriptMetricsTest(unittest.TestCase):
         m = bench.parse_transcript("")
         self.assertEqual(m, {"reads": 0, "searches": 0, "edits": 0,
                              "turns": 0, "tokens_in": 0, "tokens_out": 0,
-                             "files_read": 0, "result_text": ""})
+                             "files_read": 0, "result_text": "",
+                             "review_seen": False})
 
     def test_result_text_and_distinct_files_read(self):
         lines = [
@@ -222,6 +223,28 @@ class WorkspaceTest(unittest.TestCase):
                 self.assertEqual(diff, "")   # setup committed -> clean slate
             finally:
                 bench.drop_workspace(repo, ws)
+
+
+class ReviewConditionTest(unittest.TestCase):
+    def test_ar_workspace_has_review_hook_corpus_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            corpus = _mini_corpus(Path(tmp))
+            ws = Path(tmp) / "wsAR"
+            bench.make_workspace(corpus, ws, "AR")
+            hook = ws / ".git" / "hooks" / "post-commit"
+            self.assertTrue(hook.exists())
+            self.assertIn("review HEAD~1", hook.read_text())
+            self.assertIn("hologram:start", (ws / "CLAUDE.md").read_text())
+            self.assertFalse(
+                (corpus / ".git" / "hooks" / "post-commit").exists())
+            bench.drop_workspace(corpus, ws)
+
+    def test_review_seen_metric(self):
+        t = "\n".join([
+            '{"type": "assistant", "message": {"content": [{"type": "text",'
+            ' "text": "tool said: hologram review vs HEAD~1: 2 finding(s)"}]}}'])
+        self.assertTrue(bench.parse_transcript(t)["review_seen"])
+        self.assertFalse(bench.parse_transcript("nothing")["review_seen"])
 
 
 class CoachConditionTest(unittest.TestCase):
