@@ -133,6 +133,47 @@ class HookQuotingTest(unittest.TestCase):
         self.assertEqual(hook.count("build --root"), 1)
 
 
+class BudgetTest(unittest.TestCase):
+    def _proj(self, tmp: Path) -> Path:
+        root = tmp / "p"
+        root.mkdir()
+        (root / "config.py").write_text(
+            "MAX_RETRIES = 3\n\n"
+            "def _private_helper():\n    pass\n\n"
+            "def used():\n    _private_helper()\n")
+        (root / "test_config.py").write_text(
+            "class ConfigTest:\n    def test_used(self):\n        used()\n")
+        return root
+
+    def test_ladder_is_deterministic_and_stamped(self):
+        from hologram import build_digest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            full = build_digest(root)
+            a = build_digest(root, budget=1)
+            b = build_digest(root, budget=1)
+        self.assertEqual(a, b)                      # same budget, same map
+        self.assertIn("MAX_RETRIES=3", full)
+        self.assertNotIn("MAX_RETRIES=3", a)        # L1: const values gone
+        self.assertIn("MAX_RETRIES", a)             # ...but names stay
+        self.assertNotIn("- config.py:", a)  # L3: private inventory line gone
+        self.assertIn("· budget 1 L", a.splitlines()[0])
+
+    def test_budget_stamp_recalled_and_cleared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--budget", "1", "--quiet"])
+            first = (root / "CLAUDE.md").read_text()
+            self.assertIn("· budget 1", first)
+            run_cli(["build", "--root", str(root), "--quiet"])  # flagless
+            self.assertIn("· budget 1",
+                          (root / "CLAUDE.md").read_text())     # recalled
+            run_cli(["build", "--root", str(root), "--budget", "0", "--quiet"])
+            cleared = (root / "CLAUDE.md").read_text()
+            self.assertNotIn("· budget", cleared)
+            self.assertIn("MAX_RETRIES=3", cleared)
+
+
 class TargetOptionTest(unittest.TestCase):
     """--target restricts which context files carry the map; the restriction
     is stamped into the header and recalled by flagless rebuilds."""

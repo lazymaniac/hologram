@@ -561,7 +561,7 @@ def _edge_suffix(owner: str, targets: list[str], braced: bool = False) -> str:
 def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       resolved_calls: dict[int, list[str]] | None = None,
                       helper_ids: dict[int, bool] | None = None,
-                      sig_line=None) -> list[str]:
+                      sig_line=None, with_display: bool = True) -> list[str]:
     test_paths = sorted(str(path.relative_to(root)) for path in files
                         if _is_test_path(str(path.relative_to(root))))
     if not test_paths:
@@ -610,8 +610,9 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
         file_line = _braced_lines(display_path.name, in_braces)
         file_line[-1] += _edge_suffix(Path(path).stem, edges.get((path, ""), []))
         own_lines: list[str] = []
-        named = [n for n in classes.get(path, [])
-                 if (path, n) in display and (path, n) not in helper_names]
+        named = ([n for n in classes.get(path, [])
+                  if (path, n) in display and (path, n) not in helper_names]
+                 if with_display else [])
         for n in named:
             prefix = f"{n} " if len(named) > 1 or len(
                 [c for c in classes.get(path, [])
@@ -694,7 +695,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   zero_usage: set[str] | None = None,
                   langs: set[str] | None = None,
                   targets: list[str] | None = None,
-                  file_tokens: dict[str, set[str]] | None = None) -> str:
+                  file_tokens: dict[str, set[str]] | None = None,
+                  detail: int = 0,
+                  budget: int | None = None) -> str:
     """Compact project facts as a package trie.
 
     pkg
@@ -718,6 +721,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     for s in prod:
         if (s.container and s.kind in ("method", "ctor")
                 and s.visibility == "pub"):
+            if detail >= 5 and s.container in zero_usage:
+                continue  # budget: cold types keep their header, lose methods
             methods_by_owner.setdefault(
                 (str(Path(s.file).parent), s.container, s.lang), []).append(s)
     # Lossless names-only private inventory.
@@ -782,6 +787,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if sym.kind in ("fn", "method") and sym.name in zero_usage:
             sig = f"{sig} ×0"
         kept = resolved_calls.get(id(sym), [])
+        if detail >= 4 and sym.name in zero_usage:
+            kept = []  # budget: unreferenced symbols lose their chains first
         if sym.raises:
             sig = f"{sig} !{','.join(_strip_exc(r) for r in sym.raises)}"
         if grouped:
@@ -884,12 +891,18 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if s.kind == "const" and s.visibility == "pub":
             const_key = (str(Path(s.file).parent), Path(s.file).name)
             vals = consts_by_file.setdefault(const_key, [])
-            if (s.signature or s.name) not in vals:
-                vals.append(s.signature or s.name)
+            entry = s.signature or s.name
+            if detail >= 1:
+                entry = entry.split("=", 1)[0]  # budget: values drop first
+            if entry not in vals:
+                vals.append(entry)
     for (d, fname), vals in sorted(consts_by_file.items()):
         payload_by_dir.setdefault(d, []).extend(
             _private_lines(f"= {fname}: ", vals))
 
+    if detail >= 3:
+        priv_top_by_file = {}
+        priv_methods_by_owner = {}
     for (d, stem), names_only in sorted(priv_top_by_file.items()):
         payload_by_dir.setdefault(d, []).extend(
             _private_lines(f"- {stem}: ", names_only))
@@ -916,11 +929,16 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         state_part += f" · langs {','.join(sorted(langs))}"
     if targets:
         state_part += f" · targets {','.join(sorted(targets))}"
+    if budget:
+        state_part += f" · budget {budget}" + (f" L{detail}" if detail else "")
     dep_part = ("\n".join(deps) + "\n") if deps else ""
     body = _tree_lines(payload_by_dir)
     helper_ids = _helper_class_ids(symbols, file_tokens)
-    tests = _test_index_lines(files, symbols, root, resolved_calls,
-                              helper_ids, _sig_line)
+    tests = _test_index_lines(files, symbols, root,
+                              resolved_calls if detail < 2 else None,
+                              helper_ids if detail < 2 else
+                              {k: False for k in helper_ids},
+                              _sig_line, with_display=detail < 2)
     if tests:
         body.extend(tests)
     has_priv = bool(priv_top_by_file or priv_methods_by_owner)
@@ -933,10 +951,32 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
 
 def build_digest(root: Path, langs: set[str] | None = None,
-                 targets: list[str] | None = None) -> str:
+                 targets: list[str] | None = None,
+                 budget: int | None = None) -> str:
     files, symbols, file_tokens, usage_tokens, state = _gather(root, langs)
     deps = _dep_lines(symbols, file_tokens)
-    return render_simple(root, symbols, files, state=state, deps=deps,
-                         zero_usage=_zero_usage_names(symbols, usage_tokens),
-                         langs=langs, targets=targets, file_tokens=file_tokens)
+    zero = _zero_usage_names(symbols, usage_tokens)
+
+    def render(level: int) -> str:
+        return render_simple(root, symbols, files, state=state, deps=deps,
+                             zero_usage=zero, langs=langs, targets=targets,
+                             file_tokens=file_tokens, detail=level,
+                             budget=budget)
+
+    digest = render(0)
+    if not budget:
+        return digest
+    # deterministic degradation ladder: drop whole fact categories, never
+    # truncate — stop at the first level that fits the budget
+    level = 0
+    while estimate_tokens(digest) > budget and level < 5:
+        level += 1
+        digest = render(level)
+    if estimate_tokens(digest) > budget:
+        import sys
+        print(f"hologram: warning: even the sparsest map is "
+              f"~{estimate_tokens(digest):,} tokens against a budget of "
+              f"{budget:,}; emitting it whole — narrowing with --lang may "
+              f"help", file=sys.stderr)
+    return digest
 

@@ -152,6 +152,12 @@ def _digest_langs(digest: str) -> set[str] | None:
     return set(m.group(1).split(",")) if m else None
 
 
+def _digest_budget(digest: str) -> int | None:
+    """The token budget recorded in a digest's header line, if any."""
+    m = re.search(r"· budget (\d+)", digest.split("\n", 1)[0])
+    return int(m.group(1)) if m else None
+
+
 def _digest_targets(digest: str) -> list[str] | None:
     """The `targets` restriction recorded in a digest's header line, if any —
     which context files carry the map, remembered across rebuilds."""
