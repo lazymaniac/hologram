@@ -26,7 +26,7 @@ from .symbols import detect_language
 # CLI: build / init (self-installing git hooks)
 # ---------------------------------------------------------------------------
 
-HOOK_NAMES = ("pre-commit", "post-commit", "post-merge", "post-checkout")
+HOOK_NAMES = ("post-commit", "post-merge", "post-checkout")
 _HOOK_MARKER = "# hologram:managed"
 
 
@@ -110,17 +110,19 @@ def _install_hooks(repo: Path, quiet: bool, langs: set[str] | None = None) -> No
     root_q = _sh_dq(str(repo.resolve()))
     build_part = (f'{_tool_invocation()} build --root "{root_q}"'
                   f'{lang_args} --quiet')
-    # review runs pre-commit: findings print BEFORE the commit lands, at the
-    # moment the committing agent can still cheaply act; it reviews the
-    # working tree vs HEAD (exactly the change about to be committed) and
-    # never blocks. The other hooks only rebuild the map.
-    review_line = (f'{_tool_invocation()} review HEAD --root "{root_q}"'
+    # only the post-commit hook reviews: HEAD~1 is meaningless after a merge
+    # or checkout, and its stdout is what lands in the committing agent's
+    # context when there are findings. A pre-commit timing variant was built
+    # and measured for 0.8.0 — findings fired identically but no agent acted
+    # any more than post-commit, so the known-quantity form stays.
+    review_part = (f' && {_tool_invocation()} review HEAD~1 --root "{root_q}"'
                    f' --quiet-if-clean')
     hooks_dir = repo / ".git" / "hooks"
     hooks_dir.mkdir(parents=True, exist_ok=True)
     for name in HOOK_NAMES:
-        core = review_line if name == "pre-commit" else build_part
-        hook_line = core + f' || true {_HOOK_MARKER}\n'
+        hook_line = (build_part
+                     + (review_part if name == "post-commit" else "")
+                     + f' || true {_HOOK_MARKER}\n')
         hook = hooks_dir / name
         if hook.exists():
             content = hook.read_text()

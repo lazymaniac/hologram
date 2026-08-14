@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers. When `hologram review` reports findings, address them before finishing: reuse the named original instead of a duplicate; consolidate re-covered tests.
 
 ```
-# hologram · 9,794 LOC · state 7d9d48b8bd7e
+# hologram · 9,866 LOC · state 249811dbb0ad
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -175,12 +175,13 @@ benchmark
  load_tasks(path):Config ✓ !SystemExit > Config,Task
  bench.py:main(argv):int ~58 ✓ > load_tasks,report,run_one
  make_workspace(corpus,ws,condition,lang):Path ~71 ✓ > _block_span
- parse_transcript(text):dict ~46 ✓
- report(rows,anon):str ~54 ✓
+ parse_transcript(text):dict ~61 ✓ > _acted_on_findings
+ report(rows,anon):str ~57 ✓
  run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,effort):dict ✓ > make_workspace,_digest_of,judge_reuse,judge_scope,parse_transcript,drop_workspace,_setup_sha
  Config(R{corpus,tasks,model,max_turns,lang,effort})
  Task(R{id,kind,prompt,accept_cmd,expect_reuse,expect_answer,expect_in_new_code,scope_in_tests,max_turns,effort})
- - bench.py: _sig_lines,_fn_name,_chain,_setup_sha,_added_lines,_effort_invocation,_digest_of,_dry_runner
+ - bench.py: _acted_on_findings,_sig_lines,_fn_name,_chain,_setup_sha,_added_lines,_effort_invocation,_digest_of,
+             _dry_runner
 hologram
  build_digest(root,langs,targets,budget):str ✓ > _gather,_zero_usage_names,render_simple,estimate_tokens
  const_signature(name,value_text):str ✓
@@ -246,10 +247,10 @@ tools
  measure_tokens.py:main(argv):int
 ? tests ·.py
  test_bench{TaskLoaderTest>load_tasks,TranscriptMetricsTest>parse_transcript,DuplicationDetectorTest>judge_reuse,
-            WorkspaceTest>make_workspace+1,ReviewConditionTest>make_workspace+2,CoachConditionTest>make_workspace+1,
-            RunOneTest,ScopeJudgeTest>judge_scope,ReportTest,CliTest>bench.main}
+            WorkspaceTest>make_workspace+1,ActedOnFindingsTest>parse_transcript,ReviewConditionTest>make_workspace+2,
+            CoachConditionTest>make_workspace+1,RunOneTest,ScopeJudgeTest>judge_scope,ReportTest,CliTest>bench.main}
  test_cli{{CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,SizeWarning}Test>run_cli,
-          ManagedHookLineTest>_sh_dq+1,PreCommitHookE2ETest>run_cli,BudgetTest>build_digest+1,HookPythonSelectionTest}
+          ManagedHookLineTest>_sh_dq+1,PostCommitHookE2ETest>run_cli,BudgetTest>build_digest+1,HookPythonSelectionTest}
  test_extract_langs{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}
  test_freshness_and_markers{StateAndCheckTest>run_cli+1,{TestedMarker,SizeMarker,TestIndex}Test>build_digest,
                             DisplayNameTest>render_simple+1,TestHelperTest>build_digest+2,

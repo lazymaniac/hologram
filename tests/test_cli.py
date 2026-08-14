@@ -54,16 +54,12 @@ class InitHooksTest(unittest.TestCase):
             hook = repo / ".git" / "hooks" / "post-commit"
             self.assertTrue(hook.exists())
             content = hook.read_text()
-            # post-commit only rebuilds the map; review moved to pre-commit
-            self.assertEqual(content.count("hologram.py"), 1)
-            self.assertNotIn("review", content)
+            # post-commit carries build + review invocations
+            self.assertEqual(content.count("hologram.py"), 2)
+            self.assertIn("review HEAD~1", content)
             self.assertNotIn("--embed", content)     # embedding is the only mode
-            pre = (repo / ".git" / "hooks" / "pre-commit").read_text()
-            self.assertEqual(pre.count("hologram.py"), 1)
-            self.assertIn("review HEAD ", pre)
-            self.assertIn("--quiet-if-clean", pre)
-            self.assertNotIn(" build ", pre)
-            self.assertEqual(pre.count("review HEAD"), 1)  # idempotent
+            # the measured-and-reverted pre-commit variant must not install
+            self.assertFalse((repo / ".git" / "hooks" / "pre-commit").exists())
             merge = (repo / ".git" / "hooks" / "post-merge").read_text()
             self.assertEqual(merge.count("hologram.py"), 1)
             self.assertNotIn("review", merge)        # review is commit-time only
@@ -80,10 +76,7 @@ class InitHooksTest(unittest.TestCase):
             run_cli(["init", "--root", str(repo), "--quiet"])
             content = hook.read_text()
             self.assertNotIn("--no-embed", content)
-            self.assertEqual(content.count("hologram.py"), 1)  # build only
-            # the 0.8.0 migration also lands the pre-commit review hook
-            pre = repo / ".git" / "hooks" / "pre-commit"
-            self.assertIn("review HEAD ", pre.read_text())
+            self.assertEqual(content.count("hologram.py"), 2)  # build + review
 
     def test_init_preserves_custom_wrapped_hologram_command(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -96,7 +89,7 @@ class InitHooksTest(unittest.TestCase):
             run_cli(["init", "--root", str(repo), "--quiet"])
             content = hook.read_text()
             self.assertIn(custom, content)
-            self.assertEqual(content.count("hologram.py"), 2)  # custom + build
+            self.assertEqual(content.count("hologram.py"), 3)  # custom + build + review
 
     def test_init_chains_existing_hook(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,11 +121,8 @@ class HookQuotingTest(unittest.TestCase):
             repo = _make_repo(outer)
             run_cli(["init", "--root", str(repo), "--quiet"])
             hook = (repo / ".git" / "hooks" / "post-commit").read_text()
-            pre = (repo / ".git" / "hooks" / "pre-commit").read_text()
         self.assertIn("x\\$(touch pwned)", hook)
         self.assertNotIn('"' + str(repo) + '"', hook)  # raw form absent
-        self.assertIn("x\\$(touch pwned)", pre)
-        self.assertNotIn('"' + str(repo) + '"', pre)
 
     def test_reinit_replaces_escaped_line_not_duplicates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -142,9 +132,7 @@ class HookQuotingTest(unittest.TestCase):
             run_cli(["init", "--root", str(repo), "--quiet"])
             run_cli(["init", "--root", str(repo), "--quiet"])
             hook = (repo / ".git" / "hooks" / "post-commit").read_text()
-            pre = (repo / ".git" / "hooks" / "pre-commit").read_text()
         self.assertEqual(hook.count("build --root"), 1)
-        self.assertEqual(pre.count("review HEAD"), 1)
 
 
 class ManagedHookLineTest(unittest.TestCase):
@@ -174,8 +162,8 @@ class ManagedHookLineTest(unittest.TestCase):
             self.assertTrue(_managed_hook_line(line, repo))
 
 
-class PreCommitHookE2ETest(unittest.TestCase):
-    def test_findings_print_before_commit_and_never_block(self):
+class PostCommitHookE2ETest(unittest.TestCase):
+    def test_findings_print_after_commit_and_never_block(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "r"
             repo.mkdir()
@@ -194,11 +182,11 @@ class PreCommitHookE2ETest(unittest.TestCase):
                                 "user.name=t", "commit", "-m", "dup"],
                                cwd=repo, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0)  # advisory: never blocks
-            # git routes hook stdout to its own stderr; the findings still
-            # land in a committing agent's tool result, and pre-commit
-            # semantics guarantee they were produced before the commit
-            self.assertIn("hologram review vs HEAD:", r.stderr)
-            self.assertIn("normalize_amount", r.stderr)
+            # git routes hook stdout to its own stderr; the findings land in
+            # the committing agent's tool result either way
+            out = r.stdout + r.stderr
+            self.assertIn("hologram review vs HEAD~1:", out)
+            self.assertIn("normalize_amount", out)
             log = subprocess.run(["git", "log", "--oneline"], cwd=repo,
                                  capture_output=True, text=True).stdout
             self.assertIn("dup", log)  # the commit landed
