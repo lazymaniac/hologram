@@ -138,6 +138,20 @@ class DecoratorExtractTest(unittest.TestCase):
         find = next(s for s in syms if s.name == "find")
         self.assertEqual(find.decorators, ['GetMapping("/users/{id}")'])
 
+    @unittest.skipUnless(hologram.has_parser("java"), "tree-sitter-java missing")
+    def test_string_annotation_args_keep_interior_spacing(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            syms = self._one(tmp, "D.java", (
+                "@DisplayName(\"accepts a, b and c\")\n"
+                "public class D {\n"
+                "  public void go(java.util.Map<String, Long> m) { }\n"
+                "}\n"))
+        d = next(s for s in syms if s.kind == "class")
+        self.assertEqual(d.decorators, ['DisplayName("accepts a, b and c")'])
+        go = next(s for s in syms if s.name == "go")
+        self.assertEqual(go.params, ["java.util.Map<String,Long>"])  # types still tighten
+
     @needs_ts
     def test_ts_decorators_captured_for_class_and_method(self):
         import tempfile
