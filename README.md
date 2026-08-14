@@ -268,16 +268,15 @@ revision (default `HEAD`) and reports what drifted:
   module than the one it landed in.
 
 Everything is advisory: `review` always exits 0, and `--quiet-if-clean` prints
-nothing when there's nothing to say. `init` wires it into the **pre-commit**
-hook, which is the interesting part: when a *coding agent* commits, the findings
-print into the agent's own session *before the commit lands* — the map answers
-back at exactly the moment the mistake is cheapest to undo. The hook never
-blocks a commit. One honest caveat: pre-commit reviews the working tree, so
-with partial staging (`git commit -p`, `--only`) it reviews slightly more than
-the commit. Findings are heuristic (name similarity, call affinity), so expect
-the occasional false positive; they point, you decide. Foreign pre-commit
-scripts that `exec` another tool (the pre-commit framework) will skip the
-appended hologram line — the same limitation every appended hook line has.
+nothing when there's nothing to say. `init` wires it into the post-commit hook,
+which is the interesting part: when a *coding agent* commits, the findings print
+into the agent's own session — the map answers back at exactly the moment the
+mistake is cheapest to undo. Findings are heuristic (name similarity, call
+affinity), so expect the occasional false positive; they point, you decide.
+(A pre-commit timing variant was built and measured: findings fired identically
+but changed agent behavior no more than post-commit, so the simpler
+known-quantity form stays.) Foreign hook scripts that `exec` another tool will
+skip an appended hologram line — a limitation every appended hook line has.
 
 Review output is never embedded into context files — the embedded map stays a pure
 function of the tracked sources, so a map diff always means the code changed.
