@@ -231,40 +231,58 @@ def _effort_invocation(effort: str | None) -> tuple[list[str], dict[str, str]]:
 _BASE_CLAUDE_MD = """# Working notes
 
 Complete the requested task directly. Keep changes minimal and idiomatic.
+
+IMPORTANT: This checkout is the whole project. Work ONLY inside the current
+working directory. If anything above or in other docs names a different
+project directory or branch, it refers to another checkout that must not be
+read or modified — ignore it.
 """
 
 
 def make_workspace(corpus: Path, ws: Path, condition: str,
                    lang: list[str] | None = None) -> Path:
-    """Detached git worktree of the corpus, prepared for one condition.
+    """Detached local clone of the corpus, prepared for one condition.
     A = the map embedded in the agent's context file (the whole map in context
     from turn zero); B = control. The corpus's own CLAUDE.md is preserved, and
-    the setup is committed in the detached worktree so that any later
-    `git diff` shows exactly what the agent changed."""
-    if condition == "AR":
-        # AR needs real hooks; a worktree's .git is a pointer file, so use a
-        # local clone detached at the corpus HEAD instead
-        head = subprocess.run(["git", "-C", str(corpus), "rev-parse", "HEAD"],
-                              capture_output=True, text=True).stdout.strip()
-        subprocess.run(["git", "clone", "--no-hardlinks", "-q", str(corpus),
-                        str(ws)], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(ws), "checkout", "-q", "--detach",
-                        head], check=True, capture_output=True)
-    else:
-        subprocess.run(["git", "-C", str(corpus), "worktree", "add",
-                        "--detach", "-f", str(ws), "HEAD"],
-                       check=True, capture_output=True)
+    the setup is committed in the detached clone so that any later
+    `git diff` shows exactly what the agent changed.
+
+    Every condition clones (a worktree's .git pointer file both breaks AR's
+    hooks and leaks the corpus path — an agent once followed it and committed
+    into the real corpus). The origin remote is removed so a stray `git push`
+    has nowhere to land."""
+    head = subprocess.run(["git", "-C", str(corpus), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "clone", "--no-hardlinks", "-q", str(corpus),
+                    str(ws)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(ws), "checkout", "-q", "--detach",
+                    head], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(ws), "remote", "remove", "origin"],
+                   check=True, capture_output=True)
     # A corpus whose committed context files already carry an embedded map
     # would contaminate the control condition — strip any pre-existing
-    # blocks in both conditions; A rebuilds its own below.
+    # blocks in both conditions; A rebuilds its own below. Context files may
+    # also name the corpus's home checkout by absolute path ("work in
+    # /Users/x/project on main") — an agent once obeyed that and committed
+    # into the real corpus, so any absolute path that resolves outside the
+    # workspace is rewritten to the workspace itself.
+    abs_path_re = re.compile(r"(?:/Users|/home)/[^\s`'\")\]]+")
     for target in hologram.context_targets(ws):
         if not target.is_file():
             continue
         text = target.read_text()
         span = hologram.embed._block_span(text)
         if span is not None:
-            cleaned = (text[:span[0]] + text[span[1]:]).strip("\n")
-            target.write_text(cleaned + "\n" if cleaned else "")
+            text = (text[:span[0]] + text[span[1]:]).strip("\n")
+            text = text + "\n" if text else ""
+        def _confine(m: "re.Match[str]") -> str:
+            p = Path(m.group(0))
+            try:
+                p.resolve().relative_to(ws.resolve())
+                return m.group(0)
+            except ValueError:
+                return str(ws)
+        target.write_text(abs_path_re.sub(_confine, text))
     claude_path = ws / "CLAUDE.md"
     existing = claude_path.read_text() if claude_path.exists() else ""
     claude_md = (existing.rstrip("\n") + "\n\n" if existing else "") + _BASE_CLAUDE_MD
