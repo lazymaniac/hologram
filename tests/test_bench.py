@@ -100,7 +100,8 @@ class TranscriptMetricsTest(unittest.TestCase):
         self.assertEqual(m, {"reads": 0, "searches": 0, "edits": 0,
                              "turns": 0, "tokens_in": 0, "tokens_out": 0,
                              "files_read": 0, "result_text": "",
-                             "review_seen": False})
+                             "review_seen": False,
+                             "acted_on_findings": False})
 
     def test_result_text_and_distinct_files_read(self):
         lines = [
@@ -242,6 +243,54 @@ class WorkspaceTest(unittest.TestCase):
                 self.assertEqual(diff, "")   # setup committed -> clean slate
             finally:
                 bench.drop_workspace(repo, ws)
+
+
+class ActedOnFindingsTest(unittest.TestCase):
+    def _t(self, *events):
+        lines = []
+        for kind, payload in events:
+            if kind == "review":
+                lines.append(json.dumps({
+                    "type": "user", "message": {"content": [
+                        {"type": "tool_result",
+                         "content": "hologram review vs HEAD: 1 finding(s)\n"
+                                    + payload}]}}))
+            elif kind == "edit":
+                lines.append(json.dumps({
+                    "type": "assistant", "message": {"content": [
+                        {"type": "tool_use", "name": "Edit",
+                         "input": {"file_path": payload}}]}}))
+            elif kind == "commit":
+                lines.append(json.dumps({
+                    "type": "assistant", "message": {"content": [
+                        {"type": "tool_use", "name": "Bash",
+                         "input": {"command": "git commit --amend"}}]}}))
+        return "\n".join(lines)
+
+    def test_edit_of_named_file_then_commit_counts(self):
+        t = self._t(("review", "- dup: x in money.py is similar"),
+                    ("edit", "/ws/money.py"), ("commit", ""))
+        self.assertTrue(bench.parse_transcript(t)["acted_on_findings"])
+
+    def test_findings_after_last_commit_do_not_count(self):
+        t = self._t(("commit", ""),
+                    ("review", "- dup: x in money.py is similar"))
+        self.assertFalse(bench.parse_transcript(t)["acted_on_findings"])
+
+    def test_seen_without_edit_does_not_count(self):
+        t = self._t(("review", "- dup: x in money.py is similar"),
+                    ("commit", ""))
+        self.assertFalse(bench.parse_transcript(t)["acted_on_findings"])
+
+    def test_pathless_findings_fall_back_to_any_edit(self):
+        t = self._t(("review", "- recover: T re-covers x"),
+                    ("edit", "/ws/whatever.java"), ("commit", ""))
+        self.assertTrue(bench.parse_transcript(t)["acted_on_findings"])
+
+    def test_edit_of_unrelated_file_does_not_count_when_files_named(self):
+        t = self._t(("review", "- dup: x in money.py is similar"),
+                    ("edit", "/ws/other.py"), ("commit", ""))
+        self.assertFalse(bench.parse_transcript(t)["acted_on_findings"])
 
 
 class ReviewConditionTest(unittest.TestCase):
