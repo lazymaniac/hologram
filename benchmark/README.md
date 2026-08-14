@@ -252,5 +252,29 @@ A × both models). All 28 passed acceptance; zero duplication anywhere.
 - Turn counts were mixed and small (AR sometimes ±3 turns vs A) — review
   reports neither cost nor save measurable effort at these task sizes.
 
+### Budget-ladder gate round — 0.9.0 (sonnet, effort=low, condition A)
+
+The 0.9.0 ladder repair ran behind five gates. Determinism, monotonicity,
+floor reachability (skeleton = −54% of the full map on the reference corpus)
+and refactor invariance (unbudgeted maps byte-identical to 0.8.0 modulo the
+state stamp, three corpora) all passed mechanically. The behavioral gate —
+five navigation probes against a degraded map — took three iterations and
+taught the round's real lesson:
+
+1. **First run (const values dropped at L1, silent omission): 3/5.** Two
+   wrong answers with *zero file reads* — the agent confidently answered
+   value and route questions off a map that silently omitted those facts.
+2. **Second run (disclosure line added): 4/5.** The route question flipped
+   to correct-with-one-read — the disclosure sent the agent to the source.
+   The const-value question still failed: a "reply with just the number"
+   prompt tempts a low-effort model into guessing regardless of warnings.
+3. **Third run (const values folded into the skeleton, ladder renumbered):
+   5/5 at a −26% budget, every answer off-map in one turn, zero reads.**
+
+The design conclusion is now measured: **the cheapest facts to keep can be
+the costliest to drop** — const values saved 0.3% and caused the worst
+failure class. Degraded maps also must say what they lost; silence reads
+as completeness.
+
 Cross-round comparisons to the 0.5.0 tables are directional only: these
 runs pinned `--effort low`; the earlier rounds ran at CLI defaults.

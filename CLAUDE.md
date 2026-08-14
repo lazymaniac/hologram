@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers. When `hologram review` reports findings, address them before finishing: reuse the named original instead of a duplicate; consolidate re-covered tests.
 
 ```
-# hologram · 10,075 LOC · state c8e6458c36e7
+# hologram · 10,075 LOC · state 85c7d7ea6e41
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
