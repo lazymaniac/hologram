@@ -144,6 +144,7 @@ any LLM:
 | HTML | element ids and custom-element tags, plus nested `<script>`/`<style>` blocks run through the JS/CSS extractors (when those grammars are installed) |
 | CSS | class/id selectors, custom properties (`--x`), `@keyframes` names — names only |
 | Helm | template `define` names, `values.yaml` keys, chart name |
+| Makefile (`Makefile`, `*.mk`) | targets as commands with their caller-settable variables (`deploy(ENV,MANIFEST)` — vars the file pins with `=`/`:=` are internal and excluded); `.PHONY`/pattern rules skipped; `_name` = private |
 
 ## Getting started
 

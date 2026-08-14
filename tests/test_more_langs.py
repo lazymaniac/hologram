@@ -752,3 +752,29 @@ class ScalaExtractTest(unittest.TestCase):
         demo = next(s for s in self.syms if s.name == "demo")
         self.assertEqual(demo.bindings.get("engine"), "PricingEngine")
         self.assertIn("engine.quote", demo.calls)
+
+
+class MakefileExtractTest(unittest.TestCase):
+    def test_targets_with_overridable_params(self):
+        syms = extract_file(POLY / "Makefile", POLY)
+        by_name = {s.name: s for s in syms}
+        self.assertEqual(by_name["Makefile"].kind, "class")
+        # ?=-defined and undefined vars are parameters; := and = pinned ones are not
+        self.assertEqual(by_name["deploy"].signature, "deploy(ENV,MANIFEST)")
+        self.assertEqual(by_name["build"].signature, "build()")
+        # multi-target rule: each name is a command with the same params
+        self.assertEqual(by_name["test"].signature, "test(FLAGS)")
+        self.assertEqual(by_name["lint"].signature, "lint(FLAGS)")
+        # underscore targets are private; dot targets and pattern rules vanish
+        self.assertEqual(by_name["_stage"].visibility, "priv")
+        self.assertNotIn(".PHONY", by_name)
+        self.assertNotIn("%.o", by_name)
+        # define/endef bodies are not recipes
+        self.assertNotIn("NOT_A_PARAM", str(by_name.get("deploy").params))
+
+    def test_named_makefile_detected_without_extension(self):
+        from hologram import detect_language
+        from pathlib import Path as P
+        self.assertEqual(detect_language(P("x/Makefile")), "make")
+        self.assertEqual(detect_language(P("x/GNUmakefile")), "make")
+        self.assertEqual(detect_language(P("x/rules.mk")), "make")

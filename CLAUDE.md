@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers. When `hologram review` reports findings, address them before finishing: reuse the named original instead of a duplicate; consolidate re-covered tests.
 
 ```
-# hologram · 10,075 LOC · state 85c7d7ea6e41
+# hologram · 10,170 LOC · state e00c6682b87c
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -186,7 +186,7 @@ hologram
  build_digest(root,langs,targets,budget):str ✓ > _gather,_zero_usage_names,render_simple,estimate_tokens
  const_signature(name,value_text):str ✓
  context_targets(root):list[Path]
- detect_language(path):str | None
+ detect_language(path):str | None ✓
  embed_digest(path,digest) > _embed_block,_block_span,_seed_content
  embedded_digest(path):str ✓ > _block_span
  estimate_tokens(text):int ✓
@@ -234,7 +234,7 @@ hologram
              _extract_java
   - kotlin.py: _kt_{vis,params,param_names,return,call_entry,raises,local_bindings,annotations,const_symbols,fn_symbol},
                _extract_kotlin
-  - misc.py: _lua_call_entry,_extract_{lua,bash,css,html,helm},_bash_call_entry,_css_symbols
+  - misc.py: _lua_call_entry,_extract_{lua,bash,css,html,helm,make},_bash_call_entry,_css_symbols
   - php.py: _php_{vis,var_name,params,return,call_entry,local_bindings,raises,attributes,fn_symbol},_extract_php
   - python.py: _py_{param_facts,calls,raises,bindings,decorators,fn_symbol},_extract_python
   - ruby.py: _rb_{call_entry,params,method_symbol,fields,walk},_extract_ruby
@@ -256,8 +256,8 @@ tools
                             DisplayNameTest>render_simple+1,TestHelperTest>build_digest+2,
                             {Embed,ContextTargets,DiffCommand}Test>run_cli}
  test_more_langs{{Go,CSharp,Cpp,Bash,Lua,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Swift,Scala}ExtractTest>extract_file,
-                 {RustExtract,ReactComponent,AngularExtract,PhpExtract}Test>extract_file+1,
-                 {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test>extract_file}
+                 {Rust,Angular,Php,Makefile}ExtractTest>extract_file+1,
+                 {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test>extract_file,ReactComponentTest>extract_file+1}
  test_review{{DupCheck,RecoverCheck,DeadOrphanApi,PlaceCheck}Test>review_snapshots,ReportAndCliTest>render_report+2} > Snapshot +1
  test_simple_mode{CallExtractionTest>extract_file,
                   {SimpleDigest,SameShapeGrouping,FieldNames,ReconstructablePath,Legend,ConstExtract,TightFormat}Test>build_digest,
