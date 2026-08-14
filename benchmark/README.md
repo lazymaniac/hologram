@@ -226,5 +226,31 @@ round). All 39 runs passed acceptance.
   path let one early agent commit into the real corpus — bench workspaces
   are now path-confined clones with no origin remote.
 
+### Merge-gate round — 0.8.0 (A vs AR, sonnet + haiku, effort=low)
+
+0.8.0 was built behind per-feature go/no-go gates: nothing merges without a
+measured benefit. 28 sessions on the same corpus snapshot as the 0.7.0 round
+(two write tasks × A/AR × both models × 3 reps, plus two navigation tasks ×
+A × both models). All 28 passed acceptance; zero duplication anywhere.
+
+| gate | evidence | verdict |
+|---|---|---|
+| token diet (ctor restatements, dunder privates, test-index fold + shared extension) | reference corpus −3.7%, self −0.7%, map diff shows only intended line classes gone | **shipped** |
+| deps-block removal | all 4 navigation answers correct in 1 turn without it (coupling recoverable from call chains) | **shipped** |
+| pre-commit review timing | reviewer fired on every drifting commit — and **zero** of 12 AR runs acted on findings, identical to post-commit in 0.7.0 | **reverted** — post-commit stays |
+| coaching upgrade (act-on-findings wording) | no acceptance/turns regression | **shipped** |
+
+- The diet shortfall vs the ~6% estimate is explained, not hidden: files with
+  `@Nested` test classes keep their braces (multiple real classes — the fold
+  correctly doesn't apply), and exception constructors whose args differ from
+  their headers are informative and correctly kept.
+- The pre-commit experiment is the round's honest headline: moving the
+  reviewer's voice *earlier* changed nothing at low effort — the bottleneck
+  is the acting, not the timing. The `acted_on_findings` metric (report →
+  later edit of a named file → later commit) stays in the harness for 0.9
+  experiments aimed at that gap.
+- Turn counts were mixed and small (AR sometimes ±3 turns vs A) — review
+  reports neither cost nor save measurable effort at these task sizes.
+
 Cross-round comparisons to the 0.5.0 tables are directional only: these
 runs pinned `--effort low`; the earlier rounds ran at CLI defaults.
