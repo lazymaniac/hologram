@@ -218,6 +218,42 @@ class BudgetTest(unittest.TestCase):
         self.assertNotIn("- config.py:", a)  # L3: private inventory line gone
         self.assertIn("· budget 1 L", a.splitlines()[0])
 
+    def test_untested_chains_drop_before_tested(self):
+        from hologram import build_digest
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "p"
+            root.mkdir()
+            (root / "app.py").write_text(
+                "def target():\n    return 1\n\n"
+                "def covered():\n    return target()\n\n"
+                "def uncovered():\n    return target()\n")
+            (root / "test_app.py").write_text(
+                "from app import covered\n\n"
+                "def test_covered():\n    assert covered() == 1\n")
+            # detail 5 renders: covered keeps its chain, uncovered loses it
+            from hologram.render import render_simple
+            from hologram.gather import _gather
+            files, syms, ft, ut, state = _gather(root, None)
+            out = render_simple(root, syms, files, file_tokens=ft, detail=5)
+        cov = next(ln for ln in out.splitlines() if "covered()" in ln
+                   and "uncovered" not in ln)
+        unc = next(ln for ln in out.splitlines() if "uncovered()" in ln)
+        self.assertIn("> target", cov)
+        self.assertNotIn("> target", unc)
+
+    def test_levels_monotonic(self):
+        from hologram.gather import _gather
+        from hologram.render import _MAX_LEVEL, render_simple
+        from hologram import estimate_tokens
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            files, syms, ft, ut, state = _gather(root, None)
+            sizes = [estimate_tokens(render_simple(root, syms, files,
+                                                   file_tokens=ft, detail=lvl))
+                     for lvl in range(_MAX_LEVEL + 1)]
+        for earlier, later in zip(sizes, sizes[1:]):
+            self.assertLessEqual(later, earlier)
+
     def test_budget_stamp_recalled_and_cleared(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self._proj(Path(tmp))
