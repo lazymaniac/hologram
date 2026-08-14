@@ -180,12 +180,19 @@ def review_snapshots(old: Snapshot, new: Snapshot, old_digest: str = "",
 
     if "dead" in on:
         zero = _zero_usage_names(new.symbols, new.usage_tokens)
+        # a name any test file mentions is exercised, even when the call
+        # arrives through framework indirection that leaves no static edge
+        test_mentions: set[str] = set()
+        for f, tokens in new.file_tokens.items():
+            if _is_test_path(f):
+                test_mentions |= tokens
         for s in sorted((s for s in new.symbols
                          if s.kind in ("fn", "method", "class")
                          and s.visibility == "pub"
                          and not _is_test_path(s.file)
                          and (s.lang, s.name) not in old_names
-                         and s.name in zero), key=_key):
+                         and s.name in zero
+                         and s.name not in test_mentions), key=_key):
             findings.append(Finding(
                 "dead", s.name,
                 f"dead: new public {s.kind} {_describe(s)} has no observed "

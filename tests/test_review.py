@@ -112,6 +112,17 @@ class DeadOrphanApiTest(unittest.TestCase):
         self.assertEqual(
             review_snapshots(old, new, checks=frozenset({"orphan"})), [])
 
+    def test_dead_suppressed_when_a_test_file_mentions_the_name(self):
+        # framework-indirect tests (HTTP drivers, reflection) leave no static
+        # call edge but do mention the symbol — that's exercised, not dead
+        old = _snap([_fn("existing")])
+        newcomer = _fn("brand_new_helper")
+        new = _snap([_fn("existing"), newcomer],
+                    file_tokens={"tests/test_x.py": {"brand_new_helper"}},
+                    usage={"existing": 5, "brand_new_helper": 1})
+        self.assertEqual(
+            review_snapshots(old, new, checks=frozenset({"dead"})), [])
+
     def test_api_summary(self):
         old = _snap([_fn("kept"), _fn("gone")])
         new = _snap([_fn("kept"), _fn("added_fn")])

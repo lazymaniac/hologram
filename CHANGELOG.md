@@ -32,12 +32,6 @@ inside the committing agent's own context.
   `build && review HEAD~1 --quiet-if-clean` after each commit, so a
   committing agent sees what its own commit drifted. Existing installs keep
   working; run `hologram init` again to upgrade the hook line in place.
-- **Class-level `@DisplayName` strings in the test index** — quoted
-  behavior sub-lines under each test file, so covered *behaviors* (not just
-  symbol names) are visible: `"pricing engine behaviours"`. Legend:
-  `"…"=@DisplayName`. Display names that merely re-space their class name
-  are suppressed (the map already states that fact). Measured cost: ~+7%
-  on a heavily annotated private corpus, zero on repos without them.
 - **Coaching sentence in the embed note** — the map's in-band note now
   tells the agent to check `? tests` before writing tests or helpers and to
   run `hologram review` before finishing.
@@ -53,7 +47,17 @@ inside the committing agent's own context.
 ### Fixed
 
 - Annotation arguments with string literals keep their interior spacing —
-  `@DisplayName("a, b")` no longer renders as `"a,b"`.
+  `@DisplayName("a, b")` no longer extracts as `"a,b"`.
+
+### Dropped during the release round
+
+- Class-level `@DisplayName` sub-lines in the test index were built,
+  measured at ~+7% map cost on a heavily annotated corpus with no
+  demonstrated behavioral benefit, and removed before shipping. The
+  extraction (decorators on test classes) remains; only the rendering is
+  gone. `review`'s *dead* check was de-noised in the same pass: a new
+  public symbol that any test file mentions is treated as exercised even
+  when the call arrives through framework indirection with no static edge.
 
 ### Dev
 
