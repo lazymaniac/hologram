@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-14
+
+Theme: cheaper without being smaller. Every change was built behind a
+measured merge gate (see benchmark/README.md); one feature — pre-commit
+review timing — was built, measured, and reverted for showing no
+behavioral gain.
+
+### Changed
+
+- **Token diet, same facts** — three same-fact-twice redundancies removed
+  (reference corpus −3.7%, self −0.7%, zero information loss):
+  constructors whose argument list restates the type header's field list
+  (`PricingEngine(basePrices)` under `PricingEngine(C{basePrices})`) are
+  suppressed, including the grouped `Self(fields)` form — any constructor
+  carrying notes, ✓, sizes, throws, calls, or typed args stays; dunder
+  methods (`__init__`, `__repr__`) leave the private inventories;
+  the test index folds a file whose only test class matches its name
+  (`PricingEngineTest>applyDelta+2`, no braces) and states a shared file
+  extension once in the header (`? tests ·.java`).
+- **The `· deps` block is gone.** It was a coarser restatement of the call
+  chains, degenerated on shallow repos, and outlived richer facts under
+  `--budget`. Gate evidence: all navigation/architecture answers stayed
+  correct at 1 turn without it.
+- **Coaching sentence** now says what to do with review findings (reuse
+  the named original, consolidate re-covered tests) instead of just naming
+  the command.
+
+### Measured and reverted
+
+- **Pre-commit review timing.** Review was moved to a pre-commit hook so
+  findings would land *before* the commit; the gate round showed the
+  reviewer firing identically — and, at low effort, agents acting on the
+  findings exactly as often as post-commit: never. The post-commit form
+  ships unchanged; the new `acted_on_findings` bench metric stays for 0.9.
+
+### Dev
+
+- Benchmark: `acted_on_findings` transcript metric (review report →
+  later edit of a file the findings named → later commit).
+
 ## [0.7.0] - 2026-08-14
 
 Theme: the map talks back. Until now the map was a passive briefing; the

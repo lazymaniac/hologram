@@ -39,9 +39,8 @@ whole. Token cost stays low by choosing compact facts instead of truncating them
 The map of a small Java fixture:
 
 ```
-# hologram · 186 LOC · state de55ba22cc9d
-· C/R/I{fields} E{values} · f(args):Ret > project calls · ?=tests · ×0=no static use · !E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · ←A|B=implementors · Self=own type · deps a→b=a uses b
-· deps .→ids | engine→ids
+# hologram · 186 LOC · state c2c8d84f0053
+· C/R/I{fields} E{values} · f(args):Ret > project calls · ?=tests · ×0=no static use · !E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · ←A|B=implementors · Self=own type
 src
  App(C) ×0
   main(args) ×0 > PricingEngine,evaluate,OrderId.of,ItemId.of
@@ -57,7 +56,6 @@ src
    quoteFor(order):Quote ×0
    supports(order):boolean ×0
   PricingEngine(C{basePrices})
-   PricingEngine(basePrices)
    quoteFor(order):Quote ×0 > evaluate
    supports(order):boolean ×0
    evaluate(order,items):Quote !UnknownItem > UnknownItemException,Quote
@@ -67,9 +65,9 @@ src
  ids
   ItemId,OrderId,UserId(R{value})
    of(raw):Self > Self
-? tests
+? tests ·.java
  src/test
-  PricingEngineTest.java{PricingEngineTest,BulkDiscounts}
+  PricingEngineTest{PricingEngineTest,BulkDiscounts}
 ```
 
 Reading it is easier than it looks, and the legend on line 2 teaches the notation to
@@ -359,7 +357,14 @@ additions — while staying silent on clean commits. The honest half of the
 result: at low effort the weakest tier *read* the findings but didn't
 restructure already-committed work, and placement quality split by model
 tier, not by condition. The reviewer surfaces drift the moment it happens;
-what the agent does next still scales with capability. Caveats stay honest:
+what the agent does next still scales with capability.
+
+A fourth round gated the 0.8.0 changes feature by feature: the token diet and
+the deps-block removal shipped on measured evidence (map −3.7% on the
+reference corpus with all navigation answers still correct at 1 turn), while a
+pre-commit review-timing variant was built, measured, and **reverted** — the
+reviewer fired identically but agents acted on findings no more than they did
+post-commit, so the simpler form stayed. Caveats stay honest:
 one private corpus per round (numbers published, corpus withheld), n=3 per
 cell, quality judged on narrow task shapes. Classic
 AI-slop markers (mock storms, duplicate test bodies, comment chatter) were largely
