@@ -165,7 +165,7 @@ editing `README.md` or `benchmark/*.md`.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers; run `hologram review` before finishing to catch duplicates and drift.
 
 ```
-# hologram · 9,568 LOC · state 11a71d03bca5
+# hologram · 9,670 LOC · state b748090eab64
 · C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):str > _effort_invocation
@@ -174,7 +174,7 @@ benchmark
  judge_scope(ws,expect,test_only):bool | None ✓ > _added_lines
  load_tasks(path):Config ✓ !SystemExit > Config,Task
  bench.py:main(argv):int ~58 ✓ > load_tasks,report,run_one
- make_workspace(corpus,ws,condition,lang):Path ~58 ✓ > _block_span
+ make_workspace(corpus,ws,condition,lang):Path ~71 ✓ > _block_span
  parse_transcript(text):dict ~46 ✓
  report(rows,anon):str ~54 ✓
  run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,effort):dict ✓ > make_workspace,_digest_of,judge_reuse,judge_scope,parse_transcript,drop_workspace,_setup_sha
@@ -216,8 +216,8 @@ hologram
  - gather.py: _generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_{state,langs,budget,targets},
               _framework_invoked,_zero_usage_names
  - render.py: _test_stem,_is_test_path,{_tree,_dep,_private,_braced,_test_index}_lines,_strip_exc,_total_loc,
-              _symbol_identity,_target_descriptions,_raw_call_targets,_resolved_project_calls,_decorator_notes,
-              _factored_name_tokens,_helper_class_ids,_informative_targets,_edge_suffix,_legend_line
+              _symbol_identity,_target_descriptions,_raw_call_targets,_resolved_project_calls,_display_restates_name,
+              _decorator_notes,_factored_name_tokens,_helper_class_ids,_informative_targets,_edge_suffix,_legend_line
  - review.py: _key,_prod_callables,_prod_api,_test_edges,_sig_lines,_map_line_for,_describe
  - symbols.py: _parse_throws,_split_top_commas,_base_type,_heritage
  - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
