@@ -1,6 +1,7 @@
 """All digest layout: render_simple owns every formatting decision."""
 from __future__ import annotations
 
+import difflib
 import os
 import re
 from collections import Counter
@@ -328,6 +329,16 @@ def _resolved_project_calls(symbols: list[Symbol]
 
 
 _FIRST_STRING_RE = re.compile(r"""['"]([^'"]+)['"]""")
+
+
+def _display_restates_name(text: str, class_name: str) -> bool:
+    """True when a @DisplayName only re-spaces its class name — a fact the
+    map already states, so it earns no tokens."""
+    norm_text = re.sub(r"[^a-z0-9]", "", text.lower())
+    norm_cls = re.sub(r"[^a-z0-9]", "",
+                      re.sub(r"(Tests|Test|IT)$", "", class_name).lower())
+    return difflib.SequenceMatcher(None, norm_text,
+                                   norm_cls).ratio() >= 0.9
 _METHODS_VERB_RE = re.compile(r"""['"](GET|POST|PUT|DELETE|PATCH)['"]""")
 
 
@@ -584,6 +595,8 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                     m = _FIRST_STRING_RE.search(d.split("(", 1)[-1])
                     if m and (symbol.file, symbol.name) not in display:
                         text = m.group(1)
+                        if _display_restates_name(text, symbol.name):
+                            continue  # "Pricing engine test" on PricingEngineTest earns no tokens
                         display[(symbol.file, symbol.name)] = (
                             text[:63] + "…" if len(text) > 64 else text)
         elif symbol.kind in ("fn", "method", "ctor") and resolved_calls:

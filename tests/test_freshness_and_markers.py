@@ -184,12 +184,20 @@ class DisplayNameTest(unittest.TestCase):
     def test_multi_class_file_prefixes_names(self):
         from hologram import render_simple
         syms = [self._syms(name="EngineTest",
-                           decorators=['DisplayName("engine")']),
+                           decorators=['DisplayName("engine pricing rules")']),
                 self._syms(name="Skewed", line=9,
                            decorators=['Nested', 'DisplayName("when skewed")'])]
         out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
-        self.assertIn('EngineTest "engine"', out)
+        self.assertIn('EngineTest "engine pricing rules"', out)
         self.assertIn('Skewed "when skewed"', out)
+
+    def test_display_name_restating_class_name_suppressed(self):
+        from hologram import render_simple
+        syms = [self._syms(name="PricingEngineTest",
+                           decorators=['DisplayName("Pricing engine")'])]
+        out = render_simple(Path("."), syms, [Path("tests/EngineTest.java")])
+        self.assertNotIn('"Pricing engine"', out)
+        self.assertNotIn("@DisplayName", out.splitlines()[1])
 
     def test_method_level_display_name_not_rendered(self):
         from hologram import render_simple

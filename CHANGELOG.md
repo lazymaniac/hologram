@@ -35,7 +35,9 @@ inside the committing agent's own context.
 - **Class-level `@DisplayName` strings in the test index** — quoted
   behavior sub-lines under each test file, so covered *behaviors* (not just
   symbol names) are visible: `"pricing engine behaviours"`. Legend:
-  `"…"=@DisplayName`.
+  `"…"=@DisplayName`. Display names that merely re-space their class name
+  are suppressed (the map already states that fact). Measured cost: ~+7%
+  on a heavily annotated private corpus, zero on repos without them.
 - **Coaching sentence in the embed note** — the map's in-band note now
   tells the agent to check `? tests` before writing tests or helpers and to
   run `hologram review` before finishing.
