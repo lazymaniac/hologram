@@ -22,7 +22,13 @@ jobs:
             echo "::error::tag v$tag but hologram/_version.py says $pkg — bump the version and re-tag"
             exit 1
           fi
-      - run: python -m pip install build
+      - name: Install release and test dependencies
+        run: |
+          python -m pip install build $(python -c "import hologram; print(' '.join(hologram._grammar_pkgs(set(hologram._GRAMMAR_MODULES))))")
+      - name: Run grammar-complete release tests
+        run: python tools/run_tests.py --profile full
+      - name: Verify the embedded map is current
+        run: python hologram.py check --root .
       - run: python -m build
       - name: Build single-file zipapp
         # into its own directory — the PyPI publish job uploads everything in
