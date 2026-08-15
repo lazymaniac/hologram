@@ -1,26 +1,26 @@
-pub struct Rational { num: i64, den: i64 }
+pub struct Point { x: i64, y: i64 }
 
-pub enum Force { Asserted, Entailed, Supported }
+pub enum Axis { Horizontal, Vertical, Depth }
 
-pub trait Pricer: Clone {
-    fn quote(&self, id: u32) -> u64;
+pub trait Locatable: Clone {
+    fn locate(&self, id: u32) -> u64;
 }
 
-impl Pricer for Rational {
-    fn quote(&self, id: u32) -> u64 { self.reduce(); 0 }
+impl Locatable for Point {
+    fn locate(&self, id: u32) -> u64 { self.translate(); 0 }
 }
 
-impl Rational {
-    pub fn of(num: i64, den: i64) -> Rational {
-        let r = Rational { num, den };
-        r
+impl Point {
+    pub fn new(x: i64, y: i64) -> Point {
+        let point = Point { x, y };
+        point
     }
-    fn reduce(&self) {}
+    fn translate(&self) {}
 }
 
-pub fn normalize(items: Vec<Rational>) -> Vec<Rational> { items }
+pub fn collect(points: Vec<Point>) -> Vec<Point> { points }
 
-pub const MAX_ITEMS: usize = 10;
+pub const MAX_POINTS: usize = 10;
 
-#[get("/rationals/{id}")]
-pub fn find_rational(id: u64) -> Rational { Rational { num: 1, den: 1 } }
+#[get("/points/{id}")]
+pub fn find_point(id: u64) -> Point { Point { x: 1, y: 1 } }

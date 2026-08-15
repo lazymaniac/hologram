@@ -30,16 +30,16 @@ class TreeSitterJavaTest(unittest.TestCase):
         self.assertEqual(ev.container, "PricingEngine")
 
     def test_record_components_and_supers(self):
-        syms = self._syms("src/delta/AddOp.java")
+        syms = self._syms("src/transport/Bicycle.java")
         t = next(s for s in syms if s.kind == "record")
         self.assertEqual(t.params, ["String"])
-        self.assertEqual(t.fields, ["nodeId"])
-        self.assertEqual(t.supers, ["DeltaOp"])
+        self.assertEqual(t.fields, ["serial"])
+        self.assertEqual(t.supers, ["Vehicle"])
 
     def test_sealed_permits(self):
-        syms = self._syms("src/delta/DeltaOp.java")
+        syms = self._syms("src/transport/Vehicle.java")
         t = next(s for s in syms if s.kind == "interface")
-        self.assertEqual(t.permits, ["AddOp", "RemoveOp"])
+        self.assertEqual(t.permits, ["Bicycle", "Scooter"])
 
     def test_interface_bodyless_methods(self):
         syms = self._syms("src/engine/PricePort.java")

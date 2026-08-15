@@ -250,62 +250,306 @@ def _extract_helm(text: str, rel: str) -> list[Symbol]:
 # Makefile extraction — targets are the commands, recipe variables the knobs
 # ---------------------------------------------------------------------------
 
-_MAKE_TARGETS_RE = re.compile(
-    r"^([A-Za-z0-9_][\w./-]*(?:[ \t]+[A-Za-z0-9_][\w./-]*)*)[ \t]*:(?![=:])")
-_MAKE_VAR_REF_RE = re.compile(r"\$[({]([A-Za-z_]\w*)[)}]")
-_MAKE_DEF_RE = re.compile(r"^([A-Za-z_]\w*)[ \t]*(\?=|:=|\+=|=)")
+_MAKE_NAME = r"[A-Za-z0-9_][\w./-]*"
+_MAKE_VAR_NAME = r"[A-Za-z_][\w-]*"
+_MAKE_VAR_NAME_RE = re.compile(rf"{_MAKE_VAR_NAME}\Z")
+_MAKE_RULE_RE = re.compile(
+    rf"^[ ]*(?P<targets>{_MAKE_NAME}(?:[ \t]+{_MAKE_NAME})*)"
+    r"[ \t]*(?P<sep>::?)(?![=:])(?P<body>.*)$")
+_MAKE_ASSIGN_OP = r"(?:\?=|:::=|::=|:=|\+=|!=|=)"
+_MAKE_OVERRIDE_RE = re.compile(
+    rf"^[ ]*(?:(?:export|private)[ \t]+)*override[ \t]+"
+    rf"(?:(?:export|private)[ \t]+)*(?:define[ \t]+)?"
+    rf"({_MAKE_VAR_NAME})[ \t]*{_MAKE_ASSIGN_OP}")
+_MAKE_OVERRIDE_DEFINE_RE = re.compile(
+    r"^[ ]*(?:(?:export|private)[ \t]+)*override[ \t]+"
+    rf"(?:(?:export|private)[ \t]+)*define[ \t]+({_MAKE_VAR_NAME})")
+_MAKE_TARGET_ASSIGN_RE = re.compile(
+    rf"^[ \t]*(?P<mods>(?:(?:export|private|override)[ \t]+)*)"
+    rf"(?P<name>{_MAKE_VAR_NAME})[ \t]*{_MAKE_ASSIGN_OP}")
+_MAKE_DEFINE_RE = re.compile(
+    r"^[ ]*(?:(?:export|private|override)[ \t]+)*define(?:[ \t]|$)")
+_MAKE_ENDEF_RE = re.compile(r"^[ ]*endef(?:[ \t]|$)")
+_MAKE_RECIPEPREFIX_RE = re.compile(
+    r"^[ ]*(?:(?:export|private|override)[ \t]+)*"
+    r"\.RECIPEPREFIX[ \t]*(?P<op>\?=|:::=|::=|:=|\+=|!=|=)"
+    r"(?P<value>.*)$")
+_MAKE_CONDITIONAL_RE = re.compile(
+    r"^[ ]*(?:ifeq|ifneq|ifdef|ifndef|else|endif)(?:[ \t(]|$)")
+
+# Make supplies these to recipes as execution metadata rather than caller knobs.
+# Ordinary tool variables such as CC and CXX deliberately stay eligible: unlike
+# these bookkeeping values, they are useful command-line configuration inputs.
+_MAKE_INTERNAL_VARS = {
+    "CURDIR", "GNUMAKEFLAGS", "MAKE", "MAKECMDGOALS", "MAKEFILE_LIST",
+    "MAKEFILES", "MAKEFLAGS", "MAKELEVEL", "MAKEOVERRIDES", "MAKE_RESTARTS",
+    "MAKE_TERMERR", "MAKE_TERMOUT", "MAKE_VERSION", "MAKE_HOST", "MFLAGS",
+}
+
+
+def _make_extend_unique(dest: list[str],
+                        values: list[str] | tuple[str, ...]) -> None:
+    for value in values:
+        if value not in dest:
+            dest.append(value)
+
+
+def _make_continues(line: str) -> bool:
+    stripped = line.rstrip()
+    return (bool(stripped)
+            and (len(stripped) - len(stripped.rstrip("\\"))) % 2 == 1)
+
+
+def _make_without_comment(recipe: str) -> str:
+    """Drop shell-style recipe comments without treating quoted # as comments."""
+    quote = ""
+    escaped = False
+    for i, char in enumerate(recipe):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char in ("'", '"'):
+            quote = "" if quote == char else char if not quote else quote
+        elif char == "#" and not quote and (i == 0 or recipe[i - 1].isspace()
+                                             or recipe[i - 1] in "@-+;|&()"):
+            return recipe[:i]
+    return recipe
+
+
+def _make_syntax_without_comment(text: str) -> str:
+    """Strip an unescaped Make comment, including one attached to a word."""
+    escaped = False
+    for index, char in enumerate(text):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "#":
+            return text[:index]
+    return text
+
+
+def _make_rule_parts(body: str) -> tuple[str, str, bool]:
+    """Split prerequisites from an inline recipe using Make comment rules."""
+    escaped = False
+    for index, char in enumerate(body):
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "#":
+            return body[:index], "", False
+        elif char == ";":
+            return body[:index], body[index + 1:], True
+    return body, "", False
+
+
+def _make_recipe_prefixes(lines: list[str],
+                          define_mask: list[bool]) -> list[str]:
+    """Return the recipe-prefix character active for each physical line."""
+    value = ""
+    defined = False
+    prefixes: list[str] = []
+    for index, line in enumerate(lines):
+        prefixes.append(value[:1] or "\t")
+        if define_mask[index]:
+            continue
+        match = _MAKE_RECIPEPREFIX_RE.match(line)
+        if not match:
+            continue
+        new_value = _make_syntax_without_comment(match.group("value")).lstrip()
+        if new_value.startswith(r"\#"):
+            new_value = new_value[1:]
+        op = match.group("op")
+        if op == "?=" and defined:
+            continue
+        if op == "+=" and defined and value:
+            value += (" " if new_value else "") + new_value
+        else:
+            value = new_value
+        defined = True
+    return prefixes
+
+
+def _make_reference_end(recipe: str, start: int) -> int | None:
+    """Find the close of a possibly nested `$(...)` or `${...}` reference."""
+    closes = {"(": ")", "{": "}"}
+    stack = [closes[recipe[start + 1]]]
+    index = start + 2
+    while index < len(recipe):
+        char = recipe[index]
+        if char == "$" and index + 1 < len(recipe) \
+                and recipe[index + 1] in closes:
+            stack.append(closes[recipe[index + 1]])
+            index += 2
+            continue
+        if char == stack[-1]:
+            stack.pop()
+            if not stack:
+                return index
+        index += 1
+    return None
+
+
+def _make_reference_name(content: str) -> str | None:
+    """Return a plain/substitution variable name, never a Make function."""
+    name, separator, substitution = content.partition(":")
+    if not _MAKE_VAR_NAME_RE.fullmatch(name):
+        return None
+    if separator and "=" not in substitution:
+        return None
+    return name
+
+
+def _make_var_refs(recipe: str) -> list[str]:
+    """Caller variables, including substitutions but excluding functions."""
+    refs: list[str] = []
+    index = 0
+    while index + 1 < len(recipe):
+        if recipe[index] != "$" or recipe[index + 1] not in "({":
+            index += 1
+            continue
+        dollar_count = 1
+        previous = index - 1
+        while previous >= 0 and recipe[previous] == "$":
+            dollar_count += 1
+            previous -= 1
+        end = _make_reference_end(recipe, index)
+        if end is not None and dollar_count % 2:
+            name = _make_reference_name(recipe[index + 2:end])
+            if name is not None and name not in refs:
+                refs.append(name)
+        index += 1
+    return refs
 
 
 def _extract_make(text: str, rel: str) -> list[Symbol]:
-    """Targets with the variables their recipes consume. A variable counts as
-    a parameter when the Makefile does not pin it itself (undefined or `?=`),
-    i.e. the caller can pass it: `make deploy ENV=prod`."""
+    """Targets, prerequisite calls, and caller-settable recipe variables."""
     stem = Path(rel).name
     lines = text.splitlines()
-    # strip define…endef bodies — their tab lines are not recipes
-    cleaned: list[str] = []
-    in_define = False
-    for line in lines:
-        if re.match(r"^define\b", line):
-            in_define = True
+    # Mask (rather than delete) define bodies so symbol locations remain source
+    # locations. Nested defines are legal and their tabbed text is not a recipe.
+    define_mask = [False] * len(lines)
+    depth = 0
+    for index, line in enumerate(lines):
+        if _MAKE_DEFINE_RE.match(line):
+            depth += 1
+        if depth:
+            define_mask[index] = True
+        if depth and _MAKE_ENDEF_RE.match(line):
+            depth -= 1
+
+    recipe_prefixes = _make_recipe_prefixes(lines, define_mask)
+
+    pinned: set[str] = set()
+    for index, line in enumerate(lines):
+        if line.startswith(recipe_prefixes[index]):
             continue
-        if in_define:
-            if re.match(r"^endef\b", line):
-                in_define = False
-            continue
-        cleaned.append(line)
-    pinned = {m.group(1) for line in cleaned
-              if (m := _MAKE_DEF_RE.match(line)) and m.group(2) in ("=", ":=", "+=")}
+        match = (_MAKE_OVERRIDE_DEFINE_RE.match(line)
+                 if define_mask[index] else _MAKE_OVERRIDE_RE.match(line))
+        if match:
+            pinned.add(match.group(1))
     symbols: list[Symbol] = [Symbol(
         name=stem, kind="class", file=rel, line=1,
         signature=f"makefile {stem}", visibility="pub", lang="make")]
+
+    # name -> first source location plus ordered, mergeable rule facts
+    targets: dict[str, dict] = {}
     i = 0
-    while i < len(cleaned):
-        m = _MAKE_TARGETS_RE.match(cleaned[i])
-        if not m or "%" in m.group(1):
+    while i < len(lines):
+        if define_mask[i] or lines[i].startswith(recipe_prefixes[i]):
             i += 1
             continue
         line_no = i + 1
+        logical = lines[i]
+        end = i
+        while _make_continues(logical) and end + 1 < len(lines):
+            logical = logical.rstrip()[:-1] + " " + lines[end + 1].strip()
+            end += 1
+        match = _MAKE_RULE_RE.match(logical)
+        if not match:
+            i = end + 1
+            continue
+
+        names = [name for name in match.group("targets").split()
+                 if not name.startswith(".") and "%" not in name]
+        if not names:
+            i = end + 1
+            continue
+        body, inline, has_inline_recipe = _make_rule_parts(match.group("body"))
+        body = body.strip()
+        assignment = _MAKE_TARGET_ASSIGN_RE.match(body)
+        prereqs = [] if assignment else [
+            word for word in body.split()
+            if word not in ("|", ".WAIT")
+            and re.fullmatch(_MAKE_NAME, word) and "%" not in word
+        ]
+
         recipe: list[str] = []
-        i += 1
-        while i < len(cleaned) and (cleaned[i].startswith("\t")
-                                    or not cleaned[i].strip()):
-            if cleaned[i].startswith("\t"):
-                recipe.append(cleaned[i])
-            i += 1
-        params: list[str] = []
-        for rl in recipe:
-            for ref in _MAKE_VAR_REF_RE.findall(rl):
-                if ref not in pinned and ref not in params:
-                    params.append(ref)
-        for name in m.group(1).split():
-            if name.startswith("."):
-                continue  # .PHONY and friends are metadata, not commands
-            vis = "priv" if name.startswith("_") else "pub"
-            symbols.append(Symbol(
-                name=name, kind="method", file=rel, line=line_no,
-                signature=f"{name}({','.join(params)})",
-                params=list(params), param_names=list(params),
-                visibility=vis, container=stem, lang="make",
-                size=len(recipe)))
+        if _make_without_comment(inline).strip():
+            recipe.append(inline)
+        next_line = end + 1
+        continuing_recipe = bool(recipe and _make_continues(recipe[-1]))
+        while next_line < len(lines):
+            candidate = lines[next_line]
+            prefix = recipe_prefixes[next_line]
+            if continuing_recipe:
+                piece = (candidate[len(prefix):]
+                         if candidate.startswith(prefix) else candidate)
+                recipe.append(piece)
+                continuing_recipe = _make_continues(piece)
+                next_line += 1
+            elif candidate.startswith(prefix):
+                piece = candidate[len(prefix):]
+                recipe.append(piece)
+                continuing_recipe = _make_continues(piece)
+                next_line += 1
+            elif not candidate.strip() or candidate.lstrip().startswith("#"):
+                next_line += 1
+            elif _MAKE_CONDITIONAL_RE.match(
+                    _make_syntax_without_comment(candidate).rstrip()):
+                # Conditionals are resolved before Make parses rules. Recipes
+                # in every branch therefore still belong to this target; the
+                # static map conservatively retains all branch dependencies.
+                next_line += 1
+            else:
+                break
+
+        refs: list[str] = []
+        for recipe_line in recipe:
+            for ref in _make_var_refs(_make_without_comment(recipe_line)):
+                if ref not in _MAKE_INTERNAL_VARS:
+                    _make_extend_unique(refs, (ref,))
+        for name in names:
+            facts = targets.setdefault(name, {
+                "line": line_no, "params": [], "calls": [], "size": 0,
+                "pinned": set(), "double_colon": match.group("sep") == "::",
+            })
+            _make_extend_unique(facts["calls"], prereqs)
+            if has_inline_recipe or recipe:
+                if match.group("sep") == "::" or facts["double_colon"]:
+                    _make_extend_unique(facts["params"], refs)
+                    facts["size"] += len(recipe)
+                else:
+                    # GNU Make keeps all prerequisites from repeated ordinary
+                    # rules, but only the last rule's non-empty recipe.
+                    facts["params"] = list(refs)
+                    facts["size"] = len(recipe)
+            if assignment and "override" in assignment.group("mods").split():
+                facts["pinned"].add(assignment.group("name"))
+        i = next_line
+
+    for name, facts in targets.items():
+        params = [p for p in facts["params"]
+                  if p not in pinned and p not in facts["pinned"]]
+        symbols.append(Symbol(
+            name=name, kind="method", file=rel, line=facts["line"],
+            signature=f"{name}({','.join(params)})",
+            params=params, param_names=list(params),
+            visibility="priv" if name.startswith("_") else "pub",
+            container=stem, lang="make", calls=facts["calls"],
+            size=facts["size"]))
     return symbols
