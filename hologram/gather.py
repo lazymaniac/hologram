@@ -14,13 +14,28 @@ from .symbols import (DENYLIST_DIRS, ENTRYPOINT_DECORATORS, Symbol, _IDENT_RE,
                       detect_language, strip_comments_and_strings)
 
 
+_GIT_CONTEXT_VARS = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
+    "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+)
+
+
+def _git_env() -> dict[str, str]:
+    """A subprocess environment independent of an invoking Git hook."""
+    env = os.environ.copy()
+    for name in _GIT_CONTEXT_VARS:
+        env.pop(name, None)
+    return env
+
+
 def scan_files(root: Path) -> list[Path]:
     """Source files under root: git-tracked only when root is a git repo (so .gitignore
     excludes vendored/data trees), else a pruned filesystem walk. Deterministic order."""
     if (root / ".git").exists():
         try:
             out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
-                                 capture_output=True, text=True, timeout=60)
+                                 capture_output=True, text=True, timeout=60,
+                                 env=_git_env())
             if out.returncode == 0:
                 results = []
                 for rel in out.stdout.split("\0"):
@@ -168,6 +183,10 @@ def _digest_targets(digest: str) -> list[str] | None:
 def _framework_invoked(sym: Symbol) -> bool:
     """Bearers of route/scheduler/listener decorators are called by the
     framework, so zero static use is expected, not evidence of dead code."""
+    if sym.lang == "make" and (sym.kind == "class"
+                               or (sym.kind == "method"
+                                   and sym.visibility == "pub")):
+        return True  # synthetic owner and `make target` are external entrypoints
     if (sym.lang == "typescript" and sym.kind == "method"
             and re.match(r"ng[A-Z]", sym.name)):
         return True  # Angular lifecycle hooks (ngOnInit, ngOnDestroy, …)
@@ -192,4 +211,3 @@ def _zero_usage_names(symbols: list[Symbol], usage_tokens: Counter[str]) -> set[
         and not _framework_invoked(s)
         and usage_tokens[s.name] <= declarations[s.name]
     }
-

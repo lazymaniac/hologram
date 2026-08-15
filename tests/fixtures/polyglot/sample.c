@@ -1,7 +1,7 @@
-typedef struct { int num; int den; } Rational;
+typedef struct { int x; int y; } Point;
 
-enum Force { ASSERTED, ENTAILED };
+enum Axis { HORIZONTAL, VERTICAL };
 
-static int reduce(Rational *r) { return gcd(r->num, r->den); }
+static int component_sum(Point *point) { return point->x + point->y; }
 
-int rational_add(Rational a, Rational b);
+int point_add(Point a, Point b);

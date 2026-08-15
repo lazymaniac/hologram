@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -61,37 +62,37 @@ class RustExtractTest(unittest.TestCase):
         cls.syms = extract_file(POLY / "sample.rs", POLY)
 
     def test_attributes_and_consts(self):
-        find = next(s for s in self.syms if s.name == "find_rational")
-        self.assertEqual(find.decorators, ['get("/rationals/{id}")'])
+        find = next(s for s in self.syms if s.name == "find_point")
+        self.assertEqual(find.decorators, ['get("/points/{id}")'])
         const = next(s for s in self.syms if s.kind == "const")
-        self.assertEqual(const.signature, "MAX_ITEMS=10")
+        self.assertEqual(const.signature, "MAX_POINTS=10")
         out = build_digest(POLY)
-        self.assertIn("@GET/rationals/{id}", out)
-        self.assertNotIn("find_rational(id):Rational ×0", out)
+        self.assertIn("@GET/points/{id}", out)
+        self.assertNotIn("find_point(id):Point ×0", out)
 
     def test_struct_enum_trait(self):
-        rat = next(s for s in self.syms if s.name == "Rational")
-        self.assertEqual(rat.kind, "class")
-        self.assertEqual(rat.params, ["i64", "i64"])
-        self.assertEqual(rat.fields, ["num", "den"])
-        force = next(s for s in self.syms if s.name == "Force")
-        self.assertEqual(force.params, ["Asserted", "Entailed", "Supported"])
-        pricer = next(s for s in self.syms if s.name == "Pricer")
-        self.assertEqual(pricer.kind, "interface")
-        self.assertEqual(pricer.supers, ["Clone"])  # trait X: Y supertrait bound
+        point = next(s for s in self.syms if s.name == "Point")
+        self.assertEqual(point.kind, "class")
+        self.assertEqual(point.params, ["i64", "i64"])
+        self.assertEqual(point.fields, ["x", "y"])
+        axis = next(s for s in self.syms if s.name == "Axis")
+        self.assertEqual(axis.params, ["Horizontal", "Vertical", "Depth"])
+        locatable = next(s for s in self.syms if s.name == "Locatable")
+        self.assertEqual(locatable.kind, "interface")
+        self.assertEqual(locatable.supers, ["Clone"])  # trait X: Y supertrait bound
 
     def test_trait_impl_becomes_super(self):
-        rat = next(s for s in self.syms if s.name == "Rational")
-        self.assertIn("Pricer", rat.supers)
+        point = next(s for s in self.syms if s.name == "Point")
+        self.assertIn("Locatable", point.supers)
 
     def test_impl_methods_and_visibility(self):
-        of = next(s for s in self.syms if s.name == "of" and s.container == "Rational")
-        self.assertEqual(of.visibility, "pub")
-        self.assertEqual(of.param_names, ["num", "den"])
-        self.assertEqual(of.returns, "Rational")
-        self.assertIn("Rational", of.calls)          # struct literal = construction
-        reduce = next(s for s in self.syms if s.name == "reduce")
-        self.assertEqual(reduce.visibility, "priv")
+        new = next(s for s in self.syms if s.name == "new" and s.container == "Point")
+        self.assertEqual(new.visibility, "pub")
+        self.assertEqual(new.param_names, ["x", "y"])
+        self.assertEqual(new.returns, "Point")
+        self.assertIn("Point", new.calls)          # struct literal = construction
+        translate = next(s for s in self.syms if s.name == "translate")
+        self.assertEqual(translate.visibility, "priv")
 
 
 @_needs("csharp")
@@ -145,19 +146,19 @@ class CExtractTest(unittest.TestCase):
         cls.syms = extract_file(POLY / "sample.c", POLY)
 
     def test_typedef_struct_and_enum(self):
-        rat = next(s for s in self.syms if s.name == "Rational")
-        self.assertEqual(rat.kind, "class")
-        self.assertEqual(rat.params, ["int", "int"])
-        self.assertEqual(rat.fields, ["num", "den"])
-        force = next(s for s in self.syms if s.name == "Force")
-        self.assertEqual(force.params, ["ASSERTED", "ENTAILED"])
+        point = next(s for s in self.syms if s.name == "Point")
+        self.assertEqual(point.kind, "class")
+        self.assertEqual(point.params, ["int", "int"])
+        self.assertEqual(point.fields, ["x", "y"])
+        axis = next(s for s in self.syms if s.name == "Axis")
+        self.assertEqual(axis.params, ["HORIZONTAL", "VERTICAL"])
 
     def test_static_fn_private_prototype_public(self):
-        red = next(s for s in self.syms if s.name == "reduce")
-        self.assertEqual(red.visibility, "priv")
-        self.assertEqual(red.params, ["Rational*"])
-        self.assertEqual(red.param_names, ["r"])
-        add = next(s for s in self.syms if s.name == "rational_add")
+        total = next(s for s in self.syms if s.name == "component_sum")
+        self.assertEqual(total.visibility, "priv")
+        self.assertEqual(total.params, ["Point*"])
+        self.assertEqual(total.param_names, ["point"])
+        add = next(s for s in self.syms if s.name == "point_add")
         self.assertEqual(add.visibility, "pub")
         self.assertEqual(add.returns, "int")
 
@@ -190,6 +191,21 @@ class CppExtractTest(unittest.TestCase):
     def test_throw_statements_become_raises(self):
         ev = next(s for s in self.syms if s.name == "evaluate")
         self.assertEqual(ev.raises, ["BadInput"])
+
+    def test_private_header_declaration_controls_out_of_line_visibility(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "secret.hpp").write_text(
+                "class Secret {\nprivate:\n  void hidden();\n"
+                "public:\n  void run();\n};\n")
+            (root / "secret.cpp").write_text(
+                '#include "secret.hpp"\n'
+                "void Secret::hidden() { run(); }\n"
+                "void Secret::run() {}\n")
+            output = build_digest(root)
+
+        self.assertIn("- hidden", output)
+        self.assertNotIn("hidden()", output)
 
 
 @_needs("bash")
@@ -254,6 +270,11 @@ class LuaExtractTest(unittest.TestCase):
         self.assertEqual(helper.visibility, "priv")
         self.assertEqual(helper.params, ["x"])
         self.assertEqual(helper.param_names, ["x"])
+
+    def test_public_module_methods_survive_end_to_end_rendering(self):
+        output = build_digest(POLY, langs={"lua"})
+        self.assertIn("M: quote(id)", output)
+        self.assertIn("reset()", output)
 
 
 @_needs("css")
@@ -590,10 +611,6 @@ class SfcExtractTest(unittest.TestCase):
         self.assertGreater(use.line, 1)   # offset into the SFC preserved
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 @_needs("ruby")
 class RubyExtractTest(unittest.TestCase):
     @classmethod
@@ -755,22 +772,180 @@ class ScalaExtractTest(unittest.TestCase):
 
 
 class MakefileExtractTest(unittest.TestCase):
-    def test_targets_with_overridable_params(self):
+    def test_rule_facts_are_exact_and_repeated_targets_merge(self):
         syms = extract_file(POLY / "Makefile", POLY)
-        by_name = {s.name: s for s in syms}
-        self.assertEqual(by_name["Makefile"].kind, "class")
-        # ?=-defined and undefined vars are parameters; := and = pinned ones are not
-        self.assertEqual(by_name["deploy"].signature, "deploy(ENV,MANIFEST)")
-        self.assertEqual(by_name["build"].signature, "build()")
-        # multi-target rule: each name is a command with the same params
-        self.assertEqual(by_name["test"].signature, "test(FLAGS)")
-        self.assertEqual(by_name["lint"].signature, "lint(FLAGS)")
-        # underscore targets are private; dot targets and pattern rules vanish
-        self.assertEqual(by_name["_stage"].visibility, "priv")
-        self.assertNotIn(".PHONY", by_name)
-        self.assertNotIn("%.o", by_name)
-        # define/endef bodies are not recipes
-        self.assertNotIn("NOT_A_PARAM", str(by_name.get("deploy").params))
+        self.assertEqual(
+            [(s.name, s.kind, s.line, s.signature, s.visibility, s.calls, s.size)
+             for s in syms],
+            [
+                ("Makefile", "class", 1, "makefile Makefile", "pub", [], 0),
+                ("deploy", "method", 15,
+                 "deploy(ENV,MANIFEST,REGION,IMAGE,FLAGS,CHANNEL)", "pub",
+                 ["build", "prepare", "audit"], 5),
+                ("build", "method", 24, "build(CC)", "pub", [], 1),
+                ("prepare", "method", 24, "prepare(CC)", "pub", [], 1),
+                ("audit", "method", 24, "audit(CC)", "pub", [], 1),
+                ("release", "method", 27, "release(ENV)", "pub",
+                 ["deploy"], 1),
+                ("test", "method", 31, "test(FLAGS)", "pub", [], 1),
+                ("lint", "method", 31, "lint(FLAGS)", "pub", [], 1),
+                ("_stage", "method", 34, "_stage(ENV)", "priv", [], 1),
+            ])
+
+    def test_digest_has_dependency_edge_and_no_external_target_dead_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Makefile").write_text(
+                "deploy: build\n\techo $(ENV)\n\nbuild:\n\t@:\n")
+            body = build_digest(root).splitlines()[2:]
+        self.assertEqual(body, [
+            "Makefile(C)",
+            " deploy(ENV) > build",
+            " build()",
+        ])
+
+    def test_shell_escaped_variable_is_not_a_make_parameter(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "show:\n\techo $${HOME} $(REAL)\n", "Makefile")
+        show = next(symbol for symbol in symbols if symbol.name == "show")
+        self.assertEqual(show.signature, "show(REAL)")
+
+    def test_dollar_run_parity_controls_make_expansion(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "show:\n"
+            "\techo $(ONE) $$(TWO) $$$(THREE) $$$$(FOUR) $$$$$(FIVE)\n",
+            "Makefile")
+        show = next(symbol for symbol in symbols if symbol.name == "show")
+        self.assertEqual(show.signature, "show(ONE,THREE,FIVE)")
+
+    def test_substitution_and_hyphenated_variable_references(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "TOOL-FLAGS := --verbose\n"
+            "show:\n"
+            "\techo $(IMAGE:latest=stable) ${FILES:.c=.o} $(TOOL-FLAGS)\n"
+            "\techo $(shell pwd) $(wildcard *.c) $@ $(@D)\n"
+            "\techo $(subst old,new,$(NESTED))\n",
+            "Makefile")
+        show = next(symbol for symbol in symbols if symbol.name == "show")
+        self.assertEqual(
+            show.signature, "show(IMAGE,FILES,TOOL-FLAGS,NESTED)")
+
+    def test_hyphenated_override_assignments_pin_variables(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "override GLOBAL-FLAGS = fixed\n"
+            "show: override TARGET-FLAGS = fixed\n"
+            "show:\n"
+            "\techo $(OPEN-FLAGS) $(GLOBAL-FLAGS) $(TARGET-FLAGS)\n",
+            "Makefile")
+        show = next(symbol for symbol in symbols if symbol.name == "show")
+        self.assertEqual(show.signature, "show(OPEN-FLAGS)")
+
+    def test_recipe_continuation_does_not_require_another_prefix(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "deploy:\n"
+            "\techo $(FIRST) \\\n"
+            "  $(SECOND) \\\n"
+            "\t$(THIRD)\n",
+            "Makefile")
+        deploy = next(symbol for symbol in symbols if symbol.name == "deploy")
+        self.assertEqual(deploy.signature, "deploy(FIRST,SECOND,THIRD)")
+        self.assertEqual(deploy.size, 3)
+
+    def test_custom_recipe_prefix_and_reset_are_honored(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            ".RECIPEPREFIX := >\n"
+            "custom:\n"
+            ">echo $(CUSTOM) \\\n"
+            "  $(CONTINUED)\n"
+            ".RECIPEPREFIX :=\n"
+            "normal:\n"
+            "\techo $(NORMAL)\n",
+            "Makefile")
+        methods = {symbol.name: symbol for symbol in symbols
+                   if symbol.kind == "method"}
+        self.assertEqual(methods["custom"].signature,
+                         "custom(CUSTOM,CONTINUED)")
+        self.assertEqual(methods["custom"].size, 2)
+        self.assertEqual(methods["normal"].signature, "normal(NORMAL)")
+
+    def test_hash_starts_a_make_comment_inside_prerequisite_word(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "deploy: bar#comment without leading whitespace\n"
+            "\t@:\n"
+            "bar:\n"
+            "\t@:\n",
+            "Makefile")
+        deploy = next(symbol for symbol in symbols if symbol.name == "deploy")
+        self.assertEqual(deploy.calls, ["bar"])
+
+    def test_conditional_recipe_branches_remain_attached_to_target(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "deploy:\n"
+            "ifeq ($(MODE),fast)\n"
+            "\techo $(FAST)\n"
+            "else\n"
+            "ifdef SAFE_MODE\n"
+            "\techo $(SAFE)\n"
+            "else ifneq ($(MODE),disabled)\n"
+            "\techo $(FALLBACK)\n"
+            "endif\n"
+            "endif\n"
+            "next:\n"
+            "\techo $(NEXT)\n",
+            "Makefile")
+        methods = {symbol.name: symbol for symbol in symbols
+                   if symbol.kind == "method"}
+        self.assertEqual(methods["deploy"].signature,
+                         "deploy(FAST,SAFE,FALLBACK)")
+        self.assertEqual(methods["deploy"].size, 3)
+        self.assertEqual(methods["next"].signature, "next(NEXT)")
+
+    def test_repeated_single_colon_uses_last_recipe_but_merges_prereqs(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "deploy: build\n"
+            "\techo $(OLD)\n"
+            "\techo $(OLDER)\n"
+            "deploy: audit\n"
+            "\techo $(NEW)\n"
+            "deploy: verify\n",
+            "Makefile")
+        deploy = next(symbol for symbol in symbols if symbol.name == "deploy")
+        self.assertEqual(deploy.signature, "deploy(NEW)")
+        self.assertEqual(deploy.calls, ["build", "audit", "verify"])
+        self.assertEqual(deploy.size, 1)
+
+    def test_explicit_empty_recipe_overrides_earlier_recipe(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "deploy:\n"
+            "\techo $(OLD)\n"
+            "deploy: ;\n",
+            "Makefile")
+        deploy = next(symbol for symbol in symbols if symbol.name == "deploy")
+        self.assertEqual(deploy.signature, "deploy()")
+        self.assertEqual(deploy.size, 0)
+
+    def test_repeated_double_colon_unions_independent_recipes(self):
+        from hologram.extract.misc import _extract_make
+        symbols = _extract_make(
+            "deploy:: build\n"
+            "\techo $(FIRST)\n"
+            "deploy:: audit\n"
+            "\techo $(SECOND)\n",
+            "Makefile")
+        deploy = next(symbol for symbol in symbols if symbol.name == "deploy")
+        self.assertEqual(deploy.signature, "deploy(FIRST,SECOND)")
+        self.assertEqual(deploy.calls, ["build", "audit"])
+        self.assertEqual(deploy.size, 2)
 
     def test_named_makefile_detected_without_extension(self):
         from hologram import detect_language
@@ -778,3 +953,7 @@ class MakefileExtractTest(unittest.TestCase):
         self.assertEqual(detect_language(P("x/Makefile")), "make")
         self.assertEqual(detect_language(P("x/GNUmakefile")), "make")
         self.assertEqual(detect_language(P("x/rules.mk")), "make")
+
+
+if __name__ == "__main__":
+    unittest.main()
