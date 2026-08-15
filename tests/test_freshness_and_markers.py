@@ -37,6 +37,37 @@ class StateAndCheckTest(unittest.TestCase):
             self.assertEqual(hologram._digest_state(embedded),
                              hologram._state_hash(root))
 
+    def test_unreadable_file_is_skipped_by_gather_and_state_alike(self):
+        """`_gather` must skip what `_state_hash` skips.
+
+        Without the guard an unreadable source crashed `build` on a traceback
+        while `check` kept reporting stale, leaving the repo unbuildable.
+        """
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            blocked = root / "blocked.py"
+            blocked.write_text("def gone():\n    return 1\n")
+            blocked.chmod(0o000)
+            try:
+                if blocked.read_bytes():  # root can read anything: no test here
+                    self.skipTest("filesystem does not enforce file permissions")
+            except OSError:
+                pass
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stderr(err):
+                    self.assertEqual(
+                        run_cli(["build", "--root", str(root), "--quiet"]), 0)
+                    self.assertEqual(
+                        run_cli(["check", "--root", str(root), "--quiet"]), 0)
+            finally:
+                blocked.chmod(0o644)
+            embedded = hologram.embedded_digest(root / "CLAUDE.md")
+        self.assertNotIn("gone", embedded)      # omitted, because unreadable
+        self.assertIn("blocked.py", err.getvalue())   # but never omitted silently
+
     def test_generator_change_invalidates_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))

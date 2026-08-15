@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -109,7 +110,15 @@ def _gather(root: Path, langs: set[str] | None = None):
     state = _new_state_hash()
     for f in files:
         rel = str(f.relative_to(root))
-        raw = f.read_bytes()
+        try:
+            raw = f.read_bytes()
+        except OSError as exc:
+            # `_state_hash` skips unreadable files, so extraction must too or
+            # `check` reports stale forever while `build` dies on a traceback.
+            # Omitting a source file from a map agents trust is never silent.
+            print(f"hologram: warning: skipping unreadable file {rel}: {exc} "
+                  f"— its API is absent from the map", file=sys.stderr)
+            continue
         state.update(rel.encode())
         state.update(hashlib.md5(raw).digest())
         text = raw.decode(errors="replace")

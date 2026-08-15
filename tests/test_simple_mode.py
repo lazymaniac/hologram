@@ -336,6 +336,30 @@ class LegendTest(unittest.TestCase):
         self.assertNotIn("»", second)
         self.assertIn("C/R/I{fields}", second)
 
+    def test_type_field_header_is_explained_not_read_as_factoring(self):
+        """`Config(T{a,b})` is a type header, not a `p{a,b}` prefix expansion.
+
+        The strip that decides the factoring clause must cover every letter in
+        KIND_LETTER; missing T told readers to expand `T{host,port}` into
+        `Thost,Tport` while claiming factoring the map never used.
+        """
+        syms = [
+            Symbol(name="Config", kind="type", file="t.ts", line=1,
+                   signature="type Config", visibility="pub", lang="typescript",
+                   fields=["host", "port", "retries"]),
+            Symbol(name="Alias", kind="type", file="t.ts", line=2,
+                   signature="type Alias", visibility="pub", lang="typescript",
+                   params=["string"]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            digest = render_simple(Path(tmp), syms, [])
+        legend = digest.splitlines()[1]
+        body = "\n".join(digest.splitlines()[2:])
+        self.assertIn("(T{", body)
+        self.assertIn("C/R/I/T{fields}", legend)
+        self.assertIn("T:target", legend)
+        self.assertNotIn("p{a,b}=pa,pb", legend)
+
     def test_no_query_or_regeneration_prose(self):
         out = build_digest(JAVAMINI)
         self.assertNotIn("query this file", out)

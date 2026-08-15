@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -32,6 +33,60 @@ class PythonExtractTest(unittest.TestCase):
         self.assertEqual(fns["price_order"].params, ["OrderId", "list[ItemId]"])
         self.assertEqual(fns["price_order"].param_names, ["order", "items"])
         self.assertEqual(fns["price_order"].returns, "int")
+
+    # Forward references: a quoted annotation must extract exactly like the
+    # bare form. `bindings` is what turns `e.evaluate()` into
+    # `Engine.evaluate`, so a reference that kept its quotes never matched its
+    # class and the map silently lost the call edge.
+
+    def _fns(self, tmp: Path, source: str) -> dict:
+        path = tmp / "a.py"
+        path.write_text(source)
+        return {(s.container or "", s.name): s for s in extract_file(path, tmp)
+                if s.kind in ("fn", "method")}
+
+    def test_quoted_annotation_binds_like_the_bare_form(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fns = self._fns(Path(tmp), (
+                "class Engine:\n"
+                "    def evaluate(self, x: int) -> int:\n        return x\n\n"
+                "class Quoted:\n"
+                '    def run(self, e: "Engine") -> "Engine":\n'
+                "        return e.evaluate(1)\n\n"
+                "class Plain:\n"
+                "    def run(self, e: Engine) -> Engine:\n"
+                "        return e.evaluate(1)\n"))
+        quoted, plain = fns[("Quoted", "run")], fns[("Plain", "run")]
+        for field in ("params", "returns", "bindings"):
+            self.assertEqual(getattr(quoted, field), getattr(plain, field),
+                             f"{field} differs between quoted and bare forms")
+        self.assertEqual(quoted.bindings, {"e": "Engine"})  # not "'Engine'"
+
+    def test_nested_and_whole_string_references_resolve(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fns = self._fns(Path(tmp), (
+                "from typing import Optional\n"
+                "class Engine: pass\n"
+                'def f(a: Optional["Engine"], b: list["Engine"],\n'
+                '      c: dict[str, "Engine"], d: "list[Engine]"\n'
+                '      ) -> "Engine | None": ...\n'))
+        self.assertEqual(fns[("", "f")].params,
+                         ["Optional[Engine]", "list[Engine]",
+                          "dict[str,Engine]", "list[Engine]"])
+        self.assertEqual(fns[("", "f")].returns, "Engine | None")
+
+    def test_value_strings_and_unparseable_text_stay_verbatim(self):
+        """Literal members and Annotated metadata are values, not type names."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fns = self._fns(Path(tmp), (
+                "from typing import Annotated, Literal\n"
+                'def a(m: Literal["on", "off"]) -> None: ...\n'
+                'def b(v: Annotated[int, "must be positive"]) -> None: ...\n'
+                'def c(x: "not a type at all") -> None: ...\n'))
+        self.assertEqual(fns[("", "a")].params, ["Literal['on','off']"])
+        self.assertEqual(fns[("", "b")].params,
+                         ["Annotated[int,'must be positive']"])
+        self.assertEqual(fns[("", "c")].params, ["'not a type at all'"])
 
 
 @needs_ts
