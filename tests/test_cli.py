@@ -19,6 +19,28 @@ needs_java = unittest.skipUnless(hologram.has_parser("java"),
                                  "tree-sitter-java not installed")
 
 
+class CliOptionSurfaceTest(unittest.TestCase):
+    def _help(self, command: str) -> str:
+        import contextlib
+        import io
+        stdout = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(stdout):
+            run_cli([command, "--help"])
+        return stdout.getvalue()
+
+    def test_read_only_commands_hide_ignored_options(self):
+        review = self._help("review")
+        self.assertNotIn("--budget", review)
+        self.assertNotIn("--target", review)
+        self.assertNotIn("--warn-tokens", review)
+        stats = self._help("stats")
+        self.assertNotIn("--quiet", stats)
+        self.assertNotIn("--warn-tokens", stats)
+        diff = self._help("diff")
+        self.assertNotIn("--budget", diff)
+        self.assertNotIn("--target", diff)
+
+
 def _make_repo(tmp: Path) -> Path:
     repo = tmp / "repo"
     shutil.copytree(JAVAMINI, repo)
@@ -28,6 +50,18 @@ def _make_repo(tmp: Path) -> Path:
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
         cwd=repo, check=True,
     )
+    return repo
+
+
+def _make_python_repo(tmp: Path) -> Path:
+    repo = tmp / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("def run():\n    return 1\n")
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-qm", "init"], cwd=repo, check=True)
     return repo
 
 
@@ -161,6 +195,78 @@ class ManagedHookLineTest(unittest.TestCase):
                     f'"{_sh_dq(str(repo.resolve()))}" --quiet-if-clean || true')
             self.assertTrue(_managed_hook_line(line, repo))
 
+    def test_marker_recognizes_moved_root_but_not_foreign_commands(self):
+        from hologram.cli import _managed_hook_line
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_python_repo(Path(tmp))
+            script = Path(hologram.__file__).resolve().parent.parent / "hologram.py"
+            old_root = repo.parent / "old-location"
+            marked = (f'python3 "{script}" review HEAD --root "{old_root}" '
+                      '--quiet-if-clean || true # hologram:managed')
+            self.assertTrue(_managed_hook_line(marked, repo))
+            self.assertFalse(_managed_hook_line(
+                marked.removesuffix(" # hologram:managed"), repo))
+            self.assertFalse(_managed_hook_line(
+                f'python3 "/tmp/wrapper.py" build --root "{old_root}" '
+                '--quiet || true # hologram:managed', repo))
+
+
+class LegacyHookMigrationTest(unittest.TestCase):
+    def test_init_removes_managed_precommit_but_preserves_foreign_lines(self):
+        from hologram.cli import _sh_dq
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_python_repo(Path(tmp))
+            hook = repo / ".git" / "hooks" / "pre-commit"
+            script = Path(hologram.__file__).resolve().parent.parent / "hologram.py"
+            managed = (f'python3 "{script}" review HEAD --root '
+                       f'"{_sh_dq(str(repo.resolve()))}" --quiet-if-clean '
+                       f'|| true # hologram:managed')
+            hook.write_text("#!/bin/sh\necho keep-me\n" + managed + "\n")
+
+            run_cli(["init", "--root", str(repo), "--quiet"])
+
+            content = hook.read_text()
+            self.assertIn("echo keep-me", content)
+            self.assertNotIn("hologram", content)
+            self.assertIn("review HEAD~1", (
+                repo / ".git" / "hooks" / "post-commit").read_text())
+
+    def test_uninstall_removes_legacy_review_only_hook(self):
+        from hologram.cli import _sh_dq
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_python_repo(Path(tmp))
+            hook = repo / ".git" / "hooks" / "pre-commit"
+            script = Path(hologram.__file__).resolve().parent.parent / "hologram.py"
+            hook.write_text(
+                "#!/bin/sh\n"
+                f'python3 "{script}" review HEAD --root '
+                f'"{_sh_dq(str(repo.resolve()))}" --quiet-if-clean '
+                f'|| true # hologram:managed\n')
+
+            run_cli(["uninstall", "--root", str(repo), "--quiet"])
+
+            self.assertFalse(hook.exists())
+
+    def test_init_cleans_marked_legacy_hook_after_repository_moves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            old_repo = _make_python_repo(base)
+            hook = old_repo / ".git" / "hooks" / "pre-commit"
+            script = Path(hologram.__file__).resolve().parent.parent / "hologram.py"
+            hook.write_text(
+                "#!/bin/sh\n"
+                "echo keep-me\n"
+                f'python3 "{script}" review HEAD --root "{old_repo.resolve()}" '
+                '--quiet-if-clean || true # hologram:managed\n')
+            moved_repo = base / "moved"
+            old_repo.rename(moved_repo)
+
+            run_cli(["init", "--root", str(moved_repo), "--quiet"])
+
+            content = (moved_repo / ".git" / "hooks" / "pre-commit").read_text()
+            self.assertIn("echo keep-me", content)
+            self.assertNotIn("hologram", content)
+
 
 class PostCommitHookE2ETest(unittest.TestCase):
     def test_findings_print_after_commit_and_never_block(self):
@@ -206,17 +312,23 @@ class BudgetTest(unittest.TestCase):
 
     def test_ladder_is_deterministic_and_stamped(self):
         from hologram import build_digest
+        import contextlib
+        import io
         with tempfile.TemporaryDirectory() as tmp:
             root = self._proj(Path(tmp))
             full = build_digest(root)
-            a = build_digest(root, budget=1)
-            b = build_digest(root, budget=1)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                a = build_digest(root, budget=1)
+                b = build_digest(root, budget=1)
         self.assertEqual(a, b)                      # same budget, same map
         self.assertIn("MAX_RETRIES=3", full)
-        self.assertNotIn("MAX_RETRIES=3", a)        # L1: const values gone
-        self.assertIn("MAX_RETRIES", a)             # ...but names stay
-        self.assertNotIn("- config.py:", a)  # L3: private inventory line gone
-        self.assertIn("· budget 1 L", a.splitlines()[0])
+        # On this tiny fixture every disclosure-bearing degraded map is larger
+        # than L0, so the correct impossible-budget fallback is the full map.
+        self.assertIn("MAX_RETRIES=3", a)
+        self.assertIn("· budget 1", a.splitlines()[0])
+        self.assertNotRegex(a.splitlines()[0], r"· budget 1 L\d")
+        self.assertIn("smallest complete candidate is L0", err.getvalue())
 
     def test_untested_chains_drop_before_tested(self):
         from hologram import build_digest
@@ -262,8 +374,9 @@ class BudgetTest(unittest.TestCase):
         for earlier, later in zip(sizes, sizes[1:]):
             self.assertLessEqual(later, earlier)
 
-    def test_skeleton_floor(self):
-        from hologram import build_digest
+    def test_explicit_skeleton_floor(self):
+        from hologram.gather import _gather
+        from hologram.render import render_simple
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "p"
             root.mkdir()
@@ -276,11 +389,9 @@ class BudgetTest(unittest.TestCase):
             (root / "test_engine.py").write_text(
                 "from engine import Engine\n\n"
                 "def test_e():\n    assert Engine({}).evaluate(1) == 1\n")
-            import contextlib
-            import io
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err):
-                a = build_digest(root, budget=1)
+            files, syms, file_tokens, _, state = _gather(root, None)
+            a = render_simple(root, syms, files, state=state,
+                              file_tokens=file_tokens, detail=7, budget=1)
         self.assertIn("Engine(C", a)               # type header stays
         self.assertIn("top_level(x)", a)           # top-level fn sig stays
         self.assertNotIn("evaluate", a)            # method lines gone
@@ -289,7 +400,6 @@ class BudgetTest(unittest.TestCase):
             l for l in a.splitlines() if l.strip().startswith("- ")))
         self.assertIn("· budget 1 L7", a.splitlines()[0])
         self.assertNotIn("project calls", a.splitlines()[1])  # legend honest
-        self.assertIn("even the skeleton map", err.getvalue())
 
     def test_floor_warning_only_below_skeleton(self):
         from hologram import build_digest, estimate_tokens
@@ -402,6 +512,86 @@ class TargetOptionTest(unittest.TestCase):
             self.assertIn("hologram:start", (root / "AGENTS.md").read_text())
             self.assertFalse((root / "CLAUDE.md").exists())
 
+    def test_recalled_target_must_be_supported_and_contained(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            outside = root.parent / "escaped.md"
+            malicious = (
+                "# hologram · 1 LOC · state 000000000000 "
+                "· targets ../escaped.md\n· f(args):Ret\napp\n")
+            hologram.embed_digest(root / "CLAUDE.md", malicious)
+
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", str(root), "--quiet"])
+
+            self.assertIn("invalid stored target", str(ctx.exception))
+            self.assertFalse(outside.exists())
+
+    def test_target_symlink_cannot_escape_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = self._proj(base)
+            outside = base / "outside"
+            outside.mkdir()
+            cursor = root / ".cursor"
+            cursor.mkdir()
+            try:
+                (cursor / "rules").symlink_to(outside, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", str(root), "--target",
+                         ".cursor/rules/hologram.mdc", "--quiet"])
+
+            self.assertIn("escapes repository", str(ctx.exception))
+            self.assertFalse((outside / "hologram.mdc").exists())
+
+    def test_target_symlink_inside_repository_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            victim = root / "app.py"
+            original = victim.read_text()
+            target = root / "CLAUDE.md"
+            target.unlink()
+            try:
+                target.symlink_to(victim)
+            except OSError as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", str(root), "--quiet"])
+
+            self.assertIn("is a symlink", str(ctx.exception))
+            self.assertEqual(victim.read_text(), original)
+
+    def test_hard_linked_target_is_rejected_without_clobbering_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = self._proj(base)
+            outside = base / "outside.md"
+            outside.write_text("outside guidance\n")
+            target = root / "CLAUDE.md"
+            target.unlink()
+            try:
+                os.link(outside, target)
+            except OSError as exc:
+                self.skipTest(f"hard links unavailable: {exc}")
+
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", str(root), "--quiet"])
+
+            self.assertIn("multiple hard links", str(ctx.exception))
+            self.assertEqual(outside.read_text(), "outside guidance\n")
+
+    def test_negative_budget_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", str(root), "--budget", "-1",
+                         "--quiet"])
+        self.assertIn("positive integer", str(ctx.exception))
+
 
 class LangFilterPersistenceTest(unittest.TestCase):
     """--lang is stamped into the map header and recalled by later commands."""
@@ -477,6 +667,56 @@ class BootstrapTest(unittest.TestCase):
             hologram._PARSERS["java"] = saved
             del os.environ["HOLOGRAM_BOOTSTRAPPED"]
 
+    def test_review_uses_the_same_missing_parser_bootstrap(self):
+        saved = hologram._PARSERS["java"]
+        hologram._PARSERS["java"] = None
+        os.environ["HOLOGRAM_BOOTSTRAPPED"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                proj = Path(tmp) / "proj"
+                shutil.copytree(JAVAMINI, proj)
+                with self.assertRaises(SystemExit) as ctx:
+                    run_cli(["review", "--root", str(proj)])
+            self.assertIn("pip install", str(ctx.exception))
+            self.assertIn("tree-sitter-java", str(ctx.exception))
+        finally:
+            hologram._PARSERS["java"] = saved
+            del os.environ["HOLOGRAM_BOOTSTRAPPED"]
+
+    def test_review_and_diff_bootstrap_language_present_only_in_revision(self):
+        saved_parser = hologram._PARSERS["java"]
+        saved_bootstrapped = os.environ.get("HOLOGRAM_BOOTSTRAPPED")
+        hologram._PARSERS["java"] = None
+        os.environ["HOLOGRAM_BOOTSTRAPPED"] = "1"
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                proj = Path(tmp) / "proj"
+                proj.mkdir()
+                source = proj / "Legacy.java"
+                source.write_text(
+                    "public class Legacy { public int value() { return 1; } }\n")
+                for command in (
+                    ["git", "init", "-q"],
+                    ["git", "add", "-A"],
+                    ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                     "commit", "-qm", "base"],
+                ):
+                    subprocess.run(command, cwd=proj, check=True,
+                                   capture_output=True)
+                source.unlink()  # no Java path remains in the working tree
+
+                for command in ("review", "diff"):
+                    with self.subTest(command=command):
+                        with self.assertRaises(SystemExit) as ctx:
+                            run_cli([command, "HEAD", "--root", str(proj)])
+                        self.assertIn("tree-sitter-java", str(ctx.exception))
+        finally:
+            hologram._PARSERS["java"] = saved_parser
+            if saved_bootstrapped is None:
+                os.environ.pop("HOLOGRAM_BOOTSTRAPPED", None)
+            else:
+                os.environ["HOLOGRAM_BOOTSTRAPPED"] = saved_bootstrapped
+
 
 @needs_java
 class PrintCommandTest(unittest.TestCase):
@@ -489,7 +729,7 @@ class PrintCommandTest(unittest.TestCase):
             before = sorted(p.relative_to(proj) for p in proj.rglob("*"))
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                code = run_cli(["print", "--root", str(proj), "--quiet"])
+                code = run_cli(["print", "--root", str(proj)])
             self.assertEqual(code, 0)
             self.assertIn("PricingEngine", out.getvalue())
             self.assertIn("# hologram ·", out.getvalue())
@@ -525,7 +765,7 @@ class UninstallTest(unittest.TestCase):
             self.assertIn("echo existing", content)
             self.assertNotIn("hologram:managed", content)
 
-    def test_uninstall_deletes_managed_rule_dir_file(self):
+    def test_uninstall_preserves_managed_rule_dir_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp))
             (repo / ".cursor" / "rules").mkdir(parents=True)
@@ -533,7 +773,9 @@ class UninstallTest(unittest.TestCase):
             managed = repo / ".cursor" / "rules" / "hologram.mdc"
             self.assertTrue(managed.exists())
             run_cli(["uninstall", "--root", str(repo), "--quiet"])
-            self.assertFalse(managed.exists())
+            self.assertTrue(managed.exists())
+            self.assertNotIn("hologram:start", managed.read_text())
+            self.assertIn("alwaysApply: true", managed.read_text())
 
     def test_keep_blocks_limits_to_hooks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -542,6 +784,39 @@ class UninstallTest(unittest.TestCase):
             run_cli(["uninstall", "--root", str(repo), "--keep-blocks", "--quiet"])
             self.assertIn("hologram:start", (repo / "CLAUDE.md").read_text())
             self.assertFalse((repo / ".git" / "hooks" / "post-commit").exists())
+
+
+class UninstallPythonTest(unittest.TestCase):
+    def test_generated_rule_file_is_preserved_without_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_python_repo(Path(tmp))
+            rules = repo / ".cursor" / "rules"
+            rules.mkdir(parents=True)
+            run_cli(["build", "--root", str(repo), "--quiet"])
+            target = rules / "hologram.mdc"
+            self.assertTrue(target.exists())
+
+            run_cli(["uninstall", "--root", str(repo), "--quiet"])
+
+            self.assertTrue(target.exists())
+            self.assertNotIn("hologram:start", target.read_text())
+            self.assertIn("alwaysApply: true", target.read_text())
+
+    def test_managed_basename_with_user_prose_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _make_python_repo(Path(tmp))
+            rules = repo / ".cursor" / "rules"
+            rules.mkdir(parents=True)
+            target = rules / "hologram.mdc"
+            target.write_text("---\nalwaysApply: true\n---\n\nKeep this guidance.\n")
+            run_cli(["build", "--root", str(repo), "--quiet"])
+            self.assertIn("hologram:start", target.read_text())
+
+            run_cli(["uninstall", "--root", str(repo), "--quiet"])
+
+            self.assertTrue(target.exists())
+            self.assertNotIn("hologram:start", target.read_text())
+            self.assertIn("Keep this guidance.", target.read_text())
 
 
 @needs_java
