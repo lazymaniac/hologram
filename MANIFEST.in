@@ -1,0 +1,11 @@
+include hologram.py
+include .github/workflows/ci.yml
+include .github/workflows/release.yml
+include benchmark/README.md
+include benchmark/bench.py
+include benchmark/tasks/spring.json
+graft tests
+include tools/check_release_privacy.py
+include tools/measure_tokens.py
+include tools/run_tests.py
+global-exclude __pycache__ *.py[cod]
