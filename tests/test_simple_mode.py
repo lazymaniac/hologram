@@ -64,13 +64,13 @@ class SimpleDigestTest(unittest.TestCase):
         self.assertIn("> ", ev)
         self.assertIn("UnknownItemException", ev)
 
-    def test_field_restating_ctor_suppressed_informative_ctor_kept(self):
-        # PricingEngine(basePrices) restates PricingEngine(C{basePrices})
-        self.assertNotIn("PricingEngine(basePrices)", self.out)
+    def test_ordinary_and_informative_constructors_kept(self):
+        # A class field list does not prove that public construction exists.
+        self.assertIn("PricingEngine(basePrices)", self.out)
         self.assertIn("UnknownItemException(item)", self.out)
 
     def test_no_docs_no_sections(self):
-        self.assertNotIn("Rule-tree", self.out)
+        self.assertNotIn("Calculates order totals", self.out)
         self.assertNotIn("## MODULES", self.out)
         self.assertNotIn("## API", self.out)
 
@@ -252,9 +252,9 @@ class RelationsTest(unittest.TestCase):
         self.assertEqual(t.supers, ["PricePort"])
 
     def test_sealed_permits_extracted(self):
-        syms = extract_file(JAVAMINI / "src/delta/DeltaOp.java", JAVAMINI)
-        t = next(s for s in syms if s.name == "DeltaOp")
-        self.assertEqual(t.permits, ["AddOp", "RemoveOp"])
+        syms = extract_file(JAVAMINI / "src/transport/Vehicle.java", JAVAMINI)
+        t = next(s for s in syms if s.name == "Vehicle")
+        self.assertEqual(t.permits, ["Bicycle", "Scooter"])
 
     def test_generic_supers_not_split_on_type_args(self):
         from hologram.symbols import _heritage
@@ -269,8 +269,8 @@ class RelationsTest(unittest.TestCase):
         # interface relations live on the interface line, not per implementor
         self.assertIn("PricePort(I) ←PricingEngine", out)
         self.assertNotIn(": PricePort", out)
-        self.assertIn("DeltaOp(I) sealed:AddOp|RemoveOp", out)
-        self.assertNotIn(": DeltaOp", out)  # sealed permits already say it
+        self.assertIn("Vehicle(I) sealed:Bicycle|Scooter", out)
+        self.assertNotIn(": Vehicle", out)  # sealed permits already say it
         # non-interface supers keep the : T suffix
         self.assertIn("UnknownItemException(C) : RuntimeException", out)
 
@@ -653,11 +653,11 @@ class PrivateMembersTest(unittest.TestCase):
         # join a suffix group (marker must stay outermost)
         packed = ",".join(_factored_name_tokens([
             "_run_a", "_run_b", "_run_c", "AlphaTest", "BetaTest",
-            "GammaTest", "DeltaTest×0",
+            "GammaTest", "EpsilonTest×0",
         ]))
         self.assertEqual(
             packed,
-            "_run_{a,b,c},{Alpha,Beta,Gamma}Test,DeltaTest×0")
+            "_run_{a,b,c},{Alpha,Beta,Gamma}Test,EpsilonTest×0")
 
 
 class CompactMapContractTest(unittest.TestCase):
@@ -742,7 +742,7 @@ class TightFormatTest(unittest.TestCase):
         self.assertIn("evaluate(order,items):Quote", out)
         self.assertIn("OrderStatus(E{NEW,PAID,SHIPPED})", out)
         self.assertIn("ItemId,OrderId,UserId(R{value})", out)
-        self.assertIn("(I) sealed:AddOp|RemoveOp", out)
+        self.assertIn("Vehicle(I) sealed:Bicycle|Scooter", out)
         ev = next(ln for ln in out.splitlines() if "evaluate(order" in ln)
         self.assertNotIn("→", ev)   # ascii `:Ret`, not the pretty arrow
 
@@ -888,14 +888,14 @@ class TestIndexDietTest(unittest.TestCase):
                                  [Path(tmp) / f for f in files])
 
     def test_single_class_file_folds_and_keeps_edge(self):
-        syms = [self._sym("applyDelta", "fn", "src/Engine.java"),
-                self._sym("PricingTest", "class", "test/PricingTest.java"),
-                self._sym("t1", "method", "test/PricingTest.java",
-                          container="PricingTest", calls=["applyDelta"])]
-        out = self._render(syms, ["src/Engine.java", "test/PricingTest.java"])
+        syms = [self._sym("loadTheme", "fn", "src/Theme.java"),
+                self._sym("ThemeTest", "class", "test/ThemeTest.java"),
+                self._sym("t1", "method", "test/ThemeTest.java",
+                          container="ThemeTest", calls=["loadTheme"])]
+        out = self._render(syms, ["src/Theme.java", "test/ThemeTest.java"])
         self.assertIn("? tests ·.java", out)
-        self.assertIn("PricingTest>applyDelta", out)
-        self.assertNotIn("PricingTest{", out)
+        self.assertIn("ThemeTest>loadTheme", out)
+        self.assertNotIn("ThemeTest{", out)
         self.assertNotIn(".java{", out)
 
     def test_multi_class_file_keeps_braces(self):
@@ -939,10 +939,11 @@ class CtorSuppressionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             return render_simple(Path(tmp), syms, [])
 
-    def test_bare_field_restating_ctor_suppressed(self):
+    def test_bare_field_restating_ctor_kept_for_ordinary_class(self):
         out = self._render(_ctor_fixture())
         self.assertIn("Engine(C{basePrices})", out)
-        self.assertNotIn("\n Engine(basePrices)", out)
+        # Fields do not prove that an ordinary class is publicly constructible.
+        self.assertIn("\n  Engine(basePrices)", out)
 
     def test_ctor_with_extra_fact_kept(self):
         out = self._render(_ctor_fixture(ctor_kw={"raises": ["BadPrice"]}))
