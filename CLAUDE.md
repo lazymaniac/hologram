@@ -168,8 +168,8 @@ grant publication permission.
 This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers. When `hologram review` reports findings, address them before finishing: reuse the named original instead of a duplicate; consolidate re-covered tests.
 
 ```
-# hologram · 15,861 LOC · state a590c58f03cb
-· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ✓=tested · ~N=lines · !E=throws · @=route/annotation · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
+# hologram · 17,827 LOC · state 07d38a0ce631
+· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ~N=lines · !E=throws · @=route/annotation · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
 benchmark
  claude_runner(prompt,ws,model,max_turns,effort):RunnerOutcome > _effort_invocation,_run_process
  drop_workspace(corpus,ws) ✓
@@ -200,7 +200,7 @@ benchmark
              _matched_section,_eligible_review_measurement,_setup_failure_row
 hologram
  build_digest(root,langs,targets,budget):str ✓ > _build_digest
- build_digest_with_stats(root,langs,targets,budget):tuple[str,BudgetStats] > _build_digest
+ build_digest_with_stats(root,langs,targets,budget):tuple[str,BudgetStats] ✓ > _build_digest
  const_signature(name,value_text):str ✓
  context_targets(root):list[Path]
  detect_language(path):str | None ✓
@@ -213,7 +213,7 @@ hologram
  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers,budget_selection,budget_catalog,budget_retained):str ~654 ✓ > _tree_lines,_test_index_lines,_legend_line,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_total_loc,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_private_lines,_is_test_path,_strip_exc
  report_data(findings,rev):dict[str,object] ✓
  review_snapshots(old,new,old_digest,checks):list[Finding] ~199 ✓ > _prod_api,_raw_call_targets,_test_edges,_prod_callables,_zero_usage_names,_map_line_for,_describe,_finding,_key,_is_test_path,_is_production_symbol,_decorator_notes,review._symbol_identity,_api_delta
- run_cli(argv):int ~321 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,_uninstall,_bootstrap_or_die,run_review,build_digest_with_stats,_install_hooks,_dead_hook_scripts,_warn_if_large,embed_digest,_contained_target,_resolve_target_restriction,_digest_langs,_digest_targets,_revision_source_paths,embedded_digest,_digest_budget,_strip_block,_digest_state,run_review_data,estimate_tokens
+ run_cli(argv):int ~326 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,_uninstall,_bootstrap_or_die,run_review,build_digest_with_stats,_install_hooks,_dead_hook_scripts,_warn_if_large,embed_digest,_contained_target,_resolve_target_restriction,_digest_langs,_digest_targets,_revision_source_paths,embedded_digest,_digest_budget,_strip_block,_digest_state,run_review_data,estimate_tokens
  run_review(root,rev,langs,checks):str > render_report,run_review_findings
  run_review_data(root,rev,langs,checks):dict[str,object] > report_data,run_review_findings
  run_review_findings(root,rev,langs,checks):list[Finding] !SystemExit > snapshot,review_snapshots,build_digest,_git_env
@@ -221,7 +221,7 @@ hologram
  snapshot(root,langs):Snapshot > _gather,Snapshot
  split_params(raw):list[str] > _split_top_commas,tight_type
  strip_comments_and_strings(text):str
- summarize_budget(requested_budget,full_tokens,selected_tokens,skeleton_tokens,effective_detail,bundles,retained,selection_trials,selection_candidates,search_truncated,stop_reason):BudgetStats > BudgetStats
+ summarize_budget(requested_budget,full_tokens,selected_tokens,skeleton_tokens,effective_detail,bundles,retained,selection_trials,selection_candidates,search_truncated,stop_reason):BudgetStats ✓ > BudgetStats
  tight_annotation(text):str > tight_type
  tight_type(t):str
  BudgetBundle(R{detail,category,key,estimated_chars})
@@ -267,7 +267,8 @@ hologram
   - misc.py: _lua_call_entry,_extract_{lua,bash,css,html,helm,make},_bash_call_entry,_css_symbols,
              _make_{extend_unique,continues,without_comment,syntax_without_comment,rule_parts,recipe_prefixes,reference_end,reference_name,var_refs}
   - php.py: _php_{vis,var_name,params,return,call_entry,local_bindings,raises,attributes,fn_symbol},_extract_php
-  - python.py: _py_{param_facts,calls,raises,bindings,decorators,fn_symbol},_extract_python
+  - python.py: _py_{subscript_head,resolve_forward_refs,annotation,param_facts,calls,raises,bindings,decorators,fn_symbol},
+               _extract_python
   - ruby.py: _rb_{call_entry,params,method_symbol,fields,walk},_extract_ruby
   - rust.py: _rs_{vis,params,param_names,call_entry,local_bindings,attributes,fn_symbol},_extract_rust
   - scala.py: _sc_{vis,params,return,call_entry,local_bindings,raises,fn_symbol},_extract_scala
@@ -275,14 +276,25 @@ hologram
   - ts.py: _ts_{exported,params,param_names,return,call_entry,calls,decorators,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,unwrap_hoc,fc_props,route_entries,top_level_arrows,aliases_and_reexports},
            _extract_{ts,tsx,sfc}
 tools
- main(argv):int
+ audit_artifact(path,terms):list[str] > _scan_payload,_artifact_label,_archive_members,_private_path,_scan_name,_scan_archive_metadata,_scan_link_target,_is_archive_payload
+ audit_history(root,terms):list[str] ~40 !SystemExit > _scan_payload,_is_archive_payload
+ audit_tree(root,terms):list[str] ~43 > _indexed_entries,_private_path,_worktree_payload,_scan_name,_git_output,_untracked_files,_scan_payload,_is_archive_payload,_scan_link_target
+ check_release_privacy.py:main(argv):int > _deny_terms,audit_tree,audit_history,audit_artifact
+ measure_tokens.py:main(argv):int
+ run_tests.py:main(argv):int
+ - check_release_privacy.py: _private_path,_deny_terms,_scan_{payload,name,link_target,archive_metadata},_safe_label,
+                             _artifact_label,_git_output,_indexed_entries,_untracked_files,_publishable_files×0,
+                             _worktree_payload,_archive_members,_is_archive_payload
 ? tests ·.py
+ test_adaptive_budget{AdaptiveBudgetGoldenTest>build_digest_with_stats+1,BudgetStatsContractTest>summarize_budget+5} > _gather +6
  test_bench{TaskLoaderTest>load_tasks+1,TranscriptMetricsTest>parse_transcript,DuplicationDetectorTest>judge_reuse,
             ExperimentIdentityTest>_experiment_spec+7,WorkspaceTest>make_workspace+2,
             BudgetConditionTest>make_workspace+3,ActedOnFindingsTest>parse_transcript,
             ReviewConditionTest>make_workspace+3,StructuredReviewMeasurementTest>Finding+9,
             CoachConditionTest>make_workspace+1,RunOneTest>_infra_reason+3,ScopeJudgeTest>judge_scope,
             ReportTest>_review_section+1,CliTest>bench.main+6}
+ test_budget_integrity{WholeMapBudgetSelectionTest>build_digest+2,
+                       {EntrypointFloor,MeaningfulDunder,ConstructorIntegrity}Test>Symbol+1,OwnerIdentityTest>Symbol+2} > _gather +5
  test_cli{{CliOptionSurface,CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,UninstallPython,SizeWarning}Test>run_cli,
           ManagedHookLineTest>_sh_dq+1,LegacyHookMigrationTest>run_cli+1,PostCommitHookE2ETest>run_cli,
           BudgetTest>build_digest+4,HookPythonSelectionTest}
@@ -294,16 +306,17 @@ tools
                  {Rust,Cpp,Lua,Angular,Php}ExtractTest>extract_file+1,
                  {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test>extract_file,ReactComponentTest>extract_file+1,
                  MakefileExtractTest>extract_file+3}
+ test_release_privacy{ReleasePrivacyTest}
  test_review{{Dup,Recover,Place}CheckTest>review_snapshots,DeadOrphanApiTest>review_snapshots+1,
              ReportAndCliTest>render_report+4} > Snapshot +1
  test_simple_mode{CallExtractionTest>extract_file,
-                  {SimpleDigest,SameShapeGrouping,FieldNames,ReconstructablePath,Legend,ConstExtract,TightFormat}Test>build_digest,
+                  {SimpleDigest,SameShapeGrouping,FieldNames,ReconstructablePath,ConstExtract,TightFormat}Test>build_digest,
                   RenderUnitTest>Symbol+2,{EnumValues,InterfaceMethod,QualifiedCall,Throws}Test>extract_file+1,
-                  LanguageFilterTest>build_digest+2,RelationsTest>extract_file+2,
+                  {LanguageFilter,Legend,ZeroUsageMarker}Test>build_digest+2,RelationsTest>extract_file+2,
                   {InterfaceImplementors,TransitiveReduction,GroupExtras,CompactMapContract,TestIndexDiet}Test>Symbol+1,
                   SecretRedactionTest>build_digest+1,{RouteRender,CtorSuppression,DunderPrivate}Test>render_simple+1,
-                  VoidOmissionTest>extract_file,PrivateMembersTest>Symbol+2,ZeroUsageMarkerTest>build_digest+2,
-                  PrecomputedRenderTest>Symbol+4} > Symbol
+                  VoidOmissionTest>extract_file,PrivateMembersTest>Symbol+2,PrecomputedRenderTest>Symbol+4} > Symbol
+ test_stats_cli{BudgetStatsCliTest>run_cli}
  test_treesitter{TreeSitterJavaTest,MissingParserErrorTest}
 ```
 <!-- hologram:end -->
