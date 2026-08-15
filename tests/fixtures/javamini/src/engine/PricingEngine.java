@@ -6,7 +6,7 @@ import java.util.Map;
 import shop.ids.ItemId;
 import shop.ids.OrderId;
 
-/** Rule-tree price evaluator; ordering of rules matters. */
+/** Calculates order totals from the supplied price table. */
 public class PricingEngine implements PricePort {
     private final Map<ItemId, Long> basePrices;
 

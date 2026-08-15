@@ -436,7 +436,7 @@ class DiffCommandTest(unittest.TestCase):
             import io
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                code = run_cli(["diff", "HEAD", "--root", str(root), "--quiet"])
+                code = run_cli(["diff", "HEAD", "--root", str(root)])
             self.assertEqual(code, 0)
             self.assertIn("+fresh_fn():int", buf.getvalue())
 
