@@ -1,5 +1,5 @@
 {
-  "corpus": "/private/tmp/claude-501/-Users-sebastian-workspace-hologram/b2aa35ac-99fa-4144-9924-f3fd8ac1d2ce/scratchpad/corpora/spring-framework",
+  "corpus": "~/workspace/spring-framework",
   "model": "sonnet",
   "max_turns": 40,
   "tasks": [
@@ -26,16 +26,19 @@
     {"id": "find-getbean-flow", "kind": "navigate",
      "prompt": "In one paragraph: trace what happens from ApplicationContext.getBean(String) down to the instantiation of a singleton bean — name the key classes in order. Do not modify any files.",
      "accept_cmd": "true",
+     "manual_only": true,
      "expect_reuse": []},
 
     {"id": "find-profile-eval", "kind": "navigate",
      "prompt": "In one paragraph: where are @Profile conditions evaluated during bean definition registration, and which types are involved? Do not modify any files.",
      "accept_cmd": "true",
+     "manual_only": true,
      "expect_reuse": []},
 
     {"id": "find-converter-choice", "kind": "navigate",
      "prompt": "In one paragraph: how does Spring MVC decide which HttpMessageConverter serializes a @ResponseBody return value? Name the key classes. Do not modify any files.",
      "accept_cmd": "true",
+     "manual_only": true,
      "expect_reuse": []}
   ]
 }

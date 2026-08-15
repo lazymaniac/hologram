@@ -1,280 +1,191 @@
 # hologram benchmark
 
-Measures agents with the map in context (condition A) against agents without
-(condition B) on the same tasks in the same corpus. Every run is a headless
-`claude -p` session in a throwaway git worktree; metrics come from the transcript,
-an acceptance command, and a map-diff duplication check.
+Measures agents under controlled Hologram conditions on the same tasks and
+corpus. The default A/B comparison isolates the map itself; it is not the full
+shipped `init` behavior. Paid runs use a headless `claude -p` session in a
+throwaway local clone; metrics come from the transcript, an acceptance command,
+and a map-diff duplication check. Dry runs exercise setup and evidence
+persistence without invoking the provider or the acceptance shell.
 
-## Smoke run (do this first — ~4 sessions)
+## Privacy boundary
+
+Private-corpus task files, prompts, paths, identifiers, transcripts, results,
+and derived aggregates must stay local. Put private task configurations under
+`benchmark/tasks/local-*.json`; put run evidence under `benchmark/results/` or
+`benchmark/archive/`. Those paths are gitignored and excluded from release
+artifacts. Anonymization is not sufficient permission to publish private
+corpus data.
+
+Only publish benchmark material from a corpus whose redistribution and result
+publication are explicitly authorized. Review source archives, package
+metadata, release notes, and generated artifacts before publishing.
+
+## Conditions
+
+| condition | setup | purpose |
+|---|---|---|
+| `A` | map only; the shipped coaching sentence is removed | isolates map content from coaching |
+| `AC` | map plus the shipped coaching sentence | measures the static context produced by `build` |
+| `AR` | map, coaching, and the shipped post-commit hooks | measures `init`, including live review and structured final-state counts |
+| `B` | no map, coaching, or Hologram hooks | control |
+
+The CLI defaults to `--conditions A B`. Include `AR` explicitly when evaluating
+the shipped hook behavior, for example `--conditions AR B`; use
+`--conditions A AC AR B` only when the experiment is designed to compare all
+four interventions.
+
+## Smoke run
+
+Run a small, authorized task selection before a paid matrix. Real provider
+runs are refused unless you explicitly acknowledge that the runner is not
+host-isolated; use this flag only in a disposable, appropriately scoped host:
 
     .venv/bin/python benchmark/bench.py run benchmark/tasks/spring.json \
-        --only trim-to-null find-getbean-flow --reps 1
+        --only trim-to-null find-getbean-flow --reps 1 --dry-run \
+        --results benchmark/results/smoke-dry
+    .venv/bin/python benchmark/bench.py run benchmark/tasks/spring.json \
+        --only trim-to-null find-getbean-flow --reps 1 \
+        --conditions AR B \
+        --allow-unsafe-host
     .venv/bin/python benchmark/bench.py report
 
-Read the two transcripts in `benchmark/results/` end to end once. Check that the
-condition-A workspace really carries the embedded block in its `CLAUDE.md` and that
-the acceptance commands measured what you meant.
+Read the transcripts and captured runner/acceptance outputs in
+`benchmark/results/` end to end. Check that each map-bearing treatment's size is
+nonzero and that every acceptance command measures the intended outcome. Each
+run gets immutable experiment, pair, cell, and attempt IDs. Rerunning a cell
+does not rewrite earlier evidence. `runs.jsonl` updates use a locked atomic
+replacement, so a killed writer leaves either the old complete log or the new
+complete log. Full output artifacts are fsynced and recorded with byte counts
+and SHA-256 digests.
 
-## Full matrix (~60 sessions — this costs real money)
+## Full matrix
 
-    .venv/bin/python benchmark/bench.py run benchmark/tasks/spring.json --reps 3
+For the checked-in seven-task A/B configuration:
+
+    .venv/bin/python benchmark/bench.py run benchmark/tasks/spring.json \
+        --reps 3 --resume --allow-unsafe-host
     .venv/bin/python benchmark/bench.py report
+
+`--resume` considers the newest attempt for each exact cell, but skips only a
+complete task/repetition block. Every planned condition in that block must have
+a terminal result from the same execution wave and resolved model; otherwise the
+whole block is rerun so its treatment/control comparison remains usable. A real
+cell requires a valid terminal agent result and a declared acceptance pass or
+fail; an AR cell also requires a complete structured-review measurement. A
+dry-run block is separately identified and resumable after its non-provider,
+non-acceptance harness paths complete. In every mode, referenced evidence
+artifacts must still match their recorded size and digest. Timeouts, invalid
+transcripts, setup errors, unknown acceptance exit codes, missing/tampered
+artifacts, incomplete AR review capture, and other infrastructure failures
+remain in the append-only evidence and cause their entire block to be retried.
+By default exit 0
+passes and exit 1 is an observed task failure; tasks can declare other disjoint
+`accept_pass_codes` and `accept_fail_codes`. Every undeclared exit is judge
+infrastructure failure, not a negative task verdict.
+
+Changes to the corpus, task or judge configuration, requested model, effort,
+turn limit, map budget, tool/schema version, selected tasks/conditions/
+repetitions, runner mode/version, Python/platform runtime, scheduling policy,
+or order seed produce a different identity and cannot be silently reused. A
+dry-run cell can therefore never satisfy a paid resume. Before a paid matrix,
+the harness preflights the runner. It stops after two consecutive infrastructure
+failures globally or for the same condition by default, so a persistent AR
+measurement failure cannot be hidden by successful control cells. Change that threshold with
+`--max-consecutive-runner-failures` and resume after fixing the cause.
+
+Condition order starts from a seeded permutation and rotates across task/rep
+blocks to counterbalance order effects. The deterministic default seed and the
+planned per-pair condition order are recorded in every row. Attempts also carry
+an execution-wave ID, UTC start time, and actual wave index. Treatment and B
+attempts selected from different waves are listed as incomplete instead of
+being silently paired. Pass `--seed N` to choose a preregistered order explicitly;
+reuse the same seed when resuming.
 
 ## Reading the report
 
-- **duplication** is the headline: % of reuse-task runs where the agent wrote a
-  name-similar function instead of calling the existing one. Directional claim:
-  A < B.
-- **reads / searches / turns / tokens** are the navigation story: A should read
-  and search less on navigate tasks.
-- With reps=3 the numbers are directional, not significant. Don't publish a
-  percentage without saying n. The per-task list at the bottom of the report is
-  for eyeballing which tasks discriminate — drop tasks that saturate (everyone
-  succeeds or everyone fails) and replace them.
+- **accept cmd** reports automatic command outcomes only; dry-run and
+  `manual_only` rows are excluded. **semantic** reports only tasks whose author
+  explicitly set `semantic_judge: true`; `manual pending` is separate. Every
+  percentage has an eligible-observation denominator, and an empty or
+  inapplicable metric is `—`, never 0%.
+- **duplication** is the percentage of applicable reuse-task runs where the agent wrote a
+  name-similar function instead of calling the existing one. Directional goal:
+  treatment < B.
+- **reads / searches / turns / tokens** describe navigation effort. Numeric
+  summaries are median ± median absolute deviation (MAD), not means. Fresh
+  input, cache-created input, cache-read input, legacy total input, and output
+  tokens remain separate. Directional goal: a treatment should explore less
+  than B without degrading the task-specific evidence.
+- **matched treatment−B deltas** compare each selected treatment (`A`, `AC`, or
+  `AR`) with control `B`, only for the same immutable task and repetition from
+  the same execution wave and resolved provider model (when reported); positive
+  numbers mean the treatment used or achieved more than B. Each delta includes
+  its own `n`. Missing, infrastructure-invalid, or cross-wave partners are
+  excluded and listed under incomplete pairs instead of becoming unmatched
+  averages. Runner mode is shown explicitly, so dry and paid rows cannot look
+  like the same observation.
+- Rows are separated by model, effort, requested budget, corpus revision,
+  immutable task-file revision, Hologram/harness revision, and result schema.
+  Infrastructure failures appear in `infra` and are excluded from quality and
+  cost summaries. Repeated compatible cells use the newest attempt in
+  aggregates, while every failed attempt remains listed and retained in
+  `runs.jsonl`.
+- `report --anon` replaces task IDs with report-local pseudonyms and suppresses
+  per-task symbol names; it is for safer local inspection, not publication
+  permission. In anonymous rows, `rv` means a real review tool result was observed and
+  `rv+action` means a later relevant edit and commit followed. It is an action
+  proxy, not proof that the finding was resolved.
+- **structured review final-state counts** apply only to paid AR rows whose
+  capture/final scan completed with `status=ok` and whose runner/acceptance
+  evidence is infrastructure-valid. The report shows total, eligible, and
+  excluded cells plus each non-success status, so missing measurements cannot
+  look like zero findings. The
+  benchmark captures stable finding IDs at each post-commit review, then
+  compares their deduplicated union with one cumulative review of the final
+  working tree against the setup commit. `resolved` means the same ID is absent
+  at the end; `persisting` means it remains; `new final` was not emitted by an
+  earlier hook. The report exposes counts only. Raw result IDs are
+  corpus-derived evidence and remain subject to the privacy boundary above.
+- Small repetition counts are directional, not statistically conclusive.
+  Inspect per-task results and replace tasks that saturate.
 
 ## Honest limitations
 
-- The duplication detector is a heuristic (call-chain + name similarity). Review
-  its verdicts manually before quoting them; the per-task list makes that fast.
-- One corpus, one model, ten tasks. This answers "does the map help *here*",
-  not "does it help everywhere".
-- Corpora the model has memorized (large, famous OSS) measure the wrong thing: the
-  control answers from training memory, so the map can only add cost. Run this
-  against code the model has never seen.
-- Navigation tasks are judged by acceptance `true` — their signal is in
-  reads/searches/tokens, not correctness. A human should spot-check the answers.
-
-## Measured results — 2026-08 round (anonymized)
-
-Corpus: a private, unpublished production repo (Java + Python, several hundred
-source files; condition-A map: ~14k tokens, language-filtered). Model aliases
-are the claude CLI defaults at run time; no thinking/effort flags were set, so
-each tier ran its stock configuration. All identifiers below are neutral run
-ids; no corpus symbol names appear in this report by policy.
-
-### Navigation and lookup tasks (sonnet, 6 tasks × A/B, 1 rep)
-
-| condition | answer ok | turns | reads | searches | tokens in | tokens out |
-|---|---|---|---|---|---|---|
-| A (map) | 100% | 1.2 | 0.0 | 0.2 | 81,610 | 143 |
-| B (control) | 100% | 3.5 | 0.5 | 2.0 | 146,695 | 354 |
-
-Constants with values, interface→implementor lists, and route→handler pairs
-were read directly off the map: ~1 turn, zero file reads, −45% input tokens,
-−60% output tokens. Both conditions answered everything correctly — the map's
-value here is effort, not accuracy, and it is unambiguous.
-
-### Long-session generative task, model sweep (1 task × A/B × 3 reps × 3 models)
-
-One 60-turn-budget task: write a test suite exercising an exception-mapping
-path end to end (the HTTP mapping layer *and* the raising implementation),
-tests only, following existing conventions. Acceptance = the expected exception
-type exercised from new test code. **18/18 runs passed acceptance** — every
-quality difference below is invisible to a grep-based gate.
-
-Effort (means over 3 reps):
-
-| model | cond | turns | reads | edits | tokens out |
-|---|---|---|---|---|---|
-| haiku | A | 33.7 | 17.3 | 10.3 | 19,271 |
-| haiku | B | 48.0 | 19.3 | 7.7 | 19,278 |
-| sonnet | A | 28.3 | 15.0 | 5.0 | 29,577 |
-| sonnet | B | 37.0 | 18.3 | 7.3 | 32,070 |
-| opus | A | 26.7 | 12.3 | 3.0 | 21,229 |
-| opus | B | 34.0 | 14.3 | 2.0 | 22,889 |
-
-- **The map's turn saving replicates at every tier**: haiku −30%, sonnet −24%,
-  opus −21%. The weaker the model, the more the map helps.
-- **The map stabilizes runs.** Every A cell is tight (sonnet 28/29/28; opus
-  23/28/29); every B cell is wide (sonnet 28–42; opus 20–41; haiku 43–54).
-  Variance reduction matters operationally: predictable sessions are
-  schedulable sessions.
-- **A cheaper model with the map matches a stronger model without it on
-  effort**: haiku-A (33.7 turns) ≈ opus-B (34.0); sonnet-A (28.3) beats
-  opus-B. Whether that trade holds for *quality* is the next table.
-
-Output quality, reconstructed from every run's Write/Edit payloads:
-
-| model | cond | tested the real implementation | avg tests | asserts/test | comment noise | mocks | near-dup tests |
-|---|---|---|---|---|---|---|---|
-| haiku | A | 0/3 | 22 | 1.7 | high (4–24 lines) | 0 | 0 |
-| haiku | B | 0/3 | 26 | 1.6 | high | 0 | 0 |
-| sonnet | A | **3/3** | 17 | 1.3 | none | 0 | 0 |
-| sonnet | B | 1/3 | 13 | 1.9 | low | 0 | 0 |
-| opus | A | 3/3 | 19 | 2.0 | very low | 0 | 0 |
-| opus | B | 3/3 | 16 | 2.1 | very low | 0 | 0 |
-
-- **Classic AI-slop markers were absent everywhere**: zero mocks, zero
-  near-duplicate test bodies, house-style structure in all 18 runs. The
-  corpus's strict agent instructions (present in both conditions) set that
-  floor. Slop, where it existed, was subtler: comment chatter (haiku),
-  stub-instead-of-real-implementation scope narrowing, and re-covering ground
-  existing tests already held.
-- **The task's hardest requirement — test the real raising implementation,
-  not a stub — is where the tiers separate.** Opus did it in 6/6 runs, map or
-  not. Haiku never did (0/6); the map does not rescue a capability that isn't
-  there. Sonnet is the interesting tier: **1/3 without the map, 3/3 with it** —
-  the map's implementor lists and call chains appear to steer the mid-tier
-  model to the real collaborator it should instantiate.
-- Only opus ever discovered the corpus's existing payload-driver helper
-  (2/6 runs); 17/18 runs rolled their own request builder. The map's test
-  index names test files and classes but not their helpers — a possible
-  future fact.
-- Haiku writes the most tests (up to 37) with the most comment noise; opus
-  writes fewer, denser, cleaner tests. Test count anticorrelates with quality
-  here.
-
-### Takeaways for this corpus
-
-1. The map is decisively cheaper on navigation: answers come off the map in
-   one turn.
-2. On generative work, quality is set by model tier, effort by the map — with
-   one exception that matters: at the mid tier the map changed *what* got
-   tested, turning a scope-narrowed suite into a task-complete one in every
-   rep.
-3. Grep acceptance saturates (18/18); future rounds need scope-aware judges
-   (e.g. expected collaborators must appear in new test imports).
-4. Reps matter: single-rep effort numbers from earlier in the round were
-   outliers in both directions; n=3 means were stable.
-
-### Validation round — 0.6.0 map features (sonnet + haiku, effort=low, 3 reps)
-
-Four real-world task shapes on the same private corpus, run at pinned low
-reasoning effort against the 0.6.0 map (coverage edges + test helpers):
-
-| model | cond | kind | accepted | answer ok | scope ok | duplication | reads | searches | turns |
-|---|---|---|---|---|---|---|---|---|---|
-| sonnet | A | navigate | 100% | 83% | — | 0% | 0.5 | 1.0 | 2.5 |
-| sonnet | B | navigate | 100% | 67% | — | 0% | 2.3 | 3.0 | 1.8 |
-| haiku | A | reuse | 100% | — | — | **0%** | 7.0 | 2.3 | 13.3 |
-| haiku | B | reuse | 100% | — | — | **33%** | 19.0 | 11.7 | 15.7 |
-| haiku | A | navigate | 100% | 50% | — | 0% | 0.8 | 0.7 | 2.7 |
-| haiku | B | navigate | 100% | 50% | — | 0% | 7.3 | 4.8 | 4.8 |
-
-- **The only duplication event of the entire measurement program landed in
-  haiku-control**: one run re-invented an existing value helper the map
-  names; all map-condition runs reused it. At the weakest tier and lowest
-  effort — where context must do the work reasoning can't — the map is the
-  difference between reuse and re-invention.
-- **Coverage-awareness converged**: a well-posed "ensure coverage exists"
-  task was answered correctly by both conditions (existing test cited, no
-  duplicate written). An earlier, imperative phrasing of the same task made
-  even map-equipped runs write duplicate tests — task phrasing dominates,
-  and coverage edges name symbols, not behaviors; a behavior-level question
-  still needs a grep.
-- Map condition again halves exploration for haiku (reads 7 vs 19 on reuse,
-  0.8 vs 7.3 on navigate).
-- Harness lesson that cost two restarts, now fixed in the tool: corpora
-  whose conventions make agents commit their own work blank a
-  working-tree diff — all judges now diff against the recorded setup
-  commit.
-
-### Review-loop round — 0.7.0 (A vs AC vs AR, sonnet + haiku, effort=low, 3 reps)
-
-Three map-bearing conditions on two write-task shapes: **A** = embedded map,
-**AC** = map + the coaching sentence in the embed note, **AR** = map +
-coaching + the post-commit `hologram review` hook live in the workspace.
-Task shapes: a *duplication bait* (add a small utility whose value logic
-already exists in the corpus) and a *coverage-placement task* with a
-verified premise (write a test for an endpoint behavior that production
-declares but no test file touches — confirmed by map and grep before the
-round). All 39 runs passed acceptance.
-
-| model | task | cond | reuse | parallel test file | review seen | turns |
-|---|---|---|---|---|---|---|
-| sonnet | dup bait | A | 3/3 | — | — | 7.7 |
-| sonnet | dup bait | AC | 3/3 | — | — | 8.7 |
-| sonnet | dup bait | AR | 3/3 | — | 3/3 | 7.7 |
-| sonnet | coverage | A/AC/AR | — | 0/9 | 0/3 (clean) | 18–25 |
-| haiku | dup bait | A | 2/3 | — | — | 26.0 |
-| haiku | dup bait | AC | 3/3 | — | — | 18.7 |
-| haiku | dup bait | AR | 3/3 | — | 3/3 | 13.0 |
-| haiku | coverage | A | — | 1/3 | — | 23.0 |
-| haiku | coverage | AC | — | 1/3 | — | 30.0 |
-| haiku | coverage | AR | — | 2/3 | 3/3 | 32.3 |
-
-- **Zero duplication events in any condition** — every map-bearing run on
-  the bait either called the existing helper directly or delegated to it.
-  The 0.6.0 round's haiku-control duplication did not recur because every
-  0.7.0 condition carries the map; the map remains the first line of
-  defense.
-- **Placement splits by tier, not condition**: sonnet extended the existing
-  endpoint test class in 9/9 coverage runs; haiku invented a parallel test
-  file in 4/9, roughly evenly across conditions. The map alone saturates
-  placement at mid-tier; at the weakest tier placement decisions happen
-  *before* any feedback can fire.
-- **The review loop fired exactly when it should**: every AR commit that
-  drifted got findings in-session — *recover* findings naming the classes
-  that already cover the paths a parallel test file re-covered, *dead*
-  findings for the bait utility (task-induced: the task plants an uncalled
-  helper) and for an unrequested production exception handler one haiku run
-  added. Clean commits printed nothing (`--quiet-if-clean`), so sonnet's
-  coverage runs saw no review output at all — silence is the designed
-  behavior for clean work.
-- **Seeing is not yet acting at low effort**: haiku agents read the
-  findings, re-ran tests, and inspected the named originals — but none
-  restructured already-committed work. The loop reliably *surfaces* drift
-  at the moment it happens; acting on it still depends on model capability
-  (and on prompts that leave room for a follow-up commit).
-- The coaching sentence (AC) neither helped nor hurt measurably on these
-  saturated tasks (haiku bait reuse 3/3 vs A's 2/3 is inside noise at n=3);
-  it stays because its cost is ~30 tokens.
-- The round itself caught two harness/tool bugs now fixed: the post-commit
-  review died silently inside git hooks (`GIT_DIR` environment poisoning —
-  the AR bait cell for sonnet was rerun after the fix), and a corpus
-  context file instructing agents to work in its home checkout by absolute
-  path let one early agent commit into the real corpus — bench workspaces
-  are now path-confined clones with no origin remote.
-
-### Merge-gate round — 0.8.0 (A vs AR, sonnet + haiku, effort=low)
-
-0.8.0 was built behind per-feature go/no-go gates: nothing merges without a
-measured benefit. 28 sessions on the same corpus snapshot as the 0.7.0 round
-(two write tasks × A/AR × both models × 3 reps, plus two navigation tasks ×
-A × both models). All 28 passed acceptance; zero duplication anywhere.
-
-| gate | evidence | verdict |
-|---|---|---|
-| token diet (ctor restatements, dunder privates, test-index fold + shared extension) | reference corpus −3.7%, self −0.7%, map diff shows only intended line classes gone | **shipped** |
-| deps-block removal | all 4 navigation answers correct in 1 turn without it (coupling recoverable from call chains) | **shipped** |
-| pre-commit review timing | reviewer fired on every drifting commit — and **zero** of 12 AR runs acted on findings, identical to post-commit in 0.7.0 | **reverted** — post-commit stays |
-| coaching upgrade (act-on-findings wording) | no acceptance/turns regression | **shipped** |
-
-- The diet shortfall vs the ~6% estimate is explained, not hidden: files with
-  `@Nested` test classes keep their braces (multiple real classes — the fold
-  correctly doesn't apply), and exception constructors whose args differ from
-  their headers are informative and correctly kept.
-- The pre-commit experiment is the round's honest headline: moving the
-  reviewer's voice *earlier* changed nothing at low effort — the bottleneck
-  is the acting, not the timing. The `acted_on_findings` metric (report →
-  later edit of a named file → later commit) stays in the harness for 0.9
-  experiments aimed at that gap.
-- Turn counts were mixed and small (AR sometimes ±3 turns vs A) — review
-  reports neither cost nor save measurable effort at these task sizes.
-
-### Budget-ladder gate round — 0.9.0 (sonnet, effort=low, condition A)
-
-The 0.9.0 ladder repair ran behind five gates. Determinism, monotonicity,
-floor reachability (skeleton = −54% of the full map on the reference corpus)
-and refactor invariance (unbudgeted maps byte-identical to 0.8.0 modulo the
-state stamp, three corpora) all passed mechanically. The behavioral gate —
-five navigation probes against a degraded map — took three iterations and
-taught the round's real lesson:
-
-1. **First run (const values dropped at L1, silent omission): 3/5.** Two
-   wrong answers with *zero file reads* — the agent confidently answered
-   value and route questions off a map that silently omitted those facts.
-2. **Second run (disclosure line added): 4/5.** The route question flipped
-   to correct-with-one-read — the disclosure sent the agent to the source.
-   The const-value question still failed: a "reply with just the number"
-   prompt tempts a low-effort model into guessing regardless of warnings.
-3. **Third run (const values folded into the skeleton, ladder renumbered):
-   5/5 at a −26% budget, every answer off-map in one turn, zero reads.**
-
-The design conclusion is now measured: **the cheapest facts to keep can be
-the costliest to drop** — const values saved 0.3% and caused the worst
-failure class. Degraded maps also must say what they lost; silence reads
-as completeness.
-
-Cross-round comparisons to the 0.5.0 tables are directional only: these
-runs pinned `--effort low`; the earlier rounds ran at CLI defaults.
+- Agent sessions run with `--dangerously-skip-permissions`. The throwaway clone
+  and removed origin do **not** isolate the host filesystem, credentials,
+  processes, or network. Real runs therefore require the explicit
+  `--allow-unsafe-host` acknowledgement. The acknowledgement is recorded for
+  provenance; it adds no protection. Use a disposable container or VM with
+  scoped credentials for untrusted prompts or models.
+- Dry runs do not invoke the provider or acceptance shell, but they still clone
+  and inspect the configured corpus. They are a harness check, not a sandbox;
+  use only trusted task files and corpora.
+- The duplication detector is heuristic. Review its verdicts manually before
+  relying on them.
+- Structured review resolution is identity-based, not proof that the underlying
+  issue was fixed correctly. Renames and moves may replace one ID with another,
+  so `new final` must be considered alongside `resolved`. The harness makes no
+  per-finding attempt claim; `rv+action` remains a separate global proxy.
+- The private AR capture ledger is experiment evidence, not a tamper-proof
+  attestation. Its path is necessarily present in the throwaway clone's hook,
+  and an unrestricted agent could forge or remove records. Run adversarial
+  experiments inside an independently isolated host and treat the ledger as a
+  measurement aid rather than a security boundary.
+- `accept_cmd` is structural acceptance evidence unless the task author opts in
+  with `semantic_judge: true`. The checked configuration intentionally makes no
+  automatic semantic claim: its change tasks check for a diff and its
+  navigation tasks are `manual_only`. Inspect those outputs. Optional `judge`
+  metadata and the complete judge configuration are hashed into provenance.
+- A mutable requested model alias can change behind the same name. The harness
+  records the CLI version and the resolved model when the transcript exposes
+  it, and refuses to pair different resolved models, but it cannot resolve a
+  future alias before deciding whether to resume. Pin immutable model versions
+  for longitudinal experiments.
+- Corpora the model has memorized measure a different effect because the
+  control may navigate from training memory.
+- The harness rejects unknown configuration keys and validates task IDs,
+  conditions, regexes, command templates, exit-code protocols, budgets, turn
+  limits, selections, and repetitions before the first provider call. It
+  cannot prove that an author-declared semantic judge is meaningful.
+- The benchmark does not grant publication rights. Corpus owners must approve
+  both the experiment and any result disclosure.
