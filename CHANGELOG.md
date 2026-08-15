@@ -7,12 +7,154 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-14
+
+Theme: make token choices and effectiveness experiments inspectable.
+
+### Added
+
+- **Adaptive whole-fact budgeting.** After the least-degraded complete L0–L7
+  map fits, Hologram deterministically restores individual facts from the next
+  quality boundary. Every trial measures the complete output, facts remain
+  indivisible, the entrypoint skeleton stays mandatory, and a fixed trial
+  bound keeps hook latency predictable. Adaptive headers use `A<level>` and
+  structured stats identify the exact selection.
+- **`hologram stats [--json]`** reports the budget policy version, selected,
+  full, and skeleton token estimates, fit/utilization against the deterministic
+  characters-per-four estimator, effective detail,
+  and retained/dropped fact bundles without modifying a context file.
+- **Structured review findings.** `hologram review --json` emits stable finding
+  IDs plus check, kind, subject, path, and detail. The Python API can compare a
+  baseline and final review as `seen`, `attempted`, or `resolved`; normal human
+  review output remains unchanged. API drift now preserves overload sets and
+  covers public kind, signature, field, relationship, mapped decorator/route,
+  throw, constructor, and constant-value changes.
+- **Resumable benchmark blocks.** Schema-v3 results identify the immutable
+  experiment, treatment/control pair, cell, task, judge configuration, corpus, tool, and
+  runner mode. `--resume` skips only when every planned cell in a task/repetition
+  block is terminal, evidence-intact, and from the same wave/model; otherwise it
+  reruns the whole block. Failed attempts remain append-only evidence. Referenced
+  stdout and stderr artifacts are fsynced, sized, hashed, and verified before a
+  block can satisfy resume.
+
+### Changed
+
+- Benchmark condition order is seeded and counterbalanced. Reports compare
+  every selected treatment (`A`, `AC`, or `AR`) with `B` on matched
+  task/repetition pairs, list incomplete pairs, summarize numeric fields
+  with median ± MAD, and keep fresh, cache-created, and cache-read input tokens
+  separate. Structural `accept_cmd` evidence is labelled as such; tasks can
+  carry `manual_only` and versioned judge metadata.
+- Eligible AR rows capture sanitized finding IDs during the existing
+  post-commit review pass, compare their deduplicated union with the final
+  working tree, and report resolved, persisting, and new-final counts. This is
+  an identity-based final-state measure, not a correctness or attempted-action
+  claim; finding content and IDs never enter the aggregate report.
+- Real benchmark sessions require `--allow-unsafe-host`, an explicit
+  acknowledgement that the agent runner is not a filesystem, credential,
+  process, or network sandbox. Dry and real cells cannot share resume IDs.
+- Acceptance commands declare disjoint pass/fail exit codes; undeclared exits
+  are judge infrastructure errors. Provider terminal events must satisfy the
+  metrics protocol, dry runs execute no acceptance shell, unknown task fields
+  fail before spending, and repeated global or same-condition infrastructure
+  failures open a circuit breaker.
+
+### Security
+
+- Release preparation audits index blobs and non-ignored working-tree files
+  separately, plus built archives, against private-only paths and an optional
+  external denylist.
+  Release-artifact publication remains hard-disabled until repository-history remediation
+  and a clean-clone privacy audit are complete.
+
+### Validation
+
+- Adaptive selection, structured review schemas, exact resume compatibility,
+  atomic result persistence, matched reporting, parser completeness, and the
+  release privacy gate have synthetic/public-only regression coverage. This
+  release makes no unmeasured claim that a prompt or hook timing improves agent
+  behavior.
+
+## [0.9.1] - 2026-08-14
+
+Theme: integrity before the next effectiveness experiment.
+
+### Security
+
+- Recalled `targets` metadata is resolved against the supported context-file
+  set and must remain inside the repository. Context targets with any symlink
+  path component or multiple hard links are rejected, so neither a tampered
+  header nor a filesystem alias can redirect a map write into source or an
+  outside file. Benchmark clone setup applies the same check before reading or
+  rewriting corpus context files.
+
+### Fixed
+
+- **Whole-map budget selection** now compares complete L0–L7 candidates,
+  including their stamps, legends, and loss disclosures. It chooses the
+  least-degraded candidate that fits; when none fits, it emits the actual
+  smallest candidate rather than blindly ending at L7. A generous budget
+  still renders only L0.
+- **External entrypoints survive pressure.** Framework routes/listeners
+  (including non-public handlers) and public Make targets remain visible at L5
+  and at the skeleton floor. Method ownership and cold-type identity prefer an
+  exact file, then an unambiguous package/directory owner: sibling classes no
+  longer exchange methods or fan-in, while split Go receivers, Rust impls, and
+  C++ header/source definitions remain attached. Declaration/definition facts
+  merge into one stable line.
+- **Information-loss corrections.** Ordinary class constructors remain visible
+  because fields do not prove public constructibility; only record constructors
+  whose components fully restate the header are folded. `__init__` and
+  `__repr__` stay omitted from private inventories, while meaningful protocol
+  methods such as `__iter__`, `__enter__`, and `__call__` remain.
+- **Makefile correctness.** Ordinary `=`, `:=`, `+=`, and `?=` assignments are
+  caller-overridable as GNU Make specifies; only explicit `override`
+  assignments pin a variable. Repeated/double-colon rules merge without
+  duplicate symbols, source locations survive `define` bodies, continued
+  prerequisites/recipes, custom `.RECIPEPREFIX`, escaped dollar parity, inline
+  recipes, and Make comment boundaries are handled. Prerequisite targets form
+  call edges (`deploy > build`), including under test-named directories, and
+  Make entrypoints no longer receive `×0`.
+- `init` and `uninstall` remove the managed review-only pre-commit line from the
+  reverted 0.8 experiment while preserving every foreign hook command.
+- Managed hook markers remain recognizable after a repository moves, so stale
+  absolute roots cannot leave a second reviewer installed. Uninstall strips
+  managed blocks but conservatively preserves every context/rule file because
+  its basename and canonical seed are not durable proof of ownership.
+
+### Dev
+
+- **Benchmark acceptance is clean.** Setup state now lives under Git metadata,
+  a no-op run cannot satisfy an any-diff gate, and setup asserts a pristine
+  baseline captured before the agent runs. New files participate in map-diff
+  judging. Runner and acceptance outcomes record status, exit code, timeout,
+  duration, stderr/stdout, and immutable run-ID artifacts; missing terminal
+  results, provider failures, and timed-out process groups cannot be accepted.
+- Review metrics recognize the shipped `HEAD~1` output only when a tool result
+  is correlated to the actual commit/review command. `review_action_proxy`
+  names the edit-plus-commit heuristic honestly; `acted_on_findings` remains as
+  a compatibility alias.
+- Benchmark rows record the requested budget and effective map level/token
+  estimate. Task IDs, conditions, regexes, formats, turn limits, budgets, reps,
+  and selections are validated before spending tokens. Reports split compatible
+  model/effort/budget/corpus/task-config/tool revisions and result schema, and
+  exclude infrastructure failures from quality and cost means. CI now has an
+  explicit dependency-free `core` profile and a `full` profile that preflights
+  every grammar and rejects unexpected
+  skips; tag publication runs the full profile and map-freshness gate too.
+
+### Benchmark integrity
+
+- The old workspace marker contaminated any-diff acceptance commands. This
+  release removes the marker and rejects no-op runs.
+- Budget selection now evaluates complete output rather than fact bodies alone.
+- Private-corpus measurements and derived aggregates are not included in
+  publishable documentation or release artifacts.
+
 ## [0.9.0] - 2026-08-14
 
-Theme: clever token budgeting. `--budget` maps are unchanged at L0 — this
-release only changes what happens under pressure. Unbudgeted maps are
-byte-identical to 0.8.0 (verified on three corpora, modulo the state
-stamp).
+Theme: deterministic token budgeting. Makefile support intentionally adds new
+L0 facts in repositories that contain Make rules.
 
 ### Added
 
@@ -22,32 +164,25 @@ stamp).
   (overridable `?=` or undefined) and `$(MANIFEST)`; variables the file
   pins with `=`/`:=` are internal and excluded. `.PHONY` and friends,
   pattern rules, and `define` bodies are skipped; `_name` targets are
-  private. No parser dependency — a line scanner, like Helm.
+  private. No parser dependency — a line scanner, like Helm. (0.9.1 corrects
+  the assignment semantics: ordinary assignments are also CLI-overridable;
+  only explicit `override` pins.)
 
 ### Changed
 
 - **The degradation ladder is repaired and deepened to a skeleton floor.**
-  The old ladder was lumpy (one level dropped −1,921 tokens on the
-  reference corpus while another dropped −116), partly broken (the private
-  wipe left per-class `- name` lines at every level), and shallow (floor
-  −17%; an 8k budget was unreachable). The new ladder (measured per-level
-  on the reference corpus): L1 coverage edges (−5%), L2 helper signatures
-  (−8%), L3 all private inventories (−8%, bug fixed), L4 chains of
-  *untested* functions (−6%, replaces the no-op), L5 methods of types with
-  zero real fan-in (−3%, replaces the name-keyed heuristic), L6 all chains
-  (−4%), L7 the **skeleton** — no method lines, const values gone, type
-  headers with fields and top-level signatures stay (−21%). Floor on the
-  reference corpus: **7,138 tokens, −54%** from the full map. Every level
-  is monotone; facts degrade in usefulness order; the legend only explains
-  what survived; nothing is ever cut mid-fact.
+  The old ladder had ineffective transitions, retained private fragments, and
+  could miss practical budgets. The new ladder removes coverage edges, helper
+  signatures, private inventories, untested call chains, zero-fan-in methods,
+  remaining chains, and finally non-entrypoint method lines. The skeleton keeps
+  type headers with fields, external entrypoints, top-level signatures, const
+  names, and test filenames. Nothing is cut mid-fact. (0.9.1 corrects selection
+  for disclosure text that can make a deeper complete candidate larger.)
 - **Const values survive to the skeleton, and degraded maps disclose
-  their losses.** The first gate round dropped const values at L1 — the
-  smallest saving (−0.3%) — and produced the worst failure: agents
-  confidently answered value questions off a map that silently omitted
-  the values. Now scalars ride to L7, and every degraded map carries a
+  their losses.** Scalars ride through L6, with their names retained at L7,
+  and every degraded map carries a
   header disclosure naming the dropped fact classes with an instruction
-  to read the source instead of guessing — measured to flip wrong
-  zero-read route answers into correct one-read answers.
+  to read the source instead of guessing.
 - The budget ladder no longer re-reads every source file per level
   (level-invariant work — LOC count, call resolution, helper detection —
   is computed once).
@@ -57,47 +192,39 @@ stamp).
 - Benchmark task files accept a top-level `budget`, applied to the
   map-bearing conditions' build.
 
-### Gates (measured before merge)
+### Validation
 
-- Determinism, monotonicity, floor reachability: pass (numbers above).
-- Refactor invariance: unbudgeted digests identical to v0.8.0 on the
-  reference corpus, this repo, and the polyglot fixtures.
-- Navigation at the skeleton floor: see benchmark/README.md.
+- Determinism, fact-order degradation, and skeleton reachability are covered by
+  regression tests.
 
 ## [0.8.0] - 2026-08-14
 
-Theme: cheaper without being smaller. Every change was built behind a
-measured merge gate (see benchmark/README.md); one feature — pre-commit
-review timing — was built, measured, and reverted for showing no
-behavioral gain.
+Theme: cheaper without being smaller. A pre-commit review variant was reverted
+before release; the post-commit form remains.
 
 ### Changed
 
-- **Token diet, same facts** — three same-fact-twice redundancies removed
-  (reference corpus −3.7%, self −0.7%, zero information loss):
+- **Token diet** — three repeated representations removed:
   constructors whose argument list restates the type header's field list
   (`PricingEngine(basePrices)` under `PricingEngine(C{basePrices})`) are
   suppressed, including the grouped `Self(fields)` form — any constructor
   carrying notes, ✓, sizes, throws, calls, or typed args stays; dunder
   methods (`__init__`, `__repr__`) leave the private inventories;
   the test index folds a file whose only test class matches its name
-  (`PricingEngineTest>applyDelta+2`, no braces) and states a shared file
+  (`ThemeTest>loadTheme+2`, no braces) and states a shared file
   extension once in the header (`? tests ·.java`).
 - **The `· deps` block is gone.** It was a coarser restatement of the call
   chains, degenerated on shallow repos, and outlived richer facts under
-  `--budget`. Gate evidence: all navigation/architecture answers stayed
-  correct at 1 turn without it.
+  `--budget`.
 - **Coaching sentence** now says what to do with review findings (reuse
   the named original, consolidate re-covered tests) instead of just naming
   the command.
 
-### Measured and reverted
+### Reverted
 
 - **Pre-commit review timing.** Review was moved to a pre-commit hook so
-  findings would land *before* the commit; the gate round showed the
-  reviewer firing identically — and, at low effort, agents acting on the
-  findings exactly as often as post-commit: never. The post-commit form
-  ships unchanged; the new `acted_on_findings` bench metric stays for 0.9.
+  findings would land *before* the commit. The post-commit form ships
+  unchanged; the `acted_on_findings` bench metric remains available.
 
 ### Dev
 
@@ -106,12 +233,9 @@ behavioral gain.
 
 ## [0.7.0] - 2026-08-14
 
-Theme: the map talks back. Until now the map was a passive briefing; the
-0.6.0 rounds showed the remaining failures happen at *write time* — an
-agent duplicates a helper or re-covers a tested path in the same session
-that read the map. `hologram review` closes that loop: a deterministic
-map-diff engine that runs from the post-commit hook, so its findings land
-inside the committing agent's own context.
+Theme: the map talks back. `hologram review` adds a deterministic map-diff
+engine that runs from the post-commit hook, so findings land inside the
+committing agent's own context.
 
 ### Added
 
@@ -121,10 +245,11 @@ inside the committing agent's own context.
   tests re-covering already-covered paths, dead-on-arrival public symbols,
   orphaned test references to deleted production code, an API drift
   summary, and placement advice when a new symbol's call affinity points at
-  a different module. Advisory only — always exits 0, prints nothing on a
-  clean diff with `--quiet-if-clean`. `--brief K` prints just the API drift
+  a different module. Findings are advisory and do not make a successful
+  invocation fail; invalid revisions and setup errors still exit nonzero.
+  A clean diff prints nothing with `--quiet-if-clean`. `--brief K` prints just the API drift
   of the last K commits. Findings are never embedded into context files —
-  the map stays a pure function of the tracked sources.
+  the map stays a pure function of tracked sources, generator, and settings.
 - **Review in the post-commit hook** — `init` now installs
   `build && review HEAD~1 --quiet-if-clean` after each commit, so a
   committing agent sees what its own commit drifted. Existing installs keep
@@ -146,11 +271,10 @@ inside the committing agent's own context.
 - Annotation arguments with string literals keep their interior spacing —
   `@DisplayName("a, b")` no longer extracts as `"a,b"`.
 
-### Dropped during the release round
+### Dropped before release
 
-- Class-level `@DisplayName` sub-lines in the test index were built,
-  measured at ~+7% map cost on a heavily annotated corpus with no
-  demonstrated behavioral benefit, and removed before shipping. The
+- Class-level `@DisplayName` sub-lines in the test index were built and removed
+  before shipping. The
   extraction (decorators on test classes) remains; only the rendering is
   gone. `review`'s *dead* check was de-noised in the same pass: a new
   public symbol that any test file mentions is treated as exercised even
@@ -162,15 +286,11 @@ inside the committing agent's own context.
   review hook) conditions, a `review_seen` transcript metric, and
   workspace confinement — every condition now uses a local clone with the
   origin remote removed, and absolute paths in corpus context files that
-  point outside the workspace are rewritten (an agent once followed one
-  into the real corpus).
+  point outside the workspace are rewritten.
 
 ## [0.6.0] - 2026-08-13
 
-Theme: the 0.5.0 benchmark findings become features. Measured misses —
-agents re-inventing an existing test driver (17/18 runs), blindly
-re-covering tested paths, and a saturated grep acceptance gate — each got
-a structural answer.
+Theme: test placement, helper reuse, and scope-aware benchmark judging.
 
 ### Added
 
@@ -188,8 +308,8 @@ a structural answer.
   classes referenced by two or more other test files.
 - **Benchmark scope judge** (dev-facing) — `expect_in_new_code` checks the
   workspace git diff for required collaborators in newly written code
-  (optionally test files only); grep acceptance saturated while scope
-  differences hid, so scope is now first-class.
+  (optionally test files only), making scope a first-class result alongside
+  command acceptance.
 - **Benchmark effort knob** (dev-facing) — `effort` per task file/task and
   `--effort` CLI, passed to the claude CLI natively or via a thinking-token
   mapping, no-op when unsupported.
@@ -199,9 +319,6 @@ a structural answer.
 - Self-map: every test class gains coverage edges; this repo has no helper
   classes, so no `*` lines should appear here — a surprise `*` line in a
   rebuild is a detector regression.
-- Token cost on the private measurement corpus: +6.4% digest against a +6%
-  planning estimate — accepted and documented; the additions are precisely
-  the facts the 0.5.0 round proved agents lack.
 - All maps generated by 0.5.0 go stale on upgrade; rebuild with
   `hologram build --root .`.
 
@@ -241,9 +358,10 @@ other languages now feed it.
 - **Benchmark harness** (dev-facing) — `expect_answer` regex grading of
   navigate-task answers, per-task `max_turns` (the short-vs-long-session
   dial), distinct-files-read metric, per-(condition, kind) report rows, and
-  `report --anon` for sharing runs over private corpora without leaking
-  symbol names; `benchmark/tasks/local-*.json` is gitignored for private
-  task files, and task files can pin a `lang` filter for condition-A maps.
+  `report --anon` for identifier-free local inspection;
+  `benchmark/tasks/local-*.json` is gitignored for private task files, and
+  task files can pin a `lang` filter for condition-A maps. Private results
+  still require explicit publication permission even when anonymized.
 
 ### Changed
 
@@ -268,11 +386,9 @@ other languages now feed it.
 
 ## [0.3.0] - 2026-08-13
 
-Theme: more business-logic semantics for fewer tokens. Every fact added in
-this release is paid for by lossless compression in the same release — the
-same sources render to ~3.5% fewer o200k tokens than 0.2.0 while now carrying
-routes, constants, implementor lists, and framework wiring. Small maps shrink
-much more (the pymini fixture: −42%).
+Theme: more business-logic semantics with compact rendering. Maps now carry
+routes, constants, implementor lists, and framework wiring while preserving
+lossless compression.
 
 ### Added
 
@@ -349,7 +465,8 @@ much more (the pymini fixture: −42%).
   throw extraction); Swift and Scala the Kotlin-level treatment (protocols /
   traits, inheritance, local-binding receiver resolution); Ruby gets untyped
   calls with `private`/`protected` section tracking.
-- **`hologram print`** — write the map to stdout without touching any file.
+- **`hologram print`** — write the map to stdout without modifying context or
+  source files (missing-parser bootstrap may create its managed environment).
 - **`hologram uninstall`** — remove the managed git-hook lines and strip the
   embedded map blocks (deleting the rule files hologram itself created);
   `--keep-blocks` limits it to hooks.
@@ -431,8 +548,8 @@ agents already read — so the shape of the code is in context from turn zero.
   grammar, hologram re-execs into a `.venv` next to itself, or offers to create
   one and install the grammars.
 - **Determinism** — no LLM, no timestamps, no unordered iteration in output:
-  the same sources always produce the same map, so a map diff always means the
-  code changed.
+  under a fixed Python/parser toolchain, the same sources always produce the
+  same map, so a map diff means the code changed.
 - **Benchmark harness** — `benchmark/bench.py` runs headless agent sessions
   over task sets in map-embedded vs. control workspaces and reports effort and
   reuse metrics.
@@ -440,7 +557,12 @@ agents already read — so the shape of the code is in context from turn zero.
   "hologram-map[grammars]"` for all parsers), or copy `hologram.py` into a repo
   and run it with plain `python3`.
 
-[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/lazymaniac/hologram/compare/v0.9.1...v0.10.0
+[0.9.1]: https://github.com/lazymaniac/hologram/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/lazymaniac/hologram/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/lazymaniac/hologram/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/lazymaniac/hologram/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/lazymaniac/hologram/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/lazymaniac/hologram/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/lazymaniac/hologram/compare/v0.3.0...v0.4.0

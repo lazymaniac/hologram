@@ -8,9 +8,10 @@ begins.
 
 It ships as a pip package and as a single runnable file (`hologram.pyz`). It
 installs its own parsers the first time it needs them,
-and git hooks keep the map up to date after every commit. Generation is fully
-deterministic — no LLM involved — so the same code always produces the same map,
-and a map diff always means the code changed.
+and git hooks keep the map up to date after every commit. Generation uses no
+LLM and is deterministic under a fixed Python/parser toolchain: the same
+sources, Hologram version, settings, runtime, and grammar versions produce the
+same map. Under those fixed inputs, a map diff means the code changed.
 
 The name: like a hologram, every fragment of the output carries the shape of the
 whole. Token cost stays low by choosing compact facts instead of truncating them.
@@ -39,16 +40,11 @@ whole. Token cost stays low by choosing compact facts instead of truncating them
 The map of a small Java fixture:
 
 ```
-# hologram · 186 LOC · state c2c8d84f0053
+# hologram · 186 LOC · state 2c3a5cf0b580
 · C/R/I{fields} E{values} · f(args):Ret > project calls · ?=tests · ×0=no static use · !E=throws · p{a,b}=pa,pb · :T=supers · sealed:A|B · ←A|B=implementors · Self=own type
 src
  App(C) ×0
   main(args) ×0 > PricingEngine,evaluate,OrderId.of,ItemId.of
- delta
-  AddOp,RemoveOp(R{nodeId})
-   weight():int ×0
-  DeltaOp(I) sealed:AddOp|RemoveOp
-   weight():int ×0
  engine
   OrderStatus(E{NEW,PAID,SHIPPED})
    isTerminal():boolean ×0
@@ -56,6 +52,7 @@ src
    quoteFor(order):Quote ×0
    supports(order):boolean ×0
   PricingEngine(C{basePrices})
+   PricingEngine(basePrices)
    quoteFor(order):Quote ×0 > evaluate
    supports(order):boolean ×0
    evaluate(order,items):Quote !UnknownItem > UnknownItemException,Quote
@@ -65,6 +62,11 @@ src
  ids
   ItemId,OrderId,UserId(R{value})
    of(raw):Self > Self
+ transport
+  Bicycle,Scooter(R{serial})
+   wheels():int ×0
+  Vehicle(I) sealed:Bicycle|Scooter
+   wheels():int ×0
 ? tests ·.java
  src/test
   PricingEngineTest{PricingEngineTest,BulkDiscounts}
@@ -102,8 +104,8 @@ any LLM:
   entry; `Self` stands for each member's own name in the methods they share.
 - **Markers**: `✓` = resolved call from a test · `~120` = the body is 120 lines ·
   `×0` = no statically observed project reference to a function/class/method
-  (framework entry points — route handlers, schedulers, listeners, Angular
-  lifecycle hooks — are exempt) · `!UnknownItem` = throws (`Exception` suffix
+  (external entry points — route handlers, schedulers, listeners, Angular
+  lifecycle hooks, and Make targets — are exempt) · `!UnknownItem` = throws (`Exception` suffix
   implied) · no `:Ret` = returns void · `» index.ts: A,B` = barrel re-exports.
 - **Private members** always appear as names. Repeated prefixes and suffixes
   factor losslessly: `_extract_{java,python,typescript}` and
@@ -114,13 +116,15 @@ any LLM:
   omitted because their names cost tokens without improving placement guidance.
   When every test file shares one extension it is stated once in the header
   (`? tests ·.java`), and a file whose only test class matches its name folds to
-  one token (`PricingEngineTest>applyDelta+2` — no braces).
+  one token (`ThemeTest>loadTheme+2` — no braces).
 - **Test helpers** — reusable drivers/builders/shared bases — render with a `*`
   sigil and, when referenced by other test files, their full public signatures:
   the reuse targets agents otherwise re-invent. Helpers living under directories
   named `fixtures`, `testdata`, or `resources` are never scanned (denylist).
-- **`state`** hashes the exact sources plus the generator, so source or extraction/
-  rendering changes make old maps stale.
+- **`state`** hashes the exact sources plus the generator, so source or Hologram
+  extraction/rendering changes make old maps stale. It does not fingerprint the
+  Python runtime or optional parser package versions; rebuild after upgrading
+  that toolchain even when `check` reports fresh.
 
 ## Languages
 
@@ -144,7 +148,7 @@ any LLM:
 | HTML | element ids and custom-element tags, plus nested `<script>`/`<style>` blocks run through the JS/CSS extractors (when those grammars are installed) |
 | CSS | class/id selectors, custom properties (`--x`), `@keyframes` names — names only |
 | Helm | template `define` names, `values.yaml` keys, chart name |
-| Makefile (`Makefile`, `*.mk`) | targets as commands with their caller-settable variables (`deploy(ENV,MANIFEST)` — vars the file pins with `=`/`:=` are internal and excluded); `.PHONY`/pattern rules skipped; `_name` = private |
+| Makefile (`Makefile`, `*.mk`) | targets as external commands with caller-settable recipe variables (`deploy(ENV,MANIFEST)`) and prerequisite call edges (`deploy > build`); ordinary `=`, `:=`, `+=`, and `?=` values are overridable, explicit `override` values are internal; repeated/double-colon rules merge; `.PHONY`/pattern rules skipped; `_name` = private |
 
 ## Getting started
 
@@ -187,17 +191,19 @@ hologram build --root . --lang java        # limit to one or more languages;
 hologram build --root . --if-stale         # rebuild only if the code changed
 hologram check --root .                    # is every context file current? exit 0 yes / 1 no
 hologram diff HEAD~3 --root .              # how did the API change since then?
-hologram review --root .                   # map-level drift check of uncommitted work
+hologram review --root .                   # map-level drift in tracked/staged work
 hologram review HEAD~3 --root .            # …or of the last three commits
-hologram print --root .                    # write the map to stdout, touch nothing
+hologram review --root . --json            # stable finding IDs for automation
+hologram print --root .                    # stdout only; context/source files stay untouched
 hologram build --root . --budget 8000      # fit the map into a token budget
+hologram stats --root . --budget 8000      # inspect that decision; add --json for tooling
 hologram uninstall --root .                # remove the hooks and embedded blocks
 ```
 
 (Substitute `python3 hologram.pyz` or `python3 hologram.py` for `hologram` when
 running the single-file form.)
 
-A successful build prints the map's token cost and where it went:
+A successful build prints the map's estimated token cost and where it went:
 
 ```
 hologram: 1193 tokens embedded in CLAUDE.md, AGENTS.md
@@ -261,138 +267,97 @@ revision (default `HEAD`) and reports what drifted:
   class already covers;
 - **dead on arrival** — a new public symbol with zero static references;
 - **orphaned tests** — a test still naming production code this change deleted;
-- **API drift** — `+added −removed ~changed` in one line (`--brief K` prints just
-  this for the last K commits);
+- **API drift** — `+added −removed ~changed` in one line across public symbol
+  kinds, overloads, callable signatures, fields, relationships, mapped
+  routes/annotations, throws, constructors, and constants (`--brief K` prints
+  just this for the last K commits);
 - **placement** — a new symbol whose calls point overwhelmingly at a different
   module than the one it landed in.
 
-Everything is advisory: `review` always exits 0, and `--quiet-if-clean` prints
-nothing when there's nothing to say. `init` wires it into the post-commit hook,
+Findings are advisory and do not change a successful invocation's exit status;
+invalid revisions or setup failures still exit nonzero. `--quiet-if-clean`
+prints nothing when there's nothing to say, and `--json` exposes stable finding IDs and
+structured metadata for harnesses that verify whether a finding remains in the
+final state. Review JSON includes source paths, subjects, details, and
+corpus-derived IDs; do not publish it without explicit authorization from the
+corpus owner. `init` wires review into the post-commit hook,
 which is the interesting part: when a *coding agent* commits, the findings print
 into the agent's own session — the map answers back at exactly the moment the
 mistake is cheapest to undo. Findings are heuristic (name similarity, call
 affinity), so expect the occasional false positive; they point, you decide.
-(A pre-commit timing variant was built and measured: findings fired identically
-but changed agent behavior no more than post-commit, so the simpler
-known-quantity form stays.) Foreign hook scripts that `exec` another tool will
-skip an appended hologram line — a limitation every appended hook line has.
+Foreign hook scripts that `exec` another tool will skip an appended hologram
+line — a limitation every appended hook line has.
 
-Review output is never embedded into context files — the embedded map stays a pure
-function of the tracked sources, so a map diff always means the code changed.
+Review output is never embedded into context files — under a fixed runtime/parser
+toolchain, the embedded map stays a pure function of tracked sources plus the
+Hologram version and settings. Review scans
+Git-indexed files; use `git add -N path/to/new-file` before reviewing a wholly
+untracked addition.
 
 ## Fitting a token budget
 
-The map is already compact (facts are chosen, never truncated), but if you need a
-hard ceiling, `--budget N` applies a deterministic degradation ladder, dropping one
-whole fact category per level and stopping at the first level that fits. Measured
-on a private reference corpus (15.7k-token map):
+The map is already compact (facts are chosen, never truncated), but `--budget N`
+can target an estimated ceiling with a deterministic degradation ladder. Budget,
+fit, and utilization use the dependency-free `ceil(characters / 4)` estimate;
+they are deterministic planning values, not a hard limit from a model tokenizer.
+Hologram compares
+the complete candidates — stamp, legend, disclosure, and facts — and selects the
+least-degraded one that fits:
 
-| level | drops | saved |
-|---|---|---|
-| L1 | test-index coverage edges | ~5% |
-| L2 | test-helper method signatures | ~8% |
-| L3 | private-name inventories | ~8% |
-| L4 | call chains of untested functions | ~6% |
-| L5 | methods of types nothing references | ~3% |
-| L6 | all remaining call chains | ~4% |
-| L7 | all method lines and const values — the **skeleton**: type headers with fields, top-level signatures, const names, test file names | ~21% |
+| level | drops |
+|---|---|
+| L1 | test-index coverage edges |
+| L2 | test-helper method signatures |
+| L3 | private-name inventories |
+| L4 | call chains of untested functions |
+| L5 | methods of types with zero static fan-in, except external entrypoints |
+| L6 | all remaining call chains |
+| L7 | non-entrypoint method lines and const values — the **skeleton**: type headers with fields, external route/listener/Make commands, top-level signatures, const names, test file names |
 
-The skeleton landed at **−54%** of the full map on that corpus. The applied level is
+The applied level is
 stamped in the header (`· budget 8000 L2`) and reused by every later rebuild until
 you clear it with `--budget 0`; the same code and budget always produce the same
 map, and the legend only explains notation that survived. Facts degrade in
-usefulness order — untested paths lose chains before tested ones, unreferenced
-types lose methods before referenced ones, and high-value scalars (const values)
-ride all the way to the skeleton because dropping them early was measured to make
-agents guess. Every degraded map carries a disclosure line naming exactly which
+usefulness order — untested paths lose chains before tested ones, cold types lose
+methods before referenced ones, and externally invoked routes, listeners, and Make
+targets survive every level. High-value scalar values ride through L6 and their
+names remain in the skeleton. Every degraded map carries a disclosure line naming exactly which
 fact classes were dropped, with an instruction to read the source instead of
-guessing — measured to flip wrong zero-read answers into correct one-read answers
-for route questions, though a terse "just give me the value" prompt can still
-tempt a low-effort model into guessing at the skeleton. If even the skeleton
-exceeds the budget, the map is emitted anyway with a warning suggesting `--lang`
+guessing. Disclosure text can make a deeper candidate larger on tiny maps;
+selection therefore uses total size, not level order. If no complete candidate
+fits, the smallest candidate is emitted with a warning suggesting `--lang`
 filters — hologram never cuts a fact in half.
 
-## Does it actually help? An honest take
+When a complete level fits, Hologram uses remaining room to restore whole facts
+from the next quality boundary. It tries smaller rendered payloads first within
+each semantic category and interleaves categories deterministically, so a long
+high-priority fact cannot consume the search cap without testing small facts in
+the other categories. Adaptive output is stamped `A<level>` (for example,
+`· budget 8000 A3`), while `stats` reports its exact selection and effective
+detail. Selection stops once the
+complete map is within one percent of the target or reaches its fixed trial
+bound, keeping post-commit rebuild time predictable on large repositories.
+`hologram stats --budget N` explains the choice without modifying context or
+source files (missing-parser bootstrap may still create its managed environment);
+`--json` includes the policy version, full/selected/skeleton estimates, fit and
+utilization, effective detail, retained/dropped bundle IDs, trial count, search
+truncation, and stop reason. Bundle IDs contain source paths and symbols, so
+treat JSON statistics as corpus-derived data rather than publication-safe output.
 
-hologram exists because of one specific failure: an agent lands in a repo with no
-map, greps its way to a partial picture, and writes code that already exists.
+## Evaluating effectiveness
 
-**The good.** An agent normally burns thousands of tokens re-discovering project
-structure every single session, and most of what it reads gets discarded. The map
-replaces that exploration. Duplication gets a real counterweight: "does this already
-exist?" becomes something the agent can see rather than something it only catches by
-grepping the exact right word. And because the map shows your conventions — all your
-ID types are one-field records, your services take dependencies through constructors —
-a model tends to extend the patterns it sees rather than invent parallel ones. Factored
-private names, concise call lines, and the test index tell it which file to open first
-without a raw symbol dump.
+Hologram targets a common failure mode: an agent develops a partial picture of
+a repository and writes code that already exists. The map gives duplication a
+counterweight and makes project structure available without a full exploratory
+scan. It remains context, not enforcement: agents can ignore it, bodies stay
+invisible, `✓` means a test references a symbol rather than proving correctness,
+and extraction depth varies by language.
 
-**The caveats.** None of this is enforced. The map competes for the model's
-attention like everything else in context, and an agent can ignore it and reimplement
-a helper anyway — it shifts the odds, it is not a guardrail. Function bodies stay
-invisible: a 500-line algorithm and a one-liner expose the same signature, so the
-map tells an agent what exists, never how well it's built. `✓` means a test
-mentions the function, not that the function is correct. If your naming is misleading,
-the map compresses and transmits the misleading names with perfect fidelity. Depth
-varies by language — the table above is honest about which ones get the full
-treatment.
-
-**What's been measured.** Two rounds on private codebases the models had never seen,
-map-in-context vs matched control, headless sessions, transcripts and written code
-reviewed ([full tables](benchmark/README.md)).
-
-*Navigation and lookup* (constants, implementors, route→handler): with the map the
-agent answers **in ~1 turn with zero file reads, straight off the map** — the control
-reaches the same answers in ~3.5 turns, 2 searches, and +80% input tokens. Both are
-100% correct; the map's win here is pure effort.
-
-*A long generative task across model tiers* (one 60-turn test-writing task, 3 reps ×
-map/control × haiku/sonnet/opus, all 18 runs passing acceptance):
-
-| model | map turns | control turns | saving |
-|---|---|---|---|
-| haiku | 33.7 | 48.0 | −30% |
-| sonnet | 28.3 | 37.0 | −24% |
-| opus | 26.7 | 34.0 | −21% |
-
-The saving replicates at every tier and grows as models get weaker; the map also
-*stabilizes* sessions (map runs varied by ±1–3 turns, control runs by ±10–17). A
-cheaper model with the map matched a stronger model without it on effort. The
-sharpest result was about quality, not speed: the task required testing a real
-implementation rather than a stub, and the mid-tier model did so in **1/3 control
-runs vs 3/3 map runs** — the map's implementor lists steered it to the right
-collaborator. The top tier didn't need the help (6/6 either way); the bottom tier
-couldn't use it (0/6 either way). The map changes what a mid-tier model *does*, not
-just how fast it does it.
-
-A follow-up round at pinned low effort on the 0.6.0 map (test helpers +
-coverage edges) produced the measurement program's only duplication event —
-in the weakest model's control condition, re-inventing a helper the map
-names; every map-equipped run reused it.
-
-A third round measured the 0.7.0 review loop (map vs map+coaching vs
-map+live post-commit review, two write-task shapes, sonnet + haiku, n=3):
-zero duplication in every map-bearing condition, and the reviewer fired on
-exactly the commits that drifted — naming the classes that already covered
-what a parallel test file re-covered, and flagging dead-on-arrival
-additions — while staying silent on clean commits. The honest half of the
-result: at low effort the weakest tier *read* the findings but didn't
-restructure already-committed work, and placement quality split by model
-tier, not by condition. The reviewer surfaces drift the moment it happens;
-what the agent does next still scales with capability.
-
-A fourth round gated the 0.8.0 changes feature by feature: the token diet and
-the deps-block removal shipped on measured evidence (map −3.7% on the
-reference corpus with all navigation answers still correct at 1 turn), while a
-pre-commit review-timing variant was built, measured, and **reverted** — the
-reviewer fired identically but agents acted on findings no more than they did
-post-commit, so the simpler form stayed. Caveats stay honest:
-one private corpus per round (numbers published, corpus withheld), n=3 per
-cell, quality judged on narrow task shapes. Classic
-AI-slop markers (mock storms, duplicate test bodies, comment chatter) were largely
-absent in *all* conditions — a strict corpus CLAUDE.md sets that floor, map or not.
-On a famous OSS corpus the model has memorized, expect no benefit at all — a control
-agent walks straight to the right API from training memory.
+The benchmark harness supports matched map/control experiments with immutable
+artifacts and revision-aware reports. Private-corpus prompts, transcripts,
+results, and derived aggregates are not published. See
+[benchmark/README.md](benchmark/README.md) for the privacy boundary and for
+instructions on running an authorized evaluation.
 
 ## How it works
 
@@ -405,11 +370,12 @@ Formatting decisions were measured with a real tokenizer (o200k), not guessed.
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests
+python3 tools/run_tests.py --profile core       # no optional grammars required
+.venv/bin/python tools/run_tests.py --profile full  # every grammar, zero skips
 ```
 
-Runs under plain `python3` too — tests for languages whose grammar isn't installed
-just skip.
+The full profile preflights every registered parser and fails on any unexpected
+skip, so a broken grammar install cannot silently turn CI green.
 
 ## License
 
