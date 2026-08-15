@@ -529,9 +529,14 @@ def run_cli(argv: list[str] | None = None) -> int:
         _uninstall(root, args.keep_blocks, args.quiet)
         return 0
     if args.cmd == "build" and args.if_stale and not stale:
-        if not args.quiet:
-            print("fresh, skipping rebuild")
-        return 0
+        # The state hash covers sources, not settings. A changed --budget
+        # leaves every stamp fresh, so without this the rebuild is skipped and
+        # the map silently keeps the previous budget. `check` deliberately
+        # stays source-only: its own --budget is an accept-and-ignore option.
+        if all(_digest_budget(embedded_digest(t)) == budget for t in targets):
+            if not args.quiet:
+                print("fresh, skipping rebuild")
+            return 0
     review_rev: str | None = None
     review_checks: frozenset[str] | None = None
     if args.cmd == "review":

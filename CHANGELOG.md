@@ -90,6 +90,28 @@ Theme: integrity before the next effectiveness experiment.
 
 ### Fixed
 
+- **Quoted Python annotations no longer break call chains.** A PEP 484 string
+  forward reference kept its quotes, so the declared type never matched its
+  class, receiver resolution failed, and the edge silently vanished from the
+  map — `def run(self, e: "Engine")` lost the `> evaluate` that
+  `def run(self, e: Engine)` kept. References now resolve, including nested
+  (`list["Engine"]`) and whole-string (`"Engine | None"`) forms, while
+  `Literal[...]` members and `Annotated[...]` metadata stay verbatim because
+  those strings are values, not type names.
+- **An unreadable source file no longer crashes the build.** `_gather` skipped
+  the `OSError` guard that `_state_hash` and `_total_loc` both have, so a
+  permission-denied or dangling-symlink file left `check` reporting stale
+  forever while `build` died on a traceback. Such a file is now skipped with a
+  warning — never silently.
+- **The legend no longer claims prefix factoring the map never used.** A type
+  header carrying fields (`Config(T{host,port})`) was not stripped before the
+  factoring check, so `p{a,b}=pa,pb` appeared spuriously and told readers to
+  expand `T{host,port}` into `Thost,Tport`. The `T{fields}` form is now
+  documented in the legend's own first clause.
+- **`build --if-stale` honours a changed `--budget`.** The state hash covers
+  sources, not settings, so a new budget left every stamp fresh and the
+  rebuild was skipped with the old budget still in place. `check` stays
+  source-only, since its own `--budget` is an accept-and-ignore option.
 - **Whole-map budget selection** now compares complete L0–L7 candidates,
   including their stamps, legends, and loss disclosures. It chooses the
   least-degraded candidate that fits; when none fits, it emits the actual

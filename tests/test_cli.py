@@ -330,6 +330,32 @@ class BudgetTest(unittest.TestCase):
         self.assertNotRegex(a.splitlines()[0], r"· budget 1 L\d")
         self.assertIn("smallest complete candidate is L0", err.getvalue())
 
+    def test_if_stale_rebuilds_when_only_the_budget_changed(self):
+        """The state hash covers sources, not settings.
+
+        `--if-stale` therefore has to compare the stored budget itself, or a
+        changed `--budget` is silently discarded and the map keeps the old one.
+        """
+        def stamp(root: Path) -> str:
+            return hologram.embedded_digest(
+                root / "CLAUDE.md").splitlines()[0]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--budget", "400", "--quiet"])
+            self.assertIn("· budget 400", stamp(root))
+
+            run_cli(["build", "--root", str(root), "--budget", "9000",
+                     "--if-stale", "--quiet"])
+            self.assertIn("· budget 9000", stamp(root))    # honoured
+
+            run_cli(["build", "--root", str(root), "--if-stale", "--quiet"])
+            self.assertIn("· budget 9000", stamp(root))    # recall, not reset
+
+            run_cli(["build", "--root", str(root), "--budget", "0",
+                     "--if-stale", "--quiet"])
+            self.assertNotIn("· budget", stamp(root))      # explicit clear
+
     def test_untested_chains_drop_before_tested(self):
         from hologram import build_digest
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import re
 
 from ..symbols import Symbol, _base_type, const_signature, tight_type
@@ -10,6 +11,64 @@ from ..symbols import Symbol, _base_type, const_signature, tight_type
 # ---------------------------------------------------------------------------
 
 _CONST_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+# Subscripts whose arguments are values rather than types: their string
+# members must never be read as forward references.
+_PY_VALUE_SUBSCRIPTS = ("Literal", "Annotated")
+
+
+def _py_subscript_head(node: ast.expr) -> str:
+    return (node.attr if isinstance(node, ast.Attribute)
+            else node.id if isinstance(node, ast.Name) else "")
+
+
+def _py_resolve_forward_refs(node: ast.expr) -> ast.expr:
+    """Replace PEP 484 string forward references with the types they name.
+
+    `def f(e: "Engine")` and `def f(e: Engine)` must produce identical type
+    text: the quoted form otherwise never matches its class, so `bindings`
+    cannot resolve the receiver and the call edge silently disappears from
+    the map. `Literal[...]` members and `Annotated[...]` metadata stay
+    verbatim — those strings are values, not type names.
+    """
+    if not any(isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+               for sub in ast.walk(node)):
+        return node  # the common case pays nothing
+
+    def resolve(current: ast.expr) -> ast.expr:
+        if isinstance(current, ast.Constant) and isinstance(current.value, str):
+            try:
+                parsed = ast.parse(current.value.strip(), mode="eval").body
+            except (SyntaxError, ValueError):
+                return current  # not a type expression; leave it alone
+            return resolve(parsed)
+        if isinstance(current, ast.Subscript):
+            current.value = resolve(current.value)
+            head = _py_subscript_head(current.value)
+            if head == "Literal":
+                return current
+            if head == "Annotated":
+                # only the first argument is a type; the rest is metadata
+                if isinstance(current.slice, ast.Tuple) and current.slice.elts:
+                    current.slice.elts[0] = resolve(current.slice.elts[0])
+                else:
+                    current.slice = resolve(current.slice)
+                return current
+        for field, value in ast.iter_fields(current):
+            if isinstance(value, ast.expr):
+                setattr(current, field, resolve(value))
+            elif isinstance(value, list):
+                setattr(current, field,
+                        [resolve(item) if isinstance(item, ast.expr) else item
+                         for item in value])
+        return current
+
+    return resolve(copy.deepcopy(node))
+
+
+def _py_annotation(node: ast.expr) -> str:
+    """Annotation text with forward references resolved and spacing tightened."""
+    return tight_type(ast.unparse(_py_resolve_forward_refs(node)))
+
 
 def _py_param_facts(node: ast.FunctionDef | ast.AsyncFunctionDef
                     ) -> tuple[list[str], list[str]]:
@@ -20,7 +79,7 @@ def _py_param_facts(node: ast.FunctionDef | ast.AsyncFunctionDef
         if arg is None or arg.arg in ("self", "cls"):
             return
         names.append(prefix + arg.arg)
-        types.append(tight_type(ast.unparse(arg.annotation)) if arg.annotation else "?")
+        types.append(_py_annotation(arg.annotation) if arg.annotation else "?")
 
     for arg in node.args.posonlyargs + node.args.args:
         add(arg)
@@ -67,7 +126,7 @@ def _py_bindings(node) -> dict[str, str]:
                 + ([node.args.vararg] if node.args.vararg else [])
                 + ([node.args.kwarg] if node.args.kwarg else [])):
         if arg.annotation is not None and arg.arg not in ("self", "cls"):
-            binds[arg.arg] = _base_type(ast.unparse(arg.annotation))
+            binds[arg.arg] = _base_type(_py_annotation(arg.annotation))
     for sub in ast.walk(node):
         if (isinstance(sub, ast.Assign) and len(sub.targets) == 1
                 and isinstance(sub.targets[0], ast.Name)
@@ -76,7 +135,7 @@ def _py_bindings(node) -> dict[str, str]:
                 and sub.value.func.id[:1].isupper()):
             binds[sub.targets[0].id] = sub.value.func.id
         elif (isinstance(sub, ast.AnnAssign) and isinstance(sub.target, ast.Name)):
-            binds[sub.target.id] = _base_type(ast.unparse(sub.annotation))
+            binds[sub.target.id] = _base_type(_py_annotation(sub.annotation))
     return binds
 
 
@@ -85,7 +144,7 @@ def _py_decorators(node) -> list[str]:
 
 
 def _py_fn_symbol(node, rel: str, container: str | None) -> Symbol:
-    returns = tight_type(ast.unparse(node.returns)) if node.returns else None
+    returns = _py_annotation(node.returns) if node.returns else None
     params, param_names = _py_param_facts(node)
     ret_suffix = f":{returns}" if returns and returns != "None" else ""
     return Symbol(
@@ -117,7 +176,7 @@ def _extract_python(text: str, rel: str) -> list[Symbol]:
             members = [t.targets[0].id for t in node.body
                        if isinstance(t, ast.Assign) and len(t.targets) == 1
                        and isinstance(t.targets[0], ast.Name)] if is_enum else []
-            field_types = [ast.unparse(t.annotation) for t in node.body
+            field_types = [_py_annotation(t.annotation) for t in node.body
                            if isinstance(t, ast.AnnAssign)]
             field_names = [t.target.id for t in node.body
                            if isinstance(t, ast.AnnAssign)

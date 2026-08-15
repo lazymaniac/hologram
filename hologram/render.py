@@ -896,7 +896,9 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
     a clause too few leaves notation unexplained); brace detection strips the
     always-explained type-header form `(K{` first so only factored/expansion
     braces trigger the `p{a,b}` clause."""
-    first = "C/R/I{fields}"
+    # a type alias renders both shapes: `T{a,b}` for an object literal and
+    # `T:target` for a plain alias, so each earns its clause independently
+    first = ("C/R/I/T{fields}" if "(T{" in text else "C/R/I{fields}")
     if "(E{" in text or "(E)" in text:
         first += " E{values}"
     if "(T:" in text:
@@ -921,7 +923,7 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
         items.append("@=route/annotation")
     if re.search(r"(?m)^\s*= ", text):
         items.append("= consts")
-    if "{" in re.sub(r"\([CRIE]\{| @\S+", "", text):
+    if "{" in re.sub(r"\([CRIET]\{| @\S+", "", text):
         items.append("p{a,b}=pa,pb")
     if re.search(r"\}[\w-]", text):
         items.append("{a,b}s=as,bs")
