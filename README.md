@@ -65,8 +65,9 @@ src
 · 186 LOC · state 0123456789ab
 ```
 
-The second line is generated with the map and explains only the notation it
-uses. The essentials are:
+The second line is generated with the map and explains its applicable core
+notation. Section-specific layout such as `? tests` is described below. The
+essentials are:
 
 - The tree mirrors the repository and names exact source files. Similar files
   may be grouped losslessly with braces.
@@ -74,11 +75,12 @@ uses. The essentials are:
   calls. `←` shows implementors.
 - `×0` means no static project reference was found; `!E` means a callable
   throws. These are navigation hints, not correctness claims.
-- `? tests` retains exact test files, suite names, and every recognized
-  function/method case name so an agent can inspect existing coverage before
-  recreating it. Same-file name collisions gain their suite owner. `*` marks
-  reusable test helpers; separate tool/benchmark landmarks stay compact. The
-  footer carries freshness and saved settings.
+- `? tests` retains a compact, reconstructable landmark for every detected
+  test file, plus suite names and every recognized function/method case name,
+  so an agent can inspect existing coverage before recreating it. Same-named
+  methods in different suites gain their suite owner. `*` marks reusable test
+  helpers; separate tool/benchmark landmarks stay compact. The footer carries
+  freshness and saved settings.
 
 ## Common commands
 
@@ -122,17 +124,18 @@ so treat it as repository-derived data.
 When a full map exceeds `--budget N`, Hologram starts with a compact semantic
 floor: retained business types, fields, and top-level signatures with exact
 file ownership, plus external entrypoints, test landmarks, and tool/benchmark
-orientation. Test-suite and function/method case names are default facts but
-can be dropped individually while their file landmarks remain. Hologram then
-restores ranked whole facts,
+orientation. Additional nonredundant test-suite and function/method labels are
+default facts but can be dropped individually while their file landmarks
+remain. Hologram then restores ranked whole facts,
 prioritizing tested and cross-file paths, widely used APIs, and breadth across
 files. If even the floor cannot fit, Hologram warns and emits the smallest
 complete candidate instead of cutting facts in half.
 
 The budget applies to the digest. `hologram stats` separately reports the
-wrapper, coaching text, and complete managed-context estimate. Estimates use
-`ceil(characters / 4)` for deterministic planning; they are not tokenizer
-counts from a particular model.
+wrapper, coaching text, and total managed-block estimate. `--warn-tokens`
+checks that managed block for `build`/`init`, while `print` checks its printed
+digest. Estimates use `ceil(characters / 4)` for deterministic planning; they
+are not tokenizer counts from a particular model.
 
 ## Language support
 
@@ -172,6 +175,8 @@ Hologram is static context, not proof:
   delete.
 - A test edge means a test references a symbol, not that the behavior is
   correct.
+- Test inventories are declaration-based. Cases named only through strings,
+  framework DSL calls, or macros are not extracted as function/method names.
 - Function bodies are summarized rather than embedded.
 - Extraction depth varies, and review findings can produce false positives.
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-08-16
+
 Theme: more business-logic signal per always-loaded token.
 
 ### Added
@@ -33,10 +35,11 @@ Theme: more business-logic signal per always-loaded token.
   only when the same exact target remains visible in a selected call chain.
 - Tests retain one actionable landmark per file plus compact coverage/helper hints.
   Every recognized test function/method name and suite is shown by default to
-  discourage duplicate coverage. Names are factored losslessly, same-file collisions
-  gain their suite owner, and every fact remains individually droppable when a tight
-  budget needs to preserve business logic first. Root `tools` and `benchmark` code gets
-  separate compact orientation instead of competing with business internals.
+  discourage duplicate coverage. Names are factored losslessly, same-named methods in
+  different suites gain their suite owner, and every additional nonredundant label
+  remains individually droppable when a tight budget needs to preserve business logic
+  first. Root `tools` and `benchmark` code gets separate compact orientation instead of
+  competing with business internals.
 - Volatile LOC, freshness state, filters, targets, and budget metadata moved to the
   final digest line. Existing header-form maps remain readable, while unchanged
   semantic prefixes can now be reused by prompt caches.
@@ -49,10 +52,11 @@ Theme: more business-logic signal per always-loaded token.
   names raises the deterministic full estimate from v0.10's 3,621 to about 8,260
   digest tokens and from 3,769 to about 8,370 managed-context tokens. This is an
   explicit duplicate-avoidance tradeoff; the compact floor still falls from about
-  1,444 to about 760, and explicit budgets can drop every test name independently.
-  Full-grammar fixture estimates remain below v0.10 managed-context baselines. These
-  are representation measurements, not a claim of improved model outcomes; the
-  earlier matched evaluation predates this test-inventory change.
+  1,444 to about 760, and explicit budgets can drop every additional test-name label
+  independently while keeping file landmarks. Full-grammar fixture estimates remain
+  below v0.10 managed-context baselines. These are representation measurements, not a
+  claim of improved model outcomes; the earlier matched evaluation predates this
+  test-inventory change.
 
 ## [0.10.0] - 2026-08-14
 
@@ -626,7 +630,8 @@ agents already read — so the shape of the code is in context from turn zero.
   "hologram-map[grammars]"` for all parsers), or copy `hologram.py` into a repo
   and run it with plain `python3`.
 
-[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/lazymaniac/hologram/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/lazymaniac/hologram/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/lazymaniac/hologram/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/lazymaniac/hologram/compare/v0.8.0...v0.9.0
