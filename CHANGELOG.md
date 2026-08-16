@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Theme: more business-logic signal per always-loaded token.
+
+### Added
+
+- **Semantic whole-fact budgeting v2.** Optional facts now compete globally above a
+  compact pushed floor. Tested and cross-file call paths, test-to-business edges,
+  high-fan-in APIs, and breadth across source files outrank local private leaves.
+  Method-call facts retain their owning method as a dependency, and every admission is
+  still checked by rendering the complete digest against the hard digest ceiling.
+- **Managed-context accounting.** CLI output, `stats`/`stats --json`, and benchmark
+  rows distinguish digest, wrapper, coaching, and total managed-block estimates. This
+  keeps the historical digest budget contract while exposing the full context cost an
+  agent actually receives.
+- **Inspectable selection reasons.** Budget statistics add deterministic retained and
+  dropped reason counts while preserving existing fields additively.
+
+### Changed
+
+- Production landmarks now resolve to exact files. Conventional one-type files retain
+  lossless cross-file shape grouping (`{A,B}.java(...)`), while multi-entity modules
+  use explicit file nodes.
+- Repeated names are factored in signatures, fields, relationships, re-exports, and
+  call targets only when the notation is shorter. A private inventory entry is omitted
+  only when the same exact target remains visible in a selected call chain.
+- Tests retain one actionable landmark per file plus compact coverage/helper hints;
+  ordinary test-class inventories are removed. Root `tools` and `benchmark` code gets
+  separate one-line-per-file orientation instead of competing with business internals.
+- Volatile LOC, freshness state, filters, targets, and budget metadata moved to the
+  final digest line. Existing header-form maps remain readable, while unchanged
+  semantic prefixes can now be reused by prompt caches.
+- The fixed embedding note and budget omission warning are shorter and make no claim
+  that an optional fact survived selection.
+
+### Validation
+
+- On Hologram's own repository, the deterministic estimate fell from 3,621 to about
+  1,700 digest tokens and from 3,769 to about 1,800 managed-context tokens; the compact
+  floor fell from about 1,444 to about 760. Full-grammar fixture estimates are
+  non-regressing at token granularity. These are representation measurements, not a
+  claim of improved model outcomes; matched semantic-task evaluation remains required.
+
 ## [0.10.0] - 2026-08-14
 
 Theme: make token choices and effectiveness experiments inspectable.

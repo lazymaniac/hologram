@@ -39,6 +39,20 @@ def _budget_above_level(root: Path, detail: int, slack: int) -> int:
     return budget
 
 
+def _first_budget_matching(root: Path, predicate):
+    """Find a tight fitting budget without coupling tests to rendered bytes."""
+    _, unlimited = build_digest_with_stats(root, budget=0)
+    start = max(1, unlimited.skeleton_tokens)
+    stop = max(start, unlimited.full_tokens) + 64
+    for budget in range(start, stop + 1):
+        # Searching crosses the no-complete-candidate boundary by design.
+        with contextlib.redirect_stderr(io.StringIO()):
+            digest, stats = build_digest_with_stats(root, budget=budget)
+        if stats.fits and predicate(digest, stats):
+            return digest, stats
+    raise AssertionError("no fitting budget satisfied the semantic predicate")
+
+
 def _write_twin_clients(root: Path, *, route: bool = True) -> None:
     """Synthetic ownership stress case; no external project lineage."""
     for file, prefix in (("one.py", "alpha"), ("two.py", "beta")):
@@ -60,7 +74,7 @@ def _write_twin_clients(root: Path, *, route: bool = True) -> None:
         (root / file).write_text("\n".join(lines))
 
 
-class AdaptiveBudgetGoldenTest(unittest.TestCase):
+class AdaptiveBudgetSemanticTest(unittest.TestCase):
     def test_boundary_packing_is_deterministic_complete_and_owner_safe(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -71,47 +85,149 @@ class AdaptiveBudgetGoldenTest(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(first_stats, second_stats)
-        self.assertEqual(first_stats.effective_detail, "L5-adaptive:1/40")
+        self.assertIn("-adaptive:", first_stats.effective_detail)
         self.assertEqual(first_stats.selected_tokens, estimate_tokens(first))
-        self.assertEqual(first_stats.selected_tokens, 115)
-        self.assertEqual(first_stats.skeleton_tokens, 116)
         self.assertLessEqual(first_stats.selected_tokens, 116)
-        self.assertGreater(first_stats.utilization, 0.99)
         self.assertTrue(first_stats.fits)
 
-        # Golden body: one whole method fact fits. No signature is shortened,
-        # no external route is sacrificed, and equal owner names stay split.
-        self.assertEqual(first.splitlines()[1:], [
-            "· C/R/I{fields} · f(args):Ret · ×0=no static use "
-            "· @=route/annotation",
-            "‥ budget dropped: test coverage edges, test-helper signatures, "
-            "private names, untested call chains, unreferenced types' methods "
-            "(partial) — the map no longer carries these facts; NEVER guess "
-            "them, read the source file first",
-            "one.py:Client(C)",
-            " health() @GET/health",
-            "two.py:Client(C) ×0",
-            " beta_operation_with_long_name_0(value):str ×0",
-        ])
-        self.assertIn("· budget 116 A5", first.splitlines()[0])
-        self.assertNotIn("alpha_operation_with_long_name_", first)
+        # Admitted facts remain complete, external routes survive, and equal
+        # owner names remain file-qualified. Equal-tier room spans both files.
+        self.assertIn("health() @GET/health", first)
+        self.assertIn("one.py\n Client(C)", first)
+        self.assertIn("two.py\n Client(C)", first)
         operation_lines = [line.strip() for line in first.splitlines()
                            if "operation_with_long_name" in line]
-        self.assertEqual(operation_lines,
-                         ["beta_operation_with_long_name_0(value):str ×0"])
+        self.assertTrue(operation_lines)
+        for line in operation_lines:
+            self.assertRegex(
+                line,
+                r"^(alpha|beta)_operation_with_long_name_\d+\(value\):str ×0$")
+        self.assertTrue(any(line.startswith("alpha_") for line in operation_lines))
+        self.assertTrue(any(line.startswith("beta_") for line in operation_lines))
 
         retained = first_stats.retained_bundles
         dropped = first_stats.dropped_bundles
-        self.assertEqual(len(retained), 1)
-        self.assertIn("two.py|python|Client|method|beta_", retained[0])
+        self.assertTrue(retained)
+        self.assertTrue(any("one.py|python|Client|method|alpha_" in item
+                            for item in retained))
+        self.assertTrue(any("two.py|python|Client|method|beta_" in item
+                            for item in retained))
         self.assertTrue(any("one.py|python|Client|method|alpha_" in item
                             for item in dropped))
-        self.assertEqual(first_stats.retained_categories,
-                         (("cold-methods", 1),))
-        self.assertEqual(first_stats.dropped_categories,
-                         (("cold-methods", 39),))
+        self.assertEqual(dict(first_stats.retained_reasons),
+                         {"public API": len(retained)})
 
-    def test_selected_private_inventory_keeps_whole_names(self):
+    def test_tested_and_cross_file_paths_precede_local_private_leaves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            (root / "pricing.py").write_text(
+                "def price(order):\n    return order\n")
+            (root / "checkout.py").write_text(
+                "from pricing import price\n\n"
+                "def checkout(order):\n    return price(order)\n")
+            (root / "inventory.py").write_text(
+                "def reserve(items):\n    return items\n")
+            leaves = "\n".join(
+                f"def _local_private_leaf_{index}_{'x' * 30}():\n"
+                f"    return {index}\n"
+                for index in range(8)
+            )
+            (root / "shipping.py").write_text(
+                "from inventory import reserve\n\n"
+                "def ship(items):\n    return reserve(items)\n\n" + leaves)
+            (root / "tests" / "test_checkout.py").write_text(
+                "from checkout import checkout\n\n"
+                "def test_checkout():\n    return checkout(object())\n")
+
+            semantic_digest, semantic_stats = _first_budget_matching(
+                root,
+                lambda _digest, stats: (
+                    dict(stats.retained_reasons).get("tested call path", 0) > 0
+                    and dict(stats.retained_reasons).get(
+                        "cross-file call path", 0) > 0
+                ),
+            )
+            _, private_stats = _first_budget_matching(
+                root,
+                lambda _digest, stats: (
+                    dict(stats.retained_reasons).get("private leaf", 0) > 0
+                ),
+            )
+
+        self.assertLess(semantic_stats.requested_budget,
+                        private_stats.requested_budget)
+        self.assertNotIn("private-names",
+                         dict(semantic_stats.retained_categories))
+        self.assertEqual(dict(semantic_stats.retained_reasons), {
+            "cross-file call path": 1,
+            "tested call path": 1,
+        })
+        self.assertIn("checkout(order) ✓ > price", semantic_digest)
+        self.assertIn("ship(items) ×0 > reserve", semantic_digest)
+
+    def test_selected_member_chain_keeps_owning_method_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            (root / "service.py").write_text(
+                "class CheckoutService:\n"
+                "    def checkout(self, order):\n"
+                "        return self.calculate_total(order)\n\n"
+                "    def calculate_total(self, order):\n"
+                "        return order\n\n"
+                "    def unused(self, order):\n"
+                "        return order\n")
+            (root / "tests" / "test_service.py").write_text(
+                "from service import CheckoutService\n\n"
+                "def test_checkout():\n"
+                "    return CheckoutService().checkout(object())\n")
+            digest, stats = _first_budget_matching(
+                root,
+                lambda _digest, value: any(
+                    bundle.startswith("tested-call-chains:")
+                    for bundle in value.retained_bundles),
+            )
+
+        chain = next(bundle for bundle in stats.retained_bundles
+                     if bundle.startswith("tested-call-chains:"))
+        key = chain.split(":", 1)[1]
+        self.assertTrue(any(
+            bundle in stats.retained_bundles
+            for bundle in (f"public-methods:{key}", f"cold-methods:{key}")
+        ))
+        self.assertIn("checkout(order) ✓ > calculate_total", digest)
+
+    def test_equal_tier_selection_preserves_breadth_across_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for file, owner in (("alpha.py", "Alpha"),
+                                ("beta.py", "Beta"),
+                                ("gamma.py", "Gamma")):
+                source = [f"class {owner}:"]
+                for index in range(5):
+                    source.extend([
+                        f"    def operation_{index}(self, value):",
+                        "        return value",
+                        "",
+                    ])
+                (root / file).write_text("\n".join(source))
+            _, stats = _first_budget_matching(
+                root,
+                lambda _digest, value: len([
+                    bundle for bundle in value.retained_bundles
+                    if bundle.startswith(("public-methods:", "cold-methods:"))
+                ]) >= 3,
+            )
+
+        members = [bundle for bundle in stats.retained_bundles
+                   if bundle.startswith(("public-methods:", "cold-methods:"))]
+        first_files = {bundle.split(":", 1)[1].split("|", 1)[0]
+                       for bundle in members}
+        self.assertEqual(len(members), 3)
+        self.assertEqual(first_files, {"alpha.py", "beta.py", "gamma.py"})
+
+    def test_selected_private_inventory_keeps_whole_names_without_duplication(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source: list[str] = []
@@ -126,17 +242,53 @@ class AdaptiveBudgetGoldenTest(unittest.TestCase):
                 "    return _long_private_helper_name_0()",
             ])
             (root / "app.py").write_text("\n".join(source))
-            digest, stats = build_digest_with_stats(root, budget=100)
+            digest, stats = _first_budget_matching(
+                root,
+                lambda candidate, value: (
+                    dict(value.retained_reasons).get("local call path", 0) > 0
+                    and dict(value.retained_reasons).get("private leaf", 0) > 0
+                    and "_long_private_helper_name_1×0" in candidate
+                ),
+            )
 
-        self.assertEqual(stats.effective_detail, "L3-adaptive:1/60")
-        self.assertLessEqual(estimate_tokens(digest), 100)
-        self.assertIn("- app.py: _long_private_helper_name_0\n", digest)
-        self.assertNotIn("_long_private_helper_name_1,", digest)
-        self.assertEqual(stats.retained_categories,
-                         (("private-names", 1),
-                          ("untested-call-chains", 1)))
-        self.assertEqual(stats.dropped_categories,
-                         (("private-names", 59),))
+        self.assertLessEqual(estimate_tokens(digest), stats.requested_budget)
+        self.assertEqual(digest.count("_long_private_helper_name_0"), 1)
+        self.assertIn("_long_private_helper_name_1×0", digest)
+        inventory = "\n".join(line for line in digest.splitlines()
+                              if line.startswith((" - ", "   ")))
+        self.assertNotIn("_long_private_helper_name_0", inventory)
+
+    def test_private_helper_remains_fallback_when_full_chain_cannot_fit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            public_targets = [
+                f"business_rule_with_long_name_{index:02d}"
+                for index in range(24)
+            ]
+            source = ["def _fallback():", "    return 1", ""]
+            for name in public_targets:
+                source.extend([f"def {name}():", "    return 1", ""])
+            source.extend([
+                "def run():",
+                "    return _fallback() + "
+                + " + ".join(f"{name}()" for name in public_targets),
+            ])
+            (root / "app.py").write_text("\n".join(source))
+            digest, stats = _first_budget_matching(
+                root,
+                lambda _digest, value: (
+                    dict(value.retained_categories).get("private-names", 0) > 0
+                    and "untested-call-chains"
+                    not in dict(value.retained_categories)
+                ),
+            )
+
+        self.assertIn(" - _fallback", digest)
+        run_line = next(line for line in digest.splitlines()
+                        if line.strip().startswith("run()"))
+        self.assertNotIn(" > ", run_line)
+        self.assertLessEqual(estimate_tokens(digest), stats.requested_budget)
+        self.assertTrue(stats.fits)
 
     def test_every_budget_that_holds_the_skeleton_is_a_hard_ceiling(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,10 +306,15 @@ class AdaptiveBudgetGoldenTest(unittest.TestCase):
 class BudgetStatsContractTest(unittest.TestCase):
     def test_stats_are_json_native_and_account_for_every_bundle(self):
         bundles = {
-            BudgetBundle(7, "public-methods", "a.py|A|run"),
-            BudgetBundle(3, "private-names", "a.py|_helper"),
+            BudgetBundle(7, "public-methods", "a.py|A|run",
+                         reason="cross-file API"),
+            BudgetBundle(3, "private-names", "a.py|_helper",
+                         reason="private leaf"),
         }
-        retained = {BudgetBundle(7, "public-methods", "a.py|A|run")}
+        retained = {
+            BudgetBundle(7, "public-methods", "a.py|A|run",
+                         reason="cross-file API"),
+        }
 
         stats = summarize_budget(
             requested_budget=50,
@@ -171,16 +328,18 @@ class BudgetStatsContractTest(unittest.TestCase):
         payload = stats.as_dict()
 
         self.assertEqual(json.loads(json.dumps(payload)), payload)
-        self.assertEqual(payload["policy_version"], "adaptive-bundles-v1")
+        self.assertEqual(payload["policy_version"], "adaptive-bundles-v2")
         self.assertEqual(payload["utilization"], 0.9)
         self.assertEqual(payload["retained_categories"], {"public-methods": 1})
         self.assertEqual(payload["dropped_categories"], {"private-names": 1})
+        self.assertEqual(payload["retained_reasons"], {"cross-file API": 1})
+        self.assertEqual(payload["dropped_reasons"], {"private leaf": 1})
         self.assertEqual(payload["selection_trials"], 0)
         self.assertFalse(payload["search_truncated"])
         self.assertEqual(len(payload["retained_bundles"])
                          + len(payload["dropped_bundles"]), 2)
 
-    def test_trial_cap_prefers_small_whole_facts_and_reports_search_state(self):
+    def test_trial_cap_reports_unfillable_slack_without_fake_utilization(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source: list[str] = []
@@ -202,10 +361,20 @@ class BudgetStatsContractTest(unittest.TestCase):
 
         self.assertIn("_z0", digest)
         self.assertLessEqual(stats.selected_tokens, 120)
-        self.assertGreaterEqual(stats.utilization, 0.9)
         self.assertLessEqual(stats.selection_trials, 128)
-        self.assertIn(stats.stop_reason,
-                      {"saturated", "trial-limit", "exhausted"})
+        self.assertTrue(stats.search_truncated)
+        self.assertEqual(stats.stop_reason, "trial-limit")
+        self.assertTrue(stats.dropped_bundles)
+        # `_z0` may remain a dropped fallback bundle because its retained call
+        # chain already renders the name. Every unrepresented remainder is too
+        # large to fit the slack as one whole fact.
+        unrepresented = [bundle for bundle in stats.dropped_bundles
+                         if "|_z0|" not in bundle]
+        self.assertTrue(all("_oversized_private_fact_" in bundle
+                            for bundle in unrepresented))
+        oversized_name = f"_oversized_private_fact_0_{'x' * 120}"
+        self.assertLess(120 - stats.selected_tokens,
+                        estimate_tokens(oversized_name))
 
     def test_resolved_payload_ranking_reaches_small_chain_before_cap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -242,10 +411,11 @@ class BudgetStatsContractTest(unittest.TestCase):
         self.assertIn("> target_unique", z_line)
         self.assertGreater(stats.selected_tokens, base_tokens)
         self.assertLessEqual(stats.selected_tokens, budget)
-        self.assertEqual(stats.selection_candidates, 129)
+        self.assertGreaterEqual(stats.selection_candidates, 129)
+        self.assertLessEqual(stats.selection_trials, 128)
         self.assertTrue(stats.search_truncated)
 
-    def test_trial_cap_does_not_starve_lower_cost_category(self):
+    def test_smaller_whole_facts_fill_tier_before_oversized_methods(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = [f"VALUE_{index} = {index}" for index in range(20)]
@@ -268,13 +438,15 @@ class BudgetStatsContractTest(unittest.TestCase):
             digest, stats = build_digest_with_stats(root, budget=budget)
 
         retained = dict(stats.retained_categories)
-        self.assertEqual(retained.get("const-values"), 20)
+        self.assertGreater(retained.get("const-values", 0), 0)
         self.assertNotIn("public-methods", retained)
         self.assertIn("0=0", digest)
+        self.assertEqual(dict(stats.retained_reasons).get("business constant"),
+                         retained["const-values"])
+        self.assertIn("public API", dict(stats.dropped_reasons))
         self.assertGreater(stats.selected_tokens, base_tokens)
         self.assertLessEqual(stats.selected_tokens, budget)
-        self.assertEqual(stats.selection_candidates, 160)
-        self.assertTrue(stats.search_truncated)
+        self.assertGreaterEqual(stats.selection_candidates, 160)
 
     def test_suppressed_record_constructor_is_not_counted_as_a_bundle(self):
         symbols = [

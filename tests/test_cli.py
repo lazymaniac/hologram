@@ -40,6 +40,13 @@ class CliOptionSurfaceTest(unittest.TestCase):
         self.assertNotIn("--budget", diff)
         self.assertNotIn("--target", diff)
 
+    def test_push_only_surface_has_no_pull_query_command(self):
+        import contextlib
+        import io
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                run_cli(["query"])
+
 
 def _make_repo(tmp: Path) -> Path:
     repo = tmp / "repo"
@@ -326,8 +333,8 @@ class BudgetTest(unittest.TestCase):
         # On this tiny fixture every disclosure-bearing degraded map is larger
         # than L0, so the correct impossible-budget fallback is the full map.
         self.assertIn("MAX_RETRIES=3", a)
-        self.assertIn("· budget 1", a.splitlines()[0])
-        self.assertNotRegex(a.splitlines()[0], r"· budget 1 L\d")
+        self.assertIn("· budget 1", a.splitlines()[-1])
+        self.assertNotRegex(a.splitlines()[-1], r"· budget 1 L\d")
         self.assertIn("smallest complete candidate is L0", err.getvalue())
 
     def test_if_stale_rebuilds_when_only_the_budget_changed(self):
@@ -337,8 +344,7 @@ class BudgetTest(unittest.TestCase):
         changed `--budget` is silently discarded and the map keeps the old one.
         """
         def stamp(root: Path) -> str:
-            return hologram.embedded_digest(
-                root / "CLAUDE.md").splitlines()[0]
+            return hologram.embedded_digest(root / "CLAUDE.md").splitlines()[-1]
 
         with tempfile.TemporaryDirectory() as tmp:
             root = self._proj(Path(tmp))
@@ -380,8 +386,8 @@ class BudgetTest(unittest.TestCase):
         self.assertNotIn("> target", unc)
 
     def test_levels_monotonic(self):
-        # monotonicity holds for the map body; the one-line budget
-        # disclosure in the header is bounded overhead that real corpora
+        # monotonicity holds for the map body; one-line budget disclosure
+        # beside the metadata footer is bounded overhead that real corpora
         # dwarf but a five-line fixture does not
         from hologram.gather import _gather
         from hologram.render import _MAX_LEVEL, render_simple
@@ -424,8 +430,8 @@ class BudgetTest(unittest.TestCase):
         self.assertNotIn(" > ", a)                 # no chains anywhere
         self.assertNotIn("- ", "\n".join(
             l for l in a.splitlines() if l.strip().startswith("- ")))
-        self.assertIn("· budget 1 L7", a.splitlines()[0])
-        self.assertNotIn("project calls", a.splitlines()[1])  # legend honest
+        self.assertIn("· budget 1 L7", a.splitlines()[-1])
+        self.assertNotIn("> calls", a.splitlines()[1])  # legend honest
 
     def test_floor_warning_only_below_skeleton(self):
         from hologram import build_digest, estimate_tokens
@@ -475,7 +481,7 @@ class BudgetTest(unittest.TestCase):
 
 class TargetOptionTest(unittest.TestCase):
     """--target restricts which context files carry the map; the restriction
-    is stamped into the header and recalled by flagless rebuilds."""
+    is stamped into metadata and recalled by flagless rebuilds."""
 
     def _proj(self, tmp: Path) -> Path:
         root = tmp / "p"
@@ -620,7 +626,7 @@ class TargetOptionTest(unittest.TestCase):
 
 
 class LangFilterPersistenceTest(unittest.TestCase):
-    """--lang is stamped into the map header and recalled by later commands."""
+    """--lang is stamped into map metadata and recalled by later commands."""
 
     def _proj(self, tmp: Path) -> Path:
         root = tmp / "p"
@@ -758,7 +764,8 @@ class PrintCommandTest(unittest.TestCase):
                 code = run_cli(["print", "--root", str(proj)])
             self.assertEqual(code, 0)
             self.assertIn("PricingEngine", out.getvalue())
-            self.assertIn("# hologram ·", out.getvalue())
+            self.assertTrue(out.getvalue().startswith("# hologram\n· "))
+            self.assertIn(" LOC · state ", out.getvalue().splitlines()[-1])
             after = sorted(p.relative_to(proj) for p in proj.rglob("*"))
             self.assertEqual(before, after)  # no CLAUDE.md created, nothing embedded
 

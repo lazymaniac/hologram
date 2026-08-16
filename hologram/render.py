@@ -48,6 +48,23 @@ def _is_production_symbol(symbol: Symbol) -> bool:
     return symbol.lang == "make" or not _is_test_path(symbol.file)
 
 
+def _source_role(rel: str) -> str:
+    """Stable coarse role for context-density decisions.
+
+    Only conventional repository-root directories are special.  A nested
+    package named ``tools`` may hold business code and therefore remains main.
+    """
+    if _is_test_path(rel):
+        return "tests"
+    parts = Path(rel).parts
+    first = parts[0].casefold() if len(parts) > 1 else ""
+    if first == "tools":
+        return "tools"
+    if first in ("benchmark", "benchmarks"):
+        return "benchmark"
+    return "main"
+
+
 def _tree_lines(payload_by_dir: dict[str, list[str]]) -> list[str]:
     """Render dir paths as a path-compressed trie: shared prefixes stated once.
     Payload lines carry their own relative indent; the trie adds depth indent."""
@@ -396,7 +413,7 @@ def _resolved_project_calls(symbols: list[Symbol]
 
 _MAX_LEVEL = 7  # deepest budget-ladder degradation level (the skeleton)
 
-_BUDGET_POLICY_VERSION = "adaptive-bundles-v1"
+_BUDGET_POLICY_VERSION = "adaptive-bundles-v2"
 _ADAPTIVE_MAX_TRIALS = 128
 # Slice of the cap the greedy pass may not spend, so the repair pass always
 # runs even when greedy packing exhausts its own allowance.
@@ -409,8 +426,7 @@ _BUNDLE_CATEGORY_ORDER = {
     "cold-methods": 3,
     "untested-call-chains": 4,
     "private-names": 5,
-    "helper-signatures": 6,
-    "test-coverage": 7,
+    "test-coverage": 6,
 }
 
 
@@ -427,6 +443,10 @@ class BudgetBundle:
     category: str
     key: str
     estimated_chars: int = field(default=0, compare=False)
+    source_file: str = field(default="", compare=False)
+    semantic_tier: int = field(default=99, compare=False)
+    distinct_file_fanin: int = field(default=0, compare=False)
+    reason: str = field(default="", compare=False)
 
     @property
     def name(self) -> str:
@@ -453,6 +473,8 @@ class BudgetStats:
     selection_candidates: int = 0
     search_truncated: bool = False
     stop_reason: str = "not-limited"
+    retained_reasons: tuple[tuple[str, int], ...] = ()
+    dropped_reasons: tuple[tuple[str, int], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         """Return only JSON-native values; ordering stays deterministic."""
@@ -473,6 +495,8 @@ class BudgetStats:
             "selection_candidates": self.selection_candidates,
             "search_truncated": self.search_truncated,
             "stop_reason": self.stop_reason,
+            "retained_reasons": dict(self.retained_reasons),
+            "dropped_reasons": dict(self.dropped_reasons),
         }
 
 
@@ -507,9 +531,15 @@ def _bundle_estimated_chars(category: str, symbol: Symbol,
     elif category == "test-coverage":
         parts = [symbol.name, *symbol.calls]
     else:
+        display_params = [
+            symbol.param_names[index]
+            if index < len(symbol.param_names) and symbol.param_names[index]
+            else param
+            for index, param in enumerate(symbol.params)
+        ]
         parts = [
             symbol.signature or symbol.name,
-            *symbol.params,
+            *display_params,
             symbol.returns or "",
             *symbol.raises,
             *symbol.decorators,
@@ -536,6 +566,10 @@ def summarize_budget(*, requested_budget: int | None, full_tokens: int,
     def categories(items: set[BudgetBundle]) -> tuple[tuple[str, int], ...]:
         return tuple(sorted(Counter(bundle.category for bundle in items).items()))
 
+    def reasons(items: set[BudgetBundle]) -> tuple[tuple[str, int], ...]:
+        return tuple(sorted(Counter(bundle.reason for bundle in items
+                                    if bundle.reason).items()))
+
     limited = requested_budget is not None and requested_budget > 0
     return BudgetStats(
         policy_version=_BUDGET_POLICY_VERSION,
@@ -554,19 +588,9 @@ def summarize_budget(*, requested_budget: int | None, full_tokens: int,
         selection_candidates=selection_candidates,
         search_truncated=search_truncated,
         stop_reason=stop_reason,
+        retained_reasons=reasons(retained),
+        dropped_reasons=reasons(dropped),
     )
-
-# level → human label for the in-map disclosure line (cumulative)
-_LEVEL_DROPS = (
-    (1, "test coverage edges"),
-    (2, "test-helper signatures"),
-    (3, "private names"),
-    (4, "untested call chains"),
-    (5, "unreferenced types' methods"),
-    (6, "all call chains"),
-    (7, "non-entrypoint method lines and const values"),
-)
-
 
 def _essential_method(symbol: Symbol) -> bool:
     """Methods whose names/signatures are part of an external calling surface.
@@ -649,57 +673,78 @@ def _decorator_notes(decorators: list[str], lang: str = "") -> list[str]:
 _PRIVATE_SEPARATORS = "_./-"
 
 
-def _factored_name_tokens(names: list[str]) -> list[str]:
+def _factored_name_tokens(names: list[str], *, dedupe: bool = True) -> list[str]:
     """Losslessly factor repeated prefixes (`p{a,b}`=pa,pb) and suffixes
-    (`{a,b}s`=as,bs) when bytes strictly shrink. Suffix boundaries are a
-    separator char or a lower→upper camel step; ×0-marked names never join
-    suffix groups (the marker must stay outermost)."""
-    ordered = list(dict.fromkeys(names))
-    remaining = set(range(len(ordered)))
-    groups: list[tuple[int, str, str, list[int]]] = []
-    while True:
-        candidates: dict[tuple[str, str], list[int]] = {}
-        for index in remaining:
-            base = ordered[index].removesuffix("×0")
-            for pos, char in enumerate(base):
-                prefix = base[:pos + 1]
-                if (char in _PRIVATE_SEPARATORS
-                        and any(c not in _PRIVATE_SEPARATORS for c in prefix)):
-                    candidates.setdefault((prefix, ""), []).append(index)
-            if base != ordered[index]:
+    (`{a,b}s`=as,bs) when bytes strictly shrink. Only contiguous runs factor,
+    so parameters, fields, enum values, and calls retain order. Marked and
+    unmarked names never mix; a shared ×0 marker stays outside the expansion.
+    ``dedupe=False`` additionally preserves repeated sequence elements."""
+    ordered = list(dict.fromkeys(names)) if dedupe else list(names)
+
+    def parts(value: str) -> tuple[str, str]:
+        return ((value.removesuffix("×0"), "×0")
+                if value.endswith("×0") else (value, ""))
+
+    candidate_indexes: dict[tuple[str, str, str], list[int]] = {}
+    for index, value in enumerate(ordered):
+        base, marker = parts(value)
+        for pos, char in enumerate(base):
+            prefix = base[:pos + 1]
+            if (char in _PRIVATE_SEPARATORS
+                    and any(c not in _PRIVATE_SEPARATORS for c in prefix)):
+                candidate_indexes.setdefault(
+                    (prefix, "", marker), []).append(index)
+        for pos in range(1, len(base)):
+            if (base[pos] in _PRIVATE_SEPARATORS
+                    or (base[pos].isupper() and base[pos - 1].islower())):
+                suffix = base[pos:]
+                if any(c not in _PRIVATE_SEPARATORS for c in suffix):
+                    candidate_indexes.setdefault(
+                        ("", suffix, marker), []).append(index)
+
+    choices: list[tuple[int, int, int, str, str, str, tuple[int, ...], str]] = []
+    for (prefix, suffix, marker), indexes in candidate_indexes.items():
+        # Split matching names into original-order contiguous runs. Removing a
+        # name between two matches and grouping across the gap would reorder a
+        # call chain or signature.
+        runs: list[list[int]] = []
+        for index in indexes:
+            if not runs or index != runs[-1][-1] + 1:
+                runs.append([index])
+            else:
+                runs[-1].append(index)
+        for run in runs:
+            if len(run) < 2:
                 continue
-            for pos in range(1, len(base)):
-                if (base[pos] in _PRIVATE_SEPARATORS
-                        or (base[pos].isupper() and base[pos - 1].islower())):
-                    suffix = base[pos:]
-                    if any(c not in _PRIVATE_SEPARATORS for c in suffix):
-                        candidates.setdefault(("", suffix), []).append(index)
-        choices: list[tuple[int, int, str, str, list[int]]] = []
-        for (prefix, suffix), indexes in candidates.items():
-            indexes = sorted(set(indexes))
-            if len(indexes) < 3:
+            middles = []
+            for index in run:
+                base, _ = parts(ordered[index])
+                end = len(base) - len(suffix) if suffix else len(base)
+                middles.append(base[len(prefix):end])
+            # Keep expansion readable: factor one identifier segment, not a
+            # bag of already-qualified paths such as `Sample.{a:X,B.y}`.
+            if not all(re.fullmatch(r"[\w$-]+", middle) for middle in middles):
                 continue
-            plain = ",".join(ordered[i] for i in indexes)
-            inner = ",".join(
-                ordered[i][len(prefix):len(ordered[i]) - len(suffix)]
-                for i in indexes)
-            compact = prefix + "{" + inner + "}" + suffix
+            compact = prefix + "{" + ",".join(middles) + "}" + suffix + marker
+            plain = ",".join(ordered[index] for index in run)
             saving = len(plain.encode()) - len(compact.encode())
             if saving > 0:
-                choices.append((saving, len(prefix) + len(suffix),
-                                prefix, suffix, indexes))
-        if not choices:
-            break
-        _, _, prefix, suffix, indexes = min(
-            choices, key=lambda item: (-item[0], -item[1], item[2], item[3]))
-        groups.append((min(indexes), prefix, suffix, indexes))
-        remaining.difference_update(indexes)
-    tokens = [(index, ordered[index]) for index in sorted(remaining)]
-    for first, prefix, suffix, indexes in groups:
-        inner = ",".join(ordered[i][len(prefix):len(ordered[i]) - len(suffix)]
-                         for i in indexes)
-        tokens.append((first, prefix + "{" + inner + "}" + suffix))
-    return [value for _, value in sorted(tokens)]
+                choices.append((saving, len(prefix) + len(suffix), run[0],
+                                prefix, suffix, marker, tuple(run), compact))
+
+    claimed: set[int] = set()
+    replacements: dict[int, str] = {}
+    for _, _, first, prefix, suffix, marker, run, compact in sorted(
+            choices,
+            key=lambda item: (-item[0], -item[1], item[2], item[3],
+                              item[4], item[5])):
+        if any(index in claimed for index in run):
+            continue
+        claimed.update(run)
+        replacements[first] = compact
+    return [replacements[index] if index in replacements else value
+            for index, value in enumerate(ordered)
+            if index not in claimed or index in replacements]
 
 
 def _private_lines(prefix: str, names: list[str], width: int = 120) -> list[str]:
@@ -719,33 +764,15 @@ def _private_lines(prefix: str, names: list[str], width: int = 120) -> list[str]
     return lines
 
 
-def _braced_lines(label: str, names: list[str], width: int = 120) -> list[str]:
-    if not names:
-        return [label]
-    prefix = label + "{"
-    continuation = " " * len(prefix)
-    lines: list[str] = []
-    current = prefix
-    for name in _factored_name_tokens(names):
-        candidate = current + ("," if current != prefix else "") + name
-        if len(candidate) + 1 > width and current != prefix:
-            lines.append(current + ",")
-            current = continuation + name
-        else:
-            current = candidate
-    lines.append(current + "}")
-    return lines
-
-
 def _helper_class_ids(symbols: list[Symbol],
                       file_tokens: dict[str, set[str]] | None) -> dict[int, bool]:
     """Test-support classes worth surfacing: reusable drivers, builders, and
     shared bases that agents otherwise re-invent. A class qualifies when
     (a) it lives on a test path only through its directory — the file isn't
     test-named and neither is the class — or (b) two or more *other* test
-    files reference it by name. The value says whether the class earns full
-    method signatures: only helpers actually referenced from another test
-    file do; unreferenced ones render name-only."""
+    files reference it by name. Values retain the v0.10 mapping shape for
+    internal callers; compact rendering uses membership only and emits the
+    helper name on its file landmark, never its implementation internals."""
     ids: dict[int, bool] = {}
     ref_counts: dict[str, int] = {}
     make_files = {s.file for s in symbols if s.lang == "make"}
@@ -755,7 +782,7 @@ def _helper_class_ids(symbols: list[Symbol],
 
     def refs(name: str, own_file: str) -> int:
         if not file_tokens:
-            return 1  # no reference data: keep full signatures
+            return 1  # no reference data: conservatively keep the helper name
         if name not in ref_counts:
             ref_counts[name] = sum(1 for f in test_files
                                    if f != own_file and name in file_tokens[f])
@@ -777,7 +804,7 @@ def _helper_class_ids(symbols: list[Symbol],
     return ids
 
 
-_EDGE_CAP = 1  # coverage-edge targets shown per test class; rest summarize to +N
+_EDGE_CAP = 1  # coverage-edge targets shown per test file; rest summarize to +N
 
 
 def _informative_targets(owner: str, targets: list[str]) -> list[str]:
@@ -817,75 +844,56 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       resolved_calls: dict[int, list[str]] | None = None,
                       helper_ids: dict[int, bool] | None = None,
                       sig_line=None) -> list[str]:
+    """Compact test orientation: one file landmark, optional business edge.
+
+    Ordinary test classes restate filenames and consume permanent context
+    without improving implementation choices.  Reusable helpers remain named,
+    but their internals stay in source.  ``sig_line`` remains accepted for
+    source compatibility with callers from v0.10.
+    """
     make_files = {s.file for s in symbols if s.lang == "make"}
-    test_paths = sorted(
-        str(path.relative_to(root)) for path in files
-        if (_is_test_path(str(path.relative_to(root)))
-            and str(path.relative_to(root)) not in make_files))
+    test_paths: list[str] = []
+    for path in files:
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:
+            rel = str(path)
+        if _is_test_path(rel) and rel not in make_files:
+            test_paths.append(rel)
+    test_paths.sort()
     if not test_paths:
         return []
-    classes: dict[str, list[str]] = {}
-    # (file, class) -> production symbols the class's methods resolve to; the
-    # per-class view of the same edges the ✓ marker flattens
-    edges: dict[tuple[str, str], list[str]] = {}
+    edges: dict[str, list[str]] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
-        if symbol.lang == "make" or not _is_test_path(symbol.file):
+        if (symbol.lang == "make" or not _is_test_path(symbol.file)
+                or symbol.kind not in ("fn", "method", "ctor")
+                or not resolved_calls):
             continue
-        if symbol.kind == "class":
-            names = classes.setdefault(symbol.file, [])
-            if symbol.name not in names:
-                names.append(symbol.name)
-        elif symbol.kind in ("fn", "method", "ctor") and resolved_calls:
-            key = (symbol.file, symbol.container or "")
-            merged = edges.setdefault(key, [])
-            merged[:] = list(dict.fromkeys(
-                merged + resolved_calls.get(id(symbol), [])))
+        merged = edges.setdefault(symbol.file, [])
+        merged[:] = list(dict.fromkeys(
+            merged + resolved_calls.get(id(symbol), [])))
     first_parts = {Path(path).parts[0] for path in test_paths if Path(path).parts}
     strip_first = (len(first_parts) == 1
                    and next(iter(first_parts)).casefold() in ("test", "tests", "__tests__"))
     helper_ids = helper_ids or {}
-    helpers: dict[str, list[Symbol]] = {}
+    helpers: dict[str, list[str]] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
         if id(symbol) in helper_ids:
-            helpers.setdefault(symbol.file, []).append(symbol)
-    helper_names = {(s.file, s.name)
-                    for hs in helpers.values() for s in hs}
+            helpers.setdefault(symbol.file, []).append(symbol.name)
     suffixes = {Path(p).suffix for p in test_paths}
     shared_ext = (next(iter(suffixes))
                   if len(suffixes) == 1 and next(iter(suffixes)) else "")
-    payloads: dict[str, list[str]] = {}
+    lines: list[str] = []
     for path in test_paths:
         display_path = Path(*Path(path).parts[1:]) if strip_first else Path(path)
-        display_name = display_path.name.removesuffix(shared_ext)
-        own_classes = [n for n in classes.get(path, [])
-                       if (path, n) not in helper_names]
-        if own_classes == [Path(path).stem]:
-            # single class named like its file: the braces restate the stem
-            file_line = [display_name + _edge_suffix(
-                own_classes[0], edges.get((path, own_classes[0]), []),
-                braced=True)]
-        else:
-            in_braces = [n + _edge_suffix(n, edges.get((path, n), []),
-                                          braced=True)
-                         for n in own_classes]
-            file_line = _braced_lines(display_name, in_braces)
-        file_line[-1] += _edge_suffix(Path(path).stem, edges.get((path, ""), []))
-        own_lines: list[str] = []
-        helper_lines: list[str] = []
-        for h in helpers.get(path, []):
-            # helper fields are internals; the public methods are the API
-            helper_lines.append(f" *{h.name}({KIND_LETTER.get(h.kind, 'C')})")
-            if not helper_ids.get(id(h), False):
-                continue  # unreferenced helper: name it, skip its signatures
-            for ms in sorted(symbols, key=lambda s: (s.line, s.name)):
-                if (ms.file == path and ms.container == h.name
-                        and ms.kind in ("method", "ctor")
-                        and ms.visibility == "pub" and sig_line is not None):
-                    helper_lines.append("  " + sig_line(ms, h.name, False))
-        payloads.setdefault(str(display_path.parent), []).extend(
-            file_line + own_lines + helper_lines)
+        display = str(display_path).removesuffix(shared_ext)
+        helper_names = _factored_name_tokens(helpers.get(path, []))
+        helper_suffix = (f":*{','.join(helper_names)}"
+                         if helper_names else "")
+        lines.append(display + helper_suffix
+                     + _edge_suffix(Path(path).stem, edges.get(path, [])))
     header = f"? tests ·{shared_ext}" if shared_ext else "? tests"
-    return [header, *(" " + line for line in _tree_lines(payloads))]
+    return [header, *(" " + line for line in lines)]
 
 
 def _legend_line(text: str, has_priv: bool, has_tests: bool,
@@ -903,30 +911,22 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
         first += " E{values}"
     if "(T:" in text:
         first += " T:target"
-    items = [first, "f(args):Ret > project calls" if " > " in text
+    items = [first, "f(args):Ret > calls" if " > " in text
              else "f(args):Ret"]  # skeleton maps carry no chains
     if has_priv:
         items.append("-=private")
-    if has_tests:
-        items.append("?=tests")
     if has_helpers:
         items.append("*=test helper")
     if "×0" in text:
-        items.append("×0=no static use")
+        items.append("×0=unused")
     if "✓" in text:
         items.append("✓=tested")
     if re.search(r" ~\d", text):
         items.append("~N=lines")
     if re.search(r" !\S", text):
         items.append("!E=throws")
-    if " @" in text:
-        items.append("@=route/annotation")
-    if re.search(r"(?m)^\s*= ", text):
-        items.append("= consts")
     if "{" in re.sub(r"\([CRIET]\{| @\S+", "", text):
-        items.append("p{a,b}=pa,pb")
-    if re.search(r"\}[\w-]", text):
-        items.append("{a,b}s=as,bs")
+        items.append("p{a,b}s=pas,pbs")
     if re.search(r"\+\d+\b", text):
         items.append("+N=more")
     if " : " in text:
@@ -969,17 +969,50 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         - privateName,privateName
     """
     prod = [s for s in symbols if _is_production_symbol(s)]
+    main_prod = [s for s in prod
+                 if _source_role(s.file) == "main" or s.lang == "make"]
+    support_prod = [s for s in prod
+                    if _source_role(s.file) != "main" and s.lang != "make"]
     if zero_usage is None:
         zero_usage = set()
+    render_origins: dict[int, list[Symbol]] = {}
+    incoming_files: dict[int, set[str]] = {}
+    cross_file_callers: set[int] = set()
 
     def _make_bundle(category: str, level: int, symbol: Symbol,
                      suffix: str = "", payload_chars: int | None = None
                      ) -> BudgetBundle:
         key = _bundle_key(symbol) + suffix
+        origins = render_origins.get(id(symbol), [symbol])
+        fanin_files = set().union(
+            *(incoming_files.get(id(origin), set()) for origin in origins))
+        cross_file = any(id(origin) in cross_file_callers for origin in origins)
+        if category == "tested-call-chains":
+            tier, reason = 0, "tested call path"
+        elif category == "test-coverage":
+            tier, reason = 1, "test-to-business edge"
+        elif category == "untested-call-chains":
+            tier = 0 if cross_file else 2
+            reason = "cross-file call path" if cross_file else "local call path"
+        elif category in ("public-methods", "cold-methods"):
+            tier = 1 if fanin_files or cross_file else 2
+            reason = "cross-file API" if tier == 1 else "public API"
+        elif category == "const-values":
+            tier, reason = 2, "business constant"
+        elif category == "private-names":
+            tier = 3 if fanin_files else 4
+            reason = "referenced private helper" if fanin_files else "private leaf"
+        else:
+            tier, reason = 5, category
         return BudgetBundle(
             level, category, key,
             estimated_chars=(payload_chars if payload_chars is not None else
-                             _bundle_estimated_chars(category, symbol, suffix)))
+                             _bundle_estimated_chars(category, symbol, suffix)),
+            source_file=symbol.file,
+            semantic_tier=tier,
+            distinct_file_fanin=len(fanin_files),
+            reason=reason,
+        )
 
     def _record_bundle(bundle: BudgetBundle, kept: bool) -> None:
         if budget_catalog is not None:
@@ -1000,15 +1033,25 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     resolved_calls, resolved_tested, raw_targets = (
         resolved if resolved is not None else _resolved_project_calls(symbols))
+    callers_by_id = {id(symbol): symbol for symbol in symbols}
+    for caller_id, targets_ in raw_targets.items():
+        caller = callers_by_id.get(caller_id)
+        if caller is None:
+            continue
+        for target in targets_:
+            if caller.file == target.file:
+                continue
+            cross_file_callers.add(caller_id)
+            incoming_files.setdefault(id(target), set()).add(caller.file)
     # Candidate renders add ephemeral merged declaration/definition symbols;
     # never leak those ids into the level-invariant precomputed structures.
     resolved_calls = dict(resolved_calls)
     tested = set(resolved_tested)
-    types_by_dir: dict[str, list[Symbol]] = {}
-    for s in prod:
+    types_by_file: dict[str, list[Symbol]] = {}
+    for s in main_prod:
         if (s.kind in TYPE_KINDS + ("fn",) and s.container is None
                 and (s.visibility == "pub" or _essential_method(s))):
-            types_by_dir.setdefault(str(Path(s.file).parent), []).append(s)
+            types_by_file.setdefault(s.file, []).append(s)
     # Ownership must see non-public types too: a private controller can expose
     # an externally invoked route method and therefore needs a visible owner.
     owner_types = [s for s in prod
@@ -1049,7 +1092,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     member_groups: dict[tuple, list[Symbol]] = {}
     member_order: list[tuple] = []
-    for member in prod:
+    for member in main_prod:
         owner_key = _member_owner_key(member)
         if (owner_key is None
                 or member.kind not in ("method", "ctor")):
@@ -1086,9 +1129,11 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             call for v in variants for call in resolved_calls.get(id(v), ())))
         if any(id(v) in tested for v in variants):
             tested.add(id(merged))
+        render_origins[id(merged)] = variants
         canonical_members.append(merged)
     member_ids = {id(s) for variants in member_groups.values() for s in variants}
-    render_prod = [s for s in prod if id(s) not in member_ids] + canonical_members
+    render_prod = ([s for s in main_prod if id(s) not in member_ids]
+                   + canonical_members)
 
     # Module-shaped extractors can emit repeated ownerless declarations (for
     # example Lua ``M.run``) without a synthetic owner type. Canonicalize those
@@ -1130,6 +1175,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             call for v in variants for call in resolved_calls.get(id(v), ())))
         if any(id(v) in tested for v in variants):
             tested.add(id(merged))
+        render_origins[id(merged)] = variants
         canonical_orphans.append(merged)
     orphan_ids = {id(s) for variants in orphan_groups.values() for s in variants}
     render_prod = ([s for s in render_prod if id(s) not in orphan_ids]
@@ -1142,10 +1188,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         identity = (owner.file, owner.name, owner.lang)
         if identity not in entrypoint_owners:
             continue
-        directory_types = types_by_dir.setdefault(
-            str(Path(owner.file).parent), [])
-        if owner not in directory_types:
-            directory_types.append(owner)
+        file_types = types_by_file.setdefault(owner.file, [])
+        if owner not in file_types:
+            file_types.append(owner)
     # Owner keys carry the file as well as lang: two `Client` classes in sibling
     # files are distinct owners even when their directory/language match.
     # L6 cold types: real fan-in from the raw call edges — a type is cold
@@ -1154,7 +1199,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     cold_types: set[tuple[str, str, str]] = set()
     if (detail >= 5 or budget_selection is not None
             or budget_catalog is not None or budget_retained is not None):
-        all_types = {(s.file, s.name, s.lang) for s in prod
+        all_types = {(s.file, s.name, s.lang) for s in main_prod
                      if s.kind in TYPE_KINDS and s.container is None}
         warm: set[tuple[str, str, str]] = set()
         by_id = {id(s): s for s in symbols}
@@ -1218,24 +1263,62 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 continue
             orphan_methods.setdefault(
                 (s.file, s.container, s.lang), []).append(s)
-    orphan_owner_files: dict[tuple[str, str, str], set[str]] = {}
-    for s in render_prod:
-        if (s.container and s.kind in ("method", "ctor")
-                and _member_owner_key(s) is None):
-            orphan_owner_files.setdefault(
-                (str(Path(s.file).parent), s.lang, s.container),
-                set()).add(s.file)
+    def _orphan_owner_display(_file: str, owner: str, _lang: str) -> str:
+        # The enclosing exact file trie node already disambiguates repeated
+        # module owners; repeating the basename spends tokens and obscures the
+        # simpler `file / owner: members` hierarchy.
+        return owner
 
-    def _orphan_owner_display(file: str, owner: str, lang: str) -> str:
-        peers = orphan_owner_files.get(
-            (str(Path(file).parent), lang, owner), ())
-        return f"{Path(file).name}:{owner}" if len(peers) > 1 else owner
+    selected_calls_cache: dict[int, list[str]] = {}
+
+    def _selected_calls(sym: Symbol) -> list[str]:
+        cached = selected_calls_cache.get(id(sym))
+        if cached is not None:
+            return cached
+        kept = list(resolved_calls.get(id(sym), ()))
+        if kept and not (_is_test_path(sym.file) and sym.lang != "make"):
+            tested_chain = id(sym) in tested
+            if not _keep_bundle(
+                    "tested-call-chains" if tested_chain
+                    else "untested-call-chains",
+                    6 if tested_chain else 4, sym,
+                    default=detail < (6 if tested_chain else 4),
+                    payload_chars=sum(len(call) + 1 for call in kept)):
+                kept = []
+        selected_calls_cache[id(sym)] = kept
+        return kept
+
+    visible_callers = [
+        symbol for types in types_by_file.values() for symbol in types
+    ] + [
+        method for methods in methods_by_owner.values() for method in methods
+    ] + [
+        method for methods in orphan_methods.values() for method in methods
+    ]
+    # Match `_resolved_project_calls`' exact description universe; narrowing to
+    # only reached targets can shorten a qualified twin and miss safe dedup.
+    target_descriptions = _target_descriptions([
+        symbol for symbol in prod
+        if symbol.kind in TYPE_KINDS + ("fn", "method")
+    ])
+    visible_private_targets: set[tuple[str, str, str, str]] = set()
+    for caller in visible_callers:
+        visible = set(_selected_calls(caller))
+        if not visible:
+            continue
+        for origin in render_origins.get(id(caller), [caller]):
+            for target in raw_targets.get(id(origin), ()):
+                if (target.visibility == "priv"
+                        and target_descriptions.get(id(target)) in visible):
+                    visible_private_targets.add(
+                        (target.file, target.lang, target.container or "",
+                         target.name))
     # Lossless names-only private inventory. Gated at build time so the
     # per-class inventories consumed inside the types loop drop too — the
     # old post-loop wipe left `- name` lines under public headers at every
     # budget level.
     priv_methods_by_owner: dict[tuple[str, str, str], list[str]] = {}
-    priv_top_by_file: dict[tuple[str, str], list[str]] = {}
+    priv_top_by_file: dict[str, list[str]] = {}
     for s in render_prod:
         if s.visibility != "priv" or _essential_method(s):
             continue
@@ -1248,6 +1331,18 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if (top_inventory
                 and (s.file, s.name, s.lang) in entrypoint_owners):
             continue
+        origins = render_origins.get(id(s), [s])
+        already_visible = any(
+            (origin.file, origin.lang, origin.container or "", origin.name)
+            in visible_private_targets for origin in origins)
+        if already_visible:
+            # The inventory text is redundant in this particular render, but
+            # it remains a real fallback candidate when a tighter budget drops
+            # the call chain that currently names it. The semantic fact is
+            # retained now (via the chain), while cataloging it still lets
+            # adaptive selection buy the cheaper name when that chain is gone.
+            _record_bundle(_make_bundle("private-names", 3, s), True)
+            continue
         if not _keep_bundle("private-names", 3, s, default=detail < 3):
             continue
         marked = s.kind in ("fn", "method", "class") and s.name in zero_usage
@@ -1257,8 +1352,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                          or (s.file, s.container, s.lang))
             priv_methods_by_owner.setdefault(owner_key, []).append(name)
         elif s.container is None and s.kind in TYPE_KINDS + ("fn",):
-            file_key = (str(Path(s.file).parent), Path(s.file).name)
-            priv_top_by_file.setdefault(file_key, []).append(name)
+            priv_top_by_file.setdefault(s.file, []).append(name)
 
     def _norm(text: str, own: str) -> str:
         return re.sub(rf"\b{re.escape(own)}\b", "Self", text)
@@ -1273,7 +1367,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         for s in render_prod if s.kind in ("fn", "method", "ctor")
     )
     top_locations: dict[str, set[tuple[str, str]]] = {}
-    for symbol in prod:
+    for symbol in main_prod:
         if (symbol.container is None
                 and (symbol.visibility == "pub" or _essential_method(symbol)
                      or (symbol.file, symbol.name, symbol.lang)
@@ -1282,11 +1376,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             top_locations.setdefault(symbol.name, set()).add((symbol.file, symbol.lang))
 
     def _top_display(sym: Symbol) -> str:
-        locations = top_locations.get(sym.name, ())
-        local_locations = [file for file, _ in locations
-                           if Path(file).parent == Path(sym.file).parent]
-        if len(local_locations) > 1:
-            return f"{Path(sym.file).name}:{sym.name}"
+        # Exact file trie nodes already disambiguate equal declarations.
         return sym.name
 
     def _display_signature(sym: Symbol, display_name: str | None = None) -> str:
@@ -1299,7 +1389,85 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                    and sym.returns not in ("void", "Unit", "None") else "")
         if sym.signature and "(" not in sym.signature and sym.lang in ("helm", "html"):
             return sym.signature
-        return f"{display_name or sym.name}({','.join(args)}){returns}"
+        return (f"{display_name or sym.name}"
+                f"({','.join(_factored_name_tokens(args, dedupe=False))}){returns}")
+
+    def _support_landmark_lines(role: str) -> list[str]:
+        """One actionable physical line per non-business source file."""
+        role_symbols: dict[str, list[Symbol]] = {}
+        for symbol in support_prod:
+            if _source_role(symbol.file) == role:
+                role_symbols.setdefault(symbol.file, []).append(symbol)
+        role_files = set(role_symbols)
+        for path in files:
+            try:
+                rel = str(path.relative_to(root))
+            except ValueError:
+                rel = str(path)
+            if _source_role(rel) == role:
+                role_files.add(rel)
+        if not role_files:
+            return []
+
+        lines = [role]
+        for file in sorted(role_files):
+            public_methods = [
+                symbol for symbol in role_symbols.get(file, [])
+                if symbol.kind == "method" and symbol.visibility == "pub"
+            ]
+            candidates = [
+                symbol for symbol in role_symbols.get(file, [])
+                if (symbol.container is None
+                    and symbol.kind in TYPE_KINDS + ("fn",)
+                    and symbol.visibility == "pub")
+                or (symbol.kind == "method" and symbol.visibility == "pub")
+                or _essential_method(symbol)
+            ]
+            if public_methods:
+                candidates = [
+                    symbol for symbol in candidates
+                    if not (symbol.lang == "bash"
+                            and symbol.kind in TYPE_KINDS
+                            and symbol.name == Path(file).name)
+                ]
+            candidates = list({
+                _symbol_identity(symbol): symbol for symbol in candidates
+            }.values())
+            candidates.sort(key=lambda symbol: (
+                0 if (_essential_method(symbol)
+                      or symbol.name in ("main", "cli")) else 1,
+                -len(resolved_calls.get(id(symbol), ())),
+                -symbol.size,
+                -len(incoming_files.get(id(symbol), ())),
+                0 if symbol.kind in ("fn", "method") else 1,
+                symbol.line,
+                symbol.name,
+            ))
+            chosen = candidates[:3]
+            atoms: list[str] = []
+            for symbol in chosen:
+                if symbol.kind in ("fn", "method", "ctor"):
+                    synthetic_bash_owner = (
+                        symbol.lang == "bash"
+                        and symbol.container == Path(file).name)
+                    display = (symbol.name if synthetic_bash_owner
+                               else f"{symbol.container}.{symbol.name}"
+                               if symbol.container else symbol.name)
+                    atom = _display_signature(symbol, display)
+                    if len(atom) > 64:
+                        atom = f"{display}(...)"
+                else:
+                    atom = f"{symbol.name}({KIND_LETTER.get(symbol.kind, '?')})"
+                atoms.append(atom)
+            omitted = len(candidates) - len(chosen)
+            suffix = f" +{omitted}" if omitted else ""
+            detail_text = f": {';'.join(atoms)}" if atoms else ""
+            parts = Path(file).parts
+            display_file = (str(Path(*parts[1:]))
+                            if len(parts) > 1
+                            and parts[0].casefold() == role else file)
+            lines.append(f" {display_file}{detail_text}{suffix}")
+        return lines
 
     def _sig_line(sym: Symbol, own: str, grouped: bool,
                   display_name: str | None = None) -> str:
@@ -1313,22 +1481,16 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if (sym.kind in ("fn", "method") and sym.name in zero_usage
                 and not _essential_method(sym)):
             sig = f"{sig} ×0"
-        kept = resolved_calls.get(id(sym), [])
-        if kept and not (_is_test_path(sym.file) and sym.lang != "make"):
-            tested_chain = id(sym) in tested
-            if not _keep_bundle(
-                    "tested-call-chains" if tested_chain
-                    else "untested-call-chains",
-                    6 if tested_chain else 4, sym,
-                    default=detail < (6 if tested_chain else 4),
-                    payload_chars=sum(len(call) + 1 for call in kept)):
-                kept = []
+        kept = _selected_calls(sym)
         if sym.raises:
-            sig = f"{sig} !{','.join(_strip_exc(r) for r in sym.raises)}"
+            sig = (f"{sig} !"
+                   f"{','.join(_factored_name_tokens(
+                       [_strip_exc(r) for r in sym.raises], dedupe=False))}")
         if grouped:
             kept = [_norm(c, own) for c in kept]
             sig = _norm(sig, own)
-        return f"{sig} > {','.join(kept)}" if kept else sig
+        return (f"{sig} > {','.join(_factored_name_tokens(kept, dedupe=False))}"
+                if kept else sig)
 
     def _redundant_ctor(ms: Symbol, kind: str, components: tuple) -> bool:
         # Record components define their canonical public construction shape.
@@ -1338,13 +1500,16 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         return (kind == "record" and bool(components)
                 and ms.kind == "ctor"
                 and _sig_line(ms, ms.container or ms.name, False)
-                == f"{ms.name}({','.join(components)})")
+                == (f"{ms.name}"
+                    f"({','.join(_factored_name_tokens(
+                        list(components), dedupe=False))})"))
 
     # Interface relations stated once, on the interface: `I ←Impl|Impl` replaces
     # each implementor's `: I` suffix (sealed permits already carry the list).
-    iface_index = {(s.lang, s.name) for s in prod if s.kind == "interface"}
+    iface_index = {(s.lang, s.name) for s in main_prod
+                   if s.kind == "interface"}
     impls_of: dict[tuple[str, str], list[str]] = {}
-    for s in prod:
+    for s in main_prod:
         if s.kind in TYPE_KINDS and s.container is None:
             for sup in s.supers:
                 if (s.lang, sup) in iface_index:
@@ -1352,9 +1517,34 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                     if s.name not in entries:
                         entries.append(s.name)
 
+    # Conventional one-type files can keep cross-file shape factoring without
+    # hiding ownership: `{A,B}.java(R{x})` names exact files and their matching
+    # types.  Multi-entity and non-conventional modules stay under exact file
+    # trie nodes.  This preserves the high-value `Self` compression while every
+    # public landmark remains directly actionable.
+    visible_top_ids_by_file = {
+        file: {id(symbol) for symbol in types}
+        for file, types in types_by_file.items()
+    }
+    files_with_other_top_facts = {
+        symbol.file for symbol in main_prod
+        if symbol.container is None
+        and symbol.kind in TYPE_KINDS + ("fn", "const", "reexport")
+        and id(symbol) not in visible_top_ids_by_file.get(symbol.file, set())
+    }
+    types_by_scope: dict[tuple[str, str], list[Symbol]] = {}
+    for file, types in types_by_file.items():
+        sole_conventional = (len(types) == 1
+                             and types[0].kind != "fn"
+                             and Path(file).stem == types[0].name
+                             and file not in files_with_other_top_facts)
+        scope = (("dir", str(Path(file).parent)) if sole_conventional
+                 else ("file", file))
+        types_by_scope.setdefault(scope, []).extend(types)
+
     payload_by_dir: dict[str, list[str]] = {}
-    for d, types in sorted(types_by_dir.items()):
-        payload = payload_by_dir.setdefault(d, [])
+    for (scope_kind, path), types in sorted(types_by_scope.items()):
+        payload = payload_by_dir.setdefault(path, [])
         groups: dict[tuple, list[Symbol]] = {}
         for t in sorted(types, key=lambda s: (s.kind == "fn", s.name)):
             if t.kind == "fn":
@@ -1375,17 +1565,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             duplicate_identity = (t.file
                                   if len(top_locations.get(t.name, ())) > 1
                                   else "")
-            selected_type_calls = tuple(resolved_calls.get(id(t), ()))
-            if selected_type_calls:
-                tested_chain = id(t) in tested
-                if not _keep_bundle(
-                        "tested-call-chains" if tested_chain
-                        else "untested-call-chains",
-                        6 if tested_chain else 4, t,
-                        default=detail < (6 if tested_chain else 4),
-                        payload_chars=sum(len(call) + 1
-                                          for call in selected_type_calls)):
-                    selected_type_calls = ()
+            selected_type_calls = tuple(_selected_calls(t))
             group_key = (duplicate_identity, t.lang, t.kind, t.visibility,
                          tuple(components),
                          shown_supers, tuple(t.permits), impls, unused,
@@ -1396,22 +1576,41 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         for (_, _, kind, vis, components, supers, permits, impls, unused,
              named_fields, deco_notes, type_calls), members in groups.items():
             members.sort(key=lambda s: s.name)
-            names = ",".join(_top_display(m) for m in members)
+            if scope_kind == "dir":
+                suffixes = {Path(member.file).suffix for member in members}
+                if len(members) > 1 and len(suffixes) == 1:
+                    suffix = next(iter(suffixes))
+                    stems = [Path(member.file).stem for member in members]
+                    names = "{" + ",".join(stems) + "}" + suffix
+                else:
+                    names = ",".join(Path(member.file).name
+                                     for member in members)
+            else:
+                names = ",".join(_top_display(m) for m in members)
             letter = KIND_LETTER.get(kind, "?")
             if kind == "type" and components and not named_fields:
                 inner = f"{letter}:{components[0]}"
             elif components:
-                inner = f"{letter}{{{','.join(components)}}}"
+                inner = (f"{letter}{{"
+                         f"{','.join(_factored_name_tokens(
+                             list(components), dedupe=False))}}}")
             else:
                 inner = letter
-            permit_suffix = f" sealed:{'|'.join(permits)}" if permits else ""
-            rel_suffix = f" : {','.join(supers)}" if supers else ""
+            permit_suffix = (f" sealed:{'|'.join(_factored_name_tokens(
+                                list(permits), dedupe=False))}"
+                             if permits else "")
+            rel_suffix = (f" : {','.join(_factored_name_tokens(
+                              list(supers), dedupe=False))}"
+                          if supers else "")
             impl_suffix = ("" if not impls else
                            f" ←{len(impls)} impls" if len(impls) > 6 else
-                           f" ←{'|'.join(impls)}")
+                           f" ←{'|'.join(_factored_name_tokens(
+                               list(impls), dedupe=False))}")
             hot_suffix = " ×0" if unused else ""
             deco_suffix = "".join(f" @{n}" for n in deco_notes)
-            call_suffix = f" > {','.join(type_calls)}" if type_calls else ""
+            call_suffix = (f" > {','.join(_factored_name_tokens(
+                               list(type_calls), dedupe=False))}"
+                           if type_calls else "")
             payload.append(f"{names}({inner}){deco_suffix}{rel_suffix}"
                            f"{permit_suffix}{impl_suffix}{hot_suffix}{call_suffix}")
             # Methods shared by every member print once (Self-normalized); each
@@ -1459,15 +1658,14 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     for (file, owner, _), members in sorted(orphan_methods.items()):
         lines = list(dict.fromkeys(
             _sig_line(member, owner, False) for member in members))
-        payload_by_dir.setdefault(str(Path(file).parent), []).append(
+        payload_by_dir.setdefault(file, []).append(
             f"{_orphan_owner_display(file, owner, members[0].lang)}: "
             + "; ".join(lines))
 
-    consts_by_file: dict[tuple[str, str], list[str]] = {}
-    for s in prod:
+    consts_by_file: dict[str, list[str]] = {}
+    for s in main_prod:
         if s.kind == "const" and s.visibility == "pub":
-            const_key = (str(Path(s.file).parent), Path(s.file).name)
-            vals = consts_by_file.setdefault(const_key, [])
+            vals = consts_by_file.setdefault(s.file, [])
             entry = s.signature or s.name
             name_only = entry.split("=", 1)[0]
             value_bundle: BudgetBundle | None = None
@@ -1482,120 +1680,97 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 vals.append(entry)
                 if value_bundle is not None:
                     _record_bundle(value_bundle, value_kept)
-    for (d, fname), vals in sorted(consts_by_file.items()):
-        payload_by_dir.setdefault(d, []).extend(
-            _private_lines(f"= {fname}: ", vals))
+    for file, vals in sorted(consts_by_file.items()):
+        payload_by_dir.setdefault(file, []).extend(
+            _private_lines("= ", vals))
 
-    for (d, stem), names_only in sorted(priv_top_by_file.items()):
-        payload_by_dir.setdefault(d, []).extend(
-            _private_lines(f"- {stem}: ", names_only))
+    for file, names_only in sorted(priv_top_by_file.items()):
+        payload_by_dir.setdefault(file, []).extend(
+            _private_lines("- ", names_only))
     public_owners = {(member.file, member.name, member.lang)
-                     for types in types_by_dir.values() for member in types
+                     for types in types_by_file.values() for member in types
                      if member.kind in TYPE_KINDS}
     for (file, owner, lang), names_only in sorted(priv_methods_by_owner.items()):
         if (file, owner, lang) not in public_owners:
-            payload_by_dir.setdefault(str(Path(file).parent), []).extend(
+            payload_by_dir.setdefault(file, []).extend(
                 _private_lines(
                     f"- {_orphan_owner_display(file, owner, lang)}: ",
                     names_only))
-    reex_by_file: dict[tuple[str, str], list[str]] = {}
-    for s in prod:
+    reex_by_file: dict[str, list[str]] = {}
+    for s in main_prod:
         if s.kind == "reexport":
-            reexport_key = (str(Path(s.file).parent), Path(s.file).name)
-            names_r = reex_by_file.setdefault(reexport_key, [])
+            names_r = reex_by_file.setdefault(s.file, [])
             if s.name not in names_r:
                 names_r.append(s.name)
-    for (d, fname), names_r in sorted(reex_by_file.items()):
-        payload_by_dir.setdefault(d, []).append(f"» {fname}: {','.join(names_r)}")
+    for file, names_r in sorted(reex_by_file.items()):
+        payload_by_dir.setdefault(file, []).append(
+            f"» {','.join(_factored_name_tokens(names_r))}")
 
     if loc is None:
         loc = _total_loc(files)
-    state_part = f" · state {state}" if state else ""
+    meta = f"· {loc:,} LOC"
+    if state:
+        meta += f" · state {state}"
     if langs:
-        state_part += f" · langs {','.join(sorted(langs))}"
+        meta += f" · langs {','.join(sorted(langs))}"
     if targets:
-        state_part += f" · targets {','.join(sorted(targets))}"
+        meta += f" · targets {','.join(sorted(targets))}"
     if budget:
-        state_part += f" · budget {budget}"
+        meta += f" · budget {budget}"
         if budget_selection is not None:
-            state_part += f" A{budget_selection.level}"
+            meta += f" A{budget_selection.level}"
         elif detail:
-            state_part += f" L{detail}"
+            meta += f" L{detail}"
     body = _tree_lines(payload_by_dir)
     helper_ids = (helpers if helpers is not None
                   else _helper_class_ids(symbols, file_tokens))
-    by_id = {id(symbol): symbol for symbol in symbols}
-    selected_helpers: dict[int, bool] = {}
-    for helper_id, has_signatures in helper_ids.items():
-        helper = by_id.get(helper_id)
-        helper_methods = ([] if helper is None else [
-            method for method in symbols
-            if (method.file == helper.file
-                and method.container == helper.name
-                and method.kind in ("method", "ctor")
-                and method.visibility == "pub")])
-        has_public_methods = bool(helper_methods)
-        helper_payload = sum(
-            _bundle_estimated_chars("helper-signatures", method)
-            for method in helper_methods)
-        selected_helpers[helper_id] = bool(
-            has_signatures and has_public_methods and helper is not None
-            and _keep_bundle("helper-signatures", 2, helper,
-                             default=detail < 2,
-                             payload_chars=helper_payload))
-
-    test_edge_groups: dict[tuple[str, str], list[Symbol]] = {}
+    test_edge_groups: dict[str, list[Symbol]] = {}
     for symbol in symbols:
         calls = resolved_calls.get(id(symbol), [])
         if (symbol.lang == "make" or not _is_test_path(symbol.file)
                 or symbol.kind not in ("fn", "method", "ctor") or not calls):
             continue
-        test_edge_groups.setdefault(
-            (symbol.file, symbol.container or ""), []).append(symbol)
+        test_edge_groups.setdefault(symbol.file, []).append(symbol)
     selected_test_edges: dict[int, list[str]] = {}
-    for (file, owner), callers in sorted(test_edge_groups.items()):
+    for file, callers in sorted(test_edge_groups.items()):
         merged_calls = list(dict.fromkeys(
             call for caller in callers
             for call in resolved_calls.get(id(caller), ())))
-        display_owner = owner or Path(file).stem
-        if not _edge_suffix(display_owner, merged_calls,
-                            braced=bool(owner)):
+        display_owner = Path(file).stem
+        if not _edge_suffix(display_owner, merged_calls):
             continue  # suppressed guessable edge is not a rendered fact
         representative = callers[0]
-        edge_text = _edge_suffix(display_owner, merged_calls,
-                                 braced=bool(owner))
+        edge_text = _edge_suffix(display_owner, merged_calls)
         if _keep_bundle("test-coverage", 1, representative,
                         default=detail < 1,
-                        suffix=f"|coverage:{owner}",
+                        suffix="|coverage",
                         payload_chars=len(edge_text)):
             selected_test_edges[id(representative)] = merged_calls
     tests = _test_index_lines(files, symbols, root,
                               selected_test_edges,
-                              selected_helpers,
-                              _sig_line)
+                              helper_ids)
     if tests:
         body.extend(tests)
+    tools = _support_landmark_lines("tools")
+    benchmark = _support_landmark_lines("benchmark")
+    body.extend(tools)
+    body.extend(benchmark)
     has_priv = bool(priv_top_by_file or priv_methods_by_owner)
-    has_helpers = bool(tests) and any("\n  *" in "\n" + ln or ln.lstrip().startswith("*")
-                                      for ln in tests)
-    legend = _legend_line("\n".join(body), has_priv, bool(tests),
+    has_helpers = any(":*" in line for line in tests)
+    legend = _legend_line("\n".join(body), has_priv,
+                          bool(tests or tools or benchmark),
                           has_helpers)
-    header = f"# hologram · {loc:,} LOC{state_part}\n{legend}\n"
+    header = f"# hologram\n{legend}\n"
+    disclosure = ""
     if detail:
         # silent omission misleads: a reader answering off a degraded map
         # must know which fact classes need a file read to confirm
-        dropped: list[str] = []
-        for level, label in _LEVEL_DROPS:
-            if detail < level:
-                continue
-            if (budget_selection is not None
-                    and level == budget_selection.level):
-                label += " (partial)"
-            dropped.append(label)
-        header += ("‥ budget dropped: " + ", ".join(dropped)
-                   + " — the map no longer carries these facts; NEVER guess "
-                   "them, read the source file first\n")
-    return header + "\n".join(body) + "\n"
+        disclosure = ("‥ optional facts omitted — NEVER guess; read source "
+                      "before relying on them\n")
+    # Semantic content stays first so state/LOC-only rebuilds retain the longest
+    # possible prompt-cache prefix.  Freshness readers accept this footer and
+    # the legacy metadata-bearing header.
+    return header + "\n".join(body) + "\n" + disclosure + meta + "\n"
 
 
 def _build_digest(root: Path, langs: set[str] | None,
@@ -1603,10 +1778,10 @@ def _build_digest(root: Path, langs: set[str] | None,
                   collect_stats: bool) -> tuple[str, BudgetStats | None]:
     """Build a map and return deterministic evidence for its budget policy.
 
-    Selection first finds the least-degraded complete ladder level that fits,
-    then restores whole facts from exactly the next quality boundary. Every
-    trial is rendered and measured as a complete map, including its header,
-    legend, and loss disclosure; a retained fact is never byte-truncated.
+    Selection keeps the compact semantic floor, then restores globally ranked,
+    dependency-closed whole facts. Every trial is rendered and measured as a
+    complete map, including legend, disclosure, and metadata; a retained fact
+    is never byte-truncated.
     """
     if budget is not None and budget < 0:
         raise ValueError("budget must be non-negative")
@@ -1667,57 +1842,70 @@ def _build_digest(root: Path, langs: set[str] | None,
         return full, stats(
             full, full_retained, "full",
             stop_reason="full-fits" if budget else "unlimited")
-    # Compare complete candidates, including their budget stamp, legend, and
-    # loss disclosure. Those lines can make a deeper level larger than its
-    # predecessor on small maps, so ladder order is not a size ordering.
-    candidates = [full]
-    level_retained = [full_retained]
-    for level in range(1, _MAX_LEVEL):
-        retained: set[BudgetBundle] = set()
-        candidates.append(render(level, retained=retained))
-        level_retained.append(retained)
-    candidates.append(skeleton)
-    level_retained.append(skeleton_retained)
-    sizes = [estimate_tokens(candidate) for candidate in candidates]
-    fitting = [level for level, size in enumerate(sizes) if size <= budget]
-    if fitting:
-        level = fitting[0]  # least-degraded candidate that satisfies the budget
-    else:
-        level = min(range(len(candidates)), key=lambda i: (sizes[i], i))
-    digest = candidates[level]
-    if sizes[level] > budget:
+    # L7 is the compact pushed semantic floor.  If even it cannot fit, compare
+    # every complete ladder candidate and emit the smallest whole map.  When it
+    # does fit, all optional facts compete globally above that floor.
+    level = _MAX_LEVEL
+    digest = skeleton
+    if skeleton_tokens > budget:
+        candidates = [full]
+        level_retained = [full_retained]
+        for candidate_level in range(1, _MAX_LEVEL):
+            retained: set[BudgetBundle] = set()
+            candidates.append(render(candidate_level, retained=retained))
+            level_retained.append(retained)
+        candidates.append(skeleton)
+        level_retained.append(skeleton_retained)
+        sizes = [estimate_tokens(candidate) for candidate in candidates]
+        level = min(range(len(candidates)), key=lambda index: (sizes[index], index))
+        digest = candidates[level]
         import sys
         print(f"hologram: warning: no complete map fits the budget; "
               f"the smallest complete candidate is L{level} at "
-              f"~{sizes[level]:,} tokens against a budget of {budget:,}; "
+              f"~{estimate_tokens(digest):,} tokens against a budget of "
+              f"{budget:,}; "
               f"emitting it whole — narrowing with --lang may help",
               file=sys.stderr)
         return digest, stats(digest, level_retained[level],
                              f"minimum-L{level}", stop_reason="minimum")
 
-    # Facts gained by exactly one step toward the full map. Filtering through
-    # emitted sets automatically respects dependencies: a call chain whose
-    # method is still absent cannot consume this boundary's budget.
-    boundary = level_retained[level - 1] - level_retained[level]
-    by_category: dict[str, list[BudgetBundle]] = {}
-    for bundle in boundary:
-        by_category.setdefault(bundle.category, []).append(bundle)
-    categories = sorted(
-        by_category,
-        key=lambda category: (_BUNDLE_CATEGORY_ORDER.get(category, 99),
-                              category))
-    for bundles in by_category.values():
-        bundles.sort(key=lambda bundle: (bundle.estimated_chars, bundle.key))
-    # Interleave cost-ranked categories: the cheapest high-priority fact is
-    # tried first, but one category cannot consume the global trial cap and
-    # starve every lower category whose small facts would use the budget.
-    transition = [
-        by_category[category][index]
-        for index in range(max((len(items) for items in by_category.values()),
-                               default=0))
-        for category in categories
-        if index < len(by_category[category])
-    ]
+    optional = catalog - skeleton_retained
+    method_dependencies = {
+        bundle.key: bundle.name for bundle in optional
+        if bundle.category in ("public-methods", "cold-methods")
+    }
+
+    def dependency_closure(bundle: BudgetBundle) -> frozenset[str]:
+        names = {bundle.name}
+        if bundle.category in ("tested-call-chains", "untested-call-chains"):
+            dependency = method_dependencies.get(bundle.key)
+            if dependency:
+                names.add(dependency)
+        return frozenset(names)
+
+    # Semantic tier dominates size.  Within a tier, round-robin exact source
+    # files before taking a second fact from one module; fan-in then cost break
+    # ties.  This preserves project breadth under tight budgets.
+    queues: dict[int, dict[str, list[tuple[BudgetBundle, frozenset[str]]]]] = {}
+    for bundle in optional:
+        queues.setdefault(bundle.semantic_tier, {}).setdefault(
+            bundle.source_file, []).append((bundle, dependency_closure(bundle)))
+    for files_by_tier in queues.values():
+        for bundles in files_by_tier.values():
+            bundles.sort(key=lambda item: (
+                -item[0].distinct_file_fanin,
+                item[0].estimated_chars,
+                _BUNDLE_CATEGORY_ORDER.get(item[0].category, 99),
+                item[0].key,
+            ))
+    transition: list[tuple[BudgetBundle, frozenset[str]]] = []
+    for tier in sorted(queues):
+        files_by_tier = queues[tier]
+        for index in range(max((len(items) for items in files_by_tier.values()),
+                               default=0)):
+            for file in sorted(files_by_tier):
+                if index < len(files_by_tier[file]):
+                    transition.append(files_by_tier[file][index])
     selected: set[str] = set()
     trials = 0
     search_truncated = False
@@ -1753,10 +1941,12 @@ def _build_digest(root: Path, langs: set[str] | None,
                 search_truncated = True
                 break
             chunk = transition[index:index + run]
-            trial = try_selection(
-                frozenset((*selected, *(bundle.name for bundle in chunk))))
+            chunk_names = set(selected)
+            for _, closure in chunk:
+                chunk_names.update(closure)
+            trial = try_selection(frozenset(chunk_names))
             if trial is not None:
-                selected.update(bundle.name for bundle in chunk)
+                selected = chunk_names
                 digest = trial
                 index += len(chunk)
                 run = min(run * 2, len(transition))
@@ -1768,18 +1958,18 @@ def _build_digest(root: Path, langs: set[str] | None,
         # One repair pass catches prefix/suffix factoring unlocked by later
         # selections, from a reserved slice of the trial budget so a saturated
         # greedy pass can never leave it unreachable.
-        for bundle in transition:
+        for _, closure in transition:
             if saturated():
                 break
             if trials >= _ADAPTIVE_MAX_TRIALS:
                 search_truncated = True
                 break
-            if bundle.name in selected:
+            if closure.issubset(selected):
                 continue
-            trial_names = frozenset((*selected, bundle.name))
+            trial_names = frozenset(selected | set(closure))
             trial = try_selection(trial_names)
             if trial is not None:
-                selected.add(bundle.name)
+                selected.update(closure)
                 digest = trial
 
     final_retained: set[BudgetBundle] = set()
@@ -1787,14 +1977,16 @@ def _build_digest(root: Path, langs: set[str] | None,
         selection = _BudgetSelection(
             frozenset(selected), level, len(transition))
         digest = render(level, selection=selection, retained=final_retained)
-        effective = f"L{level}-adaptive:{len(selected)}/{len(transition)}"
+        retained_optional = final_retained - skeleton_retained
+        effective = (f"L{level}-adaptive:{len(retained_optional)}/"
+                     f"{len(optional)}")
     else:
-        final_retained = level_retained[level]
+        final_retained = skeleton_retained
         effective = f"L{level}"
     did_saturate = saturated()
     stop_reason = ("saturated" if did_saturate else
                    "trial-limit" if search_truncated else
-                   "no-boundary" if not transition else "exhausted")
+                   "no-candidates" if not transition else "exhausted")
     return digest, stats(
         digest, final_retained, effective,
         selection_trials=trials,
