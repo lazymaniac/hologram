@@ -245,7 +245,7 @@ hologram
   build_digest(root,langs,targets,budget):str ✓ > _build_digest
   build_digest_with_stats(root,langs,targets,budget):tuple[str,BudgetStats] ✓ > _build_digest
   estimate_tokens(text):int ✓
-  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers,budget_{selection,catalog,retained}):str ~829 ✓ > _target_descriptions,{_tree,_test_index}_lines,_legend_line,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_total_loc,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_private_lines,_source_role,_is_test_path,_factored_name_tokens,render._symbol_identity,_strip_exc
+  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers,budget_{selection,catalog,retained}):str ~868 ✓ > _target_descriptions,{_tree,_test_index}_lines,_legend_line,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_total_loc,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_private_lines,_is_test_case_method_symbol,_source_role,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_factored_name_tokens,render._symbol_identity,_strip_exc
   summarize_budget(requested_budget,{full,selected,skeleton}_tokens,effective_detail,bundles,retained,selection_{trials,candidates},search_truncated,stop_reason):BudgetStats ~41 ✓ > BudgetStats
   BudgetBundle(R{detail,category,key,estimated_chars,source_file,semantic_tier,distinct_file_fanin,reason})
    name():str @property
@@ -280,24 +280,26 @@ hologram
   has_parser(lang):bool
   - _load_parser,_ast_{text,field,collect,calls},_body_lines
 ? tests ·.py
- test_adaptive_budget > _gather +10
- test_bench > load_tasks +34
- test_budget_integrity > _gather +9
- test_cli > run_cli +7
- test_extract_langs > extract_file
- test_freshness_and_markers > _digest_langs +9
- test_more_langs > extract_file +3
- test_release_privacy
- test_review > Snapshot +7
- test_simple_mode > extract_file +13
- test_stats_cli > run_cli
- test_treesitter
+ test_adaptive_budget:{AdaptiveBudgetSemantic,BudgetStatsContract}Test > _gather +10
+ test_bench:{TaskLoader,TranscriptMetrics,DuplicationDetector,ExperimentIdentity,Workspace,BudgetCondition,ActedOnFindings,ReviewCondition,StructuredReviewMeasurement,CoachCondition,RunOne,ScopeJudge,Report,Cli}Test > load_tasks +34
+ test_budget_integrity:{WholeMapBudgetSelection,EntrypointFloor,OwnerIdentity,MeaningfulDunder,ConstructorIntegrity}Test > _gather +9
+ test_cli:{CliOptionSurface,CliBuild,InitHooks,InitLang,HookQuoting,ManagedHookLine,LegacyHookMigration}Test,
+          PostCommitHookE2ETest,
+          {Budget,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,UninstallPython,SizeWarning,HookPythonSelection}Test > run_cli +7
+ test_extract_langs:{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test > extract_file
+ test_freshness_and_markers:{DigestMetadataCompatibility,StateAndCheck,TestedMarker,SizeMarker,TestIndex,DisplayName,TestHelper,Embed,ContextTargets,DiffCommand}Test > _digest_langs +9
+ test_more_langs:{GoExtract,RustExtract,CSharpExtract,CExtract,CppExtract,BashExtract,LuaExtract,CssExtract,HtmlNestedBlocks,HtmlExtract,HelmExtract,KotlinExtract,TsGaps,ReactComponent,AngularExtract,TsLossRecovery,TsxExtract,SfcExtract,RubyExtract,PhpExtract,SwiftExtract,ScalaExtract,MakefileExtract}Test > extract_file +3
+ test_release_privacy:ReleasePrivacyTest
+ test_review:{DupCheck,RecoverCheck,DeadOrphanApi,PlaceCheck,ReportAndCli}Test > Snapshot +7
+ test_simple_mode:{CallExtraction,SimpleDigest,FixtureTokenCeiling,SameShapeGrouping,RenderUnit,EnumValues,InterfaceMethod,QualifiedCall,FieldNames,ReconstructablePath,LanguageFilter,Relations,InterfaceImplementors,Legend,ConstExtract,SecretRedaction,RouteRender,Throws,TransitiveReduction,VoidOmission,GroupExtras,PrivateMembers,CompactMapContract,TightFormat,ZeroUsageMarker,PrecomputedRender,TestIndexDiet,CtorSuppression,DunderPrivate}Test > extract_file +14
+ test_stats_cli:BudgetStatsCliTest > run_cli
+ test_treesitter:{TreeSitterJava,MissingParserError}Test
 tools
  check_release_privacy.py: main(argv):int;audit_tree(root,terms):list[str];audit_artifact(path,terms):list[str] +1
  measure_tokens.py: main(argv):int
  run_tests.py: main(argv):int
 benchmark
  bench.py: main(argv):int;run_one(...);report(rows,anon):str +11
-· 18,719 LOC · state b84cec029b17
+· 18,979 LOC · state f6a1286a15b5
 ```
 <!-- hologram:end -->

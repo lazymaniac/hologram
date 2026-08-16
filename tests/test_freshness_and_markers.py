@@ -210,13 +210,13 @@ class SizeMarkerTest(unittest.TestCase):
 
 
 class TestIndexTest(unittest.TestCase):
-    def test_test_files_always_listed_without_test_functions(self):
+    def test_test_files_and_classless_test_functions_are_listed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
             out = build_digest(root)
         self.assertIn("? tests ·.py", out)  # shared extension factored once
         self.assertIn("test_svc", out)
-        self.assertNotIn("test_run_returns_one", out)
+        self.assertIn("test_run_returns_one", out)
 
     def test_file_level_coverage_edges_for_classless_tests(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -240,10 +240,10 @@ class TestIndexTest(unittest.TestCase):
                 "\nclass QuietTest:\n    def test_nothing(self):\n        pass\n")
             out = build_digest(root)
         line = next(ln for ln in out.splitlines() if "test_lib" in ln)
-        self.assertIn("test_lib > helper0 +4", line)
+        self.assertIn("test_lib:{Covered,Quiet}Test > helper0 +4", line)
         self.assertNotIn("helper1", line)
-        self.assertNotIn("CoveredTest", out)
-        self.assertNotIn("QuietTest", out)
+        self.assertNotIn("test_all", out)
+        self.assertNotIn("test_nothing", out)
         self.assertIn("+N=more", out.splitlines()[1])
 
 
