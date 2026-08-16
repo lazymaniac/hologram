@@ -60,7 +60,8 @@ src
  ids
   {ItemId,OrderId,UserId}.java(R{value})
 ? tests ·.java
- src/test/PricingEngineTest:BulkDiscounts
+ src/test/PricingEngineTest:BulkDiscounts,ordersOverTenItemsGetTenPercentOff,smallOrdersPayFullPrice,
+                            unknownItemIsRejected
 · 186 LOC · state 0123456789ab
 ```
 
@@ -73,10 +74,11 @@ uses. The essentials are:
   calls. `←` shows implementors.
 - `×0` means no static project reference was found; `!E` means a callable
   throws. These are navigation hints, not correctness claims.
-- `? tests` retains exact test files, suite names, and classless test cases (such
-  as pytest, Go, and Rust tests) so an agent can inspect nearby coverage before
-  recreating it. `*` marks reusable test helpers; separate tool/benchmark
-  landmarks stay compact. The footer carries freshness and saved settings.
+- `? tests` retains exact test files, suite names, and every recognized
+  function/method case name so an agent can inspect existing coverage before
+  recreating it. Same-file name collisions gain their suite owner. `*` marks
+  reusable test helpers; separate tool/benchmark landmarks stay compact. The
+  footer carries freshness and saved settings.
 
 ## Common commands
 
@@ -120,8 +122,9 @@ so treat it as repository-derived data.
 When a full map exceeds `--budget N`, Hologram starts with a compact semantic
 floor: retained business types, fields, and top-level signatures with exact
 file ownership, plus external entrypoints, test landmarks, and tool/benchmark
-orientation. Test-suite and classless-case names are default facts but can be
-dropped while their file landmarks remain. Hologram then restores ranked whole facts,
+orientation. Test-suite and function/method case names are default facts but
+can be dropped individually while their file landmarks remain. Hologram then
+restores ranked whole facts,
 prioritizing tested and cross-file paths, widely used APIs, and breadth across
 files. If even the floor cannot fit, Hologram warns and emits the smallest
 complete candidate instead of cutting facts in half.

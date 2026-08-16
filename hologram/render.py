@@ -31,7 +31,8 @@ def estimate_tokens(text: str) -> int:
 
 def _test_stem(raw_stem: str) -> bool:
     stem = raw_stem.casefold()
-    return (stem.startswith("test_")
+    return (stem in ("test", "tests", "spec", "specs")
+            or stem.startswith("test_")
             or stem.endswith(("_test", "_spec", ".test", ".spec"))
             or raw_stem.endswith(("Test", "Tests", "Spec", "IT")))
 
@@ -73,49 +74,53 @@ def _is_test_suite_symbol(symbol: Symbol) -> bool:
 
 def _is_classless_test_case_symbol(symbol: Symbol) -> bool:
     """A named top-level test for frameworks without suite classes."""
-    if (symbol.kind != "fn" or symbol.container is not None
-            or not _is_test_path(symbol.file)):
+    if symbol.kind != "fn" or symbol.container is not None:
         return False
-    name = symbol.name
-    if (name.casefold().startswith("test_")
-            or (symbol.lang == "go" and re.match(
-                r"^(?:Test|Benchmark|Fuzz|Example)(?:$|[^a-z])", name))):
-        return True
     decorator_bases = {
         decorator.split("(", 1)[0].split(".")[-1].casefold()
         .removesuffix("attribute")
         for decorator in symbol.decorators
     }
-    return bool(decorator_bases & {
+    if decorator_bases & {
         "test", "parameterizedtest", "repeatedtest", "testfactory",
         "testtemplate", "fact", "theory", "testcase", "testcasesource",
         "testmethod", "datatestmethod",
-    })
+    }:
+        return True
+    if not _is_test_path(symbol.file):
+        return False
+    name = symbol.name
+    return bool(re.match(r"^test(?:_|[A-Z0-9]|$)", name)
+                or (symbol.lang == "go" and re.match(
+                    r"^(?:Test|Benchmark|Fuzz|Example)(?:$|[^a-z])", name)))
 
 
 def _is_test_case_method_symbol(symbol: Symbol) -> bool:
-    """Member-level evidence that its owning type is a test suite."""
-    if (symbol.kind != "method" or not symbol.container
-            or not _is_test_path(symbol.file)):
+    """A named test method and evidence that its owner is a test suite."""
+    if symbol.kind != "method" or not symbol.container:
         return False
-    if symbol.name.casefold().startswith("test_"):
-        return True
     decorator_bases = {
         decorator.split("(", 1)[0].split(".")[-1].casefold()
         .removesuffix("attribute")
         for decorator in symbol.decorators
     }
-    return bool(decorator_bases & {
+    if decorator_bases & {
         "test", "parameterizedtest", "repeatedtest", "testfactory",
         "testtemplate", "fact", "theory", "testcase", "testcasesource",
         "testmethod", "datatestmethod",
-    })
+    }:
+        return True
+    return (_is_test_path(symbol.file)
+            and bool(re.match(r"^test(?:_|[A-Z0-9]|$)", symbol.name)))
 
 
 def _is_production_symbol(symbol: Symbol) -> bool:
     # Make targets remain externally invokable even in tests/Makefile or
     # test.mk; their location does not turn them into test implementation.
-    return symbol.lang == "make" or not _is_test_path(symbol.file)
+    return (symbol.lang == "make"
+            or (not _is_test_path(symbol.file)
+                and not _is_classless_test_case_symbol(symbol)
+                and not _is_test_case_method_symbol(symbol)))
 
 
 def _source_role(rel: str) -> str:
@@ -475,7 +480,10 @@ def _resolved_project_calls(symbols: list[Symbol]
     tested = {
         id(target)
         for caller in symbols
-        if _is_test_path(caller.file) and caller.lang != "make"
+        if (caller.lang != "make"
+            and (_is_test_path(caller.file)
+                 or _is_classless_test_case_symbol(caller)
+                 or _is_test_case_method_symbol(caller)))
         for target in raw_targets[id(caller)]
     }
     return displayed, tested, raw_targets
@@ -915,30 +923,38 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       resolved_calls: dict[int, list[str]] | None = None,
                       helper_ids: dict[int, bool] | None = None,
                       sig_line=None,
-                      case_ids: set[int] | None = None) -> list[str]:
+                      case_ids: set[int] | None = None,
+                      case_labels: dict[int, str] | None = None,
+                      case_files: set[str] | None = None) -> list[str]:
     """Compact test orientation: file, selected test landmarks, business edge.
 
-    Suite names and classless test cases help agents find existing coverage
-    before they add a duplicate.  They remain independently budgetable; an
-    omitted name never removes its file landmark.  Reusable helpers remain
-    named, but their internals stay in source.  ``sig_line`` remains accepted
-    for source compatibility with callers from v0.10.
+    Suite names and every recognized function/method case help agents find
+    existing coverage before they add a duplicate.  They remain independently
+    budgetable; an omitted name never removes its file landmark.  Reusable
+    helpers remain named, but their internals stay in source.  ``sig_line``
+    remains accepted for source compatibility with callers from v0.10.
     """
     make_files = {s.file for s in symbols if s.lang == "make"}
+    case_ids = case_ids or set()
+    case_labels = case_labels or {}
+    case_files = case_files or {
+        symbol.file for symbol in symbols if id(symbol) in case_ids
+    }
     test_paths: list[str] = []
     for path in files:
         try:
             rel = str(path.relative_to(root))
         except ValueError:
             rel = str(path)
-        if _is_test_path(rel) and rel not in make_files:
+        if (_is_test_path(rel) or rel in case_files) and rel not in make_files:
             test_paths.append(rel)
     test_paths.sort()
     if not test_paths:
         return []
     edges: dict[str, list[str]] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
-        if (symbol.lang == "make" or not _is_test_path(symbol.file)
+        if (symbol.lang == "make"
+                or not (_is_test_path(symbol.file) or symbol.file in case_files)
                 or symbol.kind not in ("fn", "method", "ctor")
                 or not resolved_calls):
             continue
@@ -949,12 +965,12 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     strip_first = (len(first_parts) == 1
                    and next(iter(first_parts)).casefold() in ("test", "tests", "__tests__"))
     helper_ids = helper_ids or {}
-    case_ids = case_ids or set()
     cases: dict[str, list[str]] = {}
     helpers: dict[str, list[str]] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
         if id(symbol) in case_ids:
-            cases.setdefault(symbol.file, []).append(symbol.name)
+            cases.setdefault(symbol.file, []).append(
+                case_labels.get(id(symbol), symbol.name))
         if id(symbol) in helper_ids:
             helpers.setdefault(symbol.file, []).append(symbol.name)
     suffixes = {Path(p).suffix for p in test_paths}
@@ -1818,6 +1834,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         for symbol in symbols
         if (_is_test_suite_symbol(symbol)
             or _is_classless_test_case_symbol(symbol)
+            or _is_test_case_method_symbol(symbol)
             or (symbol.kind == "class"
                 and (symbol.file, symbol.name) in method_proven_suites))
     }
@@ -1829,25 +1846,45 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         for symbol_id, shared in helper_ids.items()
         if symbol_id not in test_landmark_ids
     }
-    selected_test_cases: set[int] = set()
-    seen_test_cases: set[tuple[str, str]] = set()
+    test_case_files = {
+        symbol.file for symbol in symbols if id(symbol) in test_landmark_ids
+    }
+    case_candidates: list[Symbol] = []
+    seen_test_cases: set[tuple[str, str, str]] = set()
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
         if (symbol.lang == "make"
                 or id(symbol) not in test_landmark_ids
-                or symbol.name == Path(symbol.file).stem):
+                or (symbol.kind == "class"
+                    and symbol.name == Path(symbol.file).stem)):
             continue
-        logical_case = (symbol.file, symbol.name)
+        logical_case = (symbol.file, symbol.container or "", symbol.name)
         if logical_case in seen_test_cases:
             continue
         seen_test_cases.add(logical_case)
+        case_candidates.append(symbol)
+    same_name_counts = Counter(
+        (symbol.file, symbol.name) for symbol in case_candidates)
+    case_labels = {
+        id(symbol): (
+            f"{symbol.container}.{symbol.name}"
+            if symbol.container and same_name_counts[(symbol.file, symbol.name)] > 1
+            else symbol.name
+        )
+        for symbol in case_candidates
+    }
+    selected_test_cases: set[int] = set()
+    for symbol in case_candidates:
+        label = case_labels[id(symbol)]
         if _keep_bundle("test-cases", _MAX_LEVEL, symbol,
                         default=detail < _MAX_LEVEL,
-                        payload_chars=len(symbol.name) + 1):
+                        payload_chars=len(label) + 1):
             selected_test_cases.add(id(symbol))
     test_edge_groups: dict[str, list[Symbol]] = {}
     for symbol in symbols:
         calls = resolved_calls.get(id(symbol), [])
-        if (symbol.lang == "make" or not _is_test_path(symbol.file)
+        if (symbol.lang == "make"
+                or not (_is_test_path(symbol.file)
+                        or id(symbol) in test_landmark_ids)
                 or symbol.kind not in ("fn", "method", "ctor") or not calls):
             continue
         test_edge_groups.setdefault(symbol.file, []).append(symbol)
@@ -1869,7 +1906,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     tests = _test_index_lines(files, symbols, root,
                               selected_test_edges,
                               helper_ids,
-                              case_ids=selected_test_cases)
+                              case_ids=selected_test_cases,
+                              case_labels=case_labels,
+                              case_files=test_case_files)
     if tests:
         body.extend(tests)
     tools = _support_landmark_lines("tools")
