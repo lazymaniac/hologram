@@ -31,15 +31,85 @@ def estimate_tokens(text: str) -> int:
 
 def _test_stem(raw_stem: str) -> bool:
     stem = raw_stem.casefold()
-    return (stem.startswith("test_") or stem.endswith(("_test", ".test", ".spec"))
+    return (stem.startswith("test_")
+            or stem.endswith(("_test", "_spec", ".test", ".spec"))
             or raw_stem.endswith(("Test", "Tests", "Spec", "IT")))
 
 
 def _is_test_path(rel: str) -> bool:
     path = Path(rel)
     parts = [p.casefold() for p in path.parts[:-1]]
-    return (any(p in ("test", "tests", "__tests__") for p in parts)
+    return (any(p in ("test", "tests", "__tests__", "spec", "specs", "__specs__")
+                or p.endswith((".tests", "_tests", "-tests"))
+                for p in parts)
             or _test_stem(path.stem))
+
+
+def _is_test_suite_symbol(symbol: Symbol) -> bool:
+    """A declared test case/suite type, not any class in a test file.
+
+    File location alone is insufficient: fixtures and builders often live
+    beside tests. Naming, suite annotations, or a known suite base provide the
+    conservative evidence needed to spend permanent context on the type.
+    """
+    if symbol.kind != "class" or not _is_test_path(symbol.file):
+        return False
+    if _test_stem(symbol.name):
+        return True
+    decorator_bases = {
+        decorator.split("(", 1)[0].split(".")[-1].casefold()
+        .removesuffix("attribute")
+        for decorator in symbol.decorators
+    }
+    if decorator_bases & {
+        "nested", "suite", "testclass", "testfixture", "testsuite",
+    }:
+        return True
+    return any(_base_type(base).casefold().endswith((
+        "testcase", "specification", "funsuite", "freespec", "wordspec",
+        "behaviorspec",
+    )) for base in symbol.supers)
+
+
+def _is_classless_test_case_symbol(symbol: Symbol) -> bool:
+    """A named top-level test for frameworks without suite classes."""
+    if (symbol.kind != "fn" or symbol.container is not None
+            or not _is_test_path(symbol.file)):
+        return False
+    name = symbol.name
+    if (name.casefold().startswith("test_")
+            or (symbol.lang == "go" and re.match(
+                r"^(?:Test|Benchmark|Fuzz|Example)(?:$|[^a-z])", name))):
+        return True
+    decorator_bases = {
+        decorator.split("(", 1)[0].split(".")[-1].casefold()
+        .removesuffix("attribute")
+        for decorator in symbol.decorators
+    }
+    return bool(decorator_bases & {
+        "test", "parameterizedtest", "repeatedtest", "testfactory",
+        "testtemplate", "fact", "theory", "testcase", "testcasesource",
+        "testmethod", "datatestmethod",
+    })
+
+
+def _is_test_case_method_symbol(symbol: Symbol) -> bool:
+    """Member-level evidence that its owning type is a test suite."""
+    if (symbol.kind != "method" or not symbol.container
+            or not _is_test_path(symbol.file)):
+        return False
+    if symbol.name.casefold().startswith("test_"):
+        return True
+    decorator_bases = {
+        decorator.split("(", 1)[0].split(".")[-1].casefold()
+        .removesuffix("attribute")
+        for decorator in symbol.decorators
+    }
+    return bool(decorator_bases & {
+        "test", "parameterizedtest", "repeatedtest", "testfactory",
+        "testtemplate", "fact", "theory", "testcase", "testcasesource",
+        "testmethod", "datatestmethod",
+    })
 
 
 def _is_production_symbol(symbol: Symbol) -> bool:
@@ -425,8 +495,9 @@ _BUNDLE_CATEGORY_ORDER = {
     "tested-call-chains": 2,
     "cold-methods": 3,
     "untested-call-chains": 4,
-    "private-names": 5,
-    "test-coverage": 6,
+    "test-cases": 5,
+    "private-names": 6,
+    "test-coverage": 7,
 }
 
 
@@ -528,7 +599,7 @@ def _bundle_estimated_chars(category: str, symbol: Symbol,
         parts = [symbol.name, *symbol.calls]
     elif category == "const-values":
         parts = [symbol.signature or symbol.name]
-    elif category == "test-coverage":
+    elif category in ("test-coverage", "test-cases"):
         parts = [symbol.name, *symbol.calls]
     else:
         display_params = [
@@ -843,13 +914,15 @@ def _edge_suffix(owner: str, targets: list[str], braced: bool = False) -> str:
 def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       resolved_calls: dict[int, list[str]] | None = None,
                       helper_ids: dict[int, bool] | None = None,
-                      sig_line=None) -> list[str]:
-    """Compact test orientation: one file landmark, optional business edge.
+                      sig_line=None,
+                      case_ids: set[int] | None = None) -> list[str]:
+    """Compact test orientation: file, selected test landmarks, business edge.
 
-    Ordinary test classes restate filenames and consume permanent context
-    without improving implementation choices.  Reusable helpers remain named,
-    but their internals stay in source.  ``sig_line`` remains accepted for
-    source compatibility with callers from v0.10.
+    Suite names and classless test cases help agents find existing coverage
+    before they add a duplicate.  They remain independently budgetable; an
+    omitted name never removes its file landmark.  Reusable helpers remain
+    named, but their internals stay in source.  ``sig_line`` remains accepted
+    for source compatibility with callers from v0.10.
     """
     make_files = {s.file for s in symbols if s.lang == "make"}
     test_paths: list[str] = []
@@ -876,8 +949,12 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     strip_first = (len(first_parts) == 1
                    and next(iter(first_parts)).casefold() in ("test", "tests", "__tests__"))
     helper_ids = helper_ids or {}
+    case_ids = case_ids or set()
+    cases: dict[str, list[str]] = {}
     helpers: dict[str, list[str]] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
+        if id(symbol) in case_ids:
+            cases.setdefault(symbol.file, []).append(symbol.name)
         if id(symbol) in helper_ids:
             helpers.setdefault(symbol.file, []).append(symbol.name)
     suffixes = {Path(p).suffix for p in test_paths}
@@ -887,11 +964,16 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     for path in test_paths:
         display_path = Path(*Path(path).parts[1:]) if strip_first else Path(path)
         display = str(display_path).removesuffix(shared_ext)
+        case_names = cases.get(path, [])
+        case_lines = (_private_lines(display + ":", case_names)
+                      if case_names else [display])
         helper_names = _factored_name_tokens(helpers.get(path, []))
         helper_suffix = (f":*{','.join(helper_names)}"
                          if helper_names else "")
-        lines.append(display + helper_suffix
-                     + _edge_suffix(Path(path).stem, edges.get(path, [])))
+        case_lines[-1] += (helper_suffix
+                           + _edge_suffix(Path(path).stem,
+                                          edges.get(path, [])))
+        lines.extend(case_lines)
     header = f"? tests ·{shared_ext}" if shared_ext else "? tests"
     return [header, *(" " + line for line in lines)]
 
@@ -991,6 +1073,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             tier, reason = 0, "tested call path"
         elif category == "test-coverage":
             tier, reason = 1, "test-to-business edge"
+        elif category == "test-cases":
+            tier, reason = 2, "existing test case"
         elif category == "untested-call-chains":
             tier = 0 if cross_file else 2
             reason = "cross-file call path" if cross_file else "local call path"
@@ -1724,6 +1808,42 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     body = _tree_lines(payload_by_dir)
     helper_ids = (helpers if helpers is not None
                   else _helper_class_ids(symbols, file_tokens))
+    method_proven_suites = {
+        (symbol.file, symbol.container)
+        for symbol in symbols
+        if _is_test_case_method_symbol(symbol)
+    }
+    test_landmark_ids = {
+        id(symbol)
+        for symbol in symbols
+        if (_is_test_suite_symbol(symbol)
+            or _is_classless_test_case_symbol(symbol)
+            or (symbol.kind == "class"
+                and (symbol.file, symbol.name) in method_proven_suites))
+    }
+    # Explicit test evidence wins over the heuristic helper classifier.  A
+    # neutral-named @TestFixture or Specification must be a budgetable case,
+    # never an always-retained ``:*helper`` duplicate.
+    helper_ids = {
+        symbol_id: shared
+        for symbol_id, shared in helper_ids.items()
+        if symbol_id not in test_landmark_ids
+    }
+    selected_test_cases: set[int] = set()
+    seen_test_cases: set[tuple[str, str]] = set()
+    for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
+        if (symbol.lang == "make"
+                or id(symbol) not in test_landmark_ids
+                or symbol.name == Path(symbol.file).stem):
+            continue
+        logical_case = (symbol.file, symbol.name)
+        if logical_case in seen_test_cases:
+            continue
+        seen_test_cases.add(logical_case)
+        if _keep_bundle("test-cases", _MAX_LEVEL, symbol,
+                        default=detail < _MAX_LEVEL,
+                        payload_chars=len(symbol.name) + 1):
+            selected_test_cases.add(id(symbol))
     test_edge_groups: dict[str, list[Symbol]] = {}
     for symbol in symbols:
         calls = resolved_calls.get(id(symbol), [])
@@ -1748,7 +1868,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             selected_test_edges[id(representative)] = merged_calls
     tests = _test_index_lines(files, symbols, root,
                               selected_test_edges,
-                              helper_ids)
+                              helper_ids,
+                              case_ids=selected_test_cases)
     if tests:
         body.extend(tests)
     tools = _support_landmark_lines("tools")

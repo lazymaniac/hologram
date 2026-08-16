@@ -31,9 +31,12 @@ Theme: more business-logic signal per always-loaded token.
 - Repeated names are factored in signatures, fields, relationships, re-exports, and
   call targets only when the notation is shorter. A private inventory entry is omitted
   only when the same exact target remains visible in a selected call chain.
-- Tests retain one actionable landmark per file plus compact coverage/helper hints;
-  ordinary test-class inventories are removed. Root `tools` and `benchmark` code gets
-  separate one-line-per-file orientation instead of competing with business internals.
+- Tests retain one actionable landmark per file plus compact coverage/helper hints.
+  Existing test suite names and classless cases (for example pytest, Go, and Rust
+  tests) are shown by default to discourage duplicate coverage, factored losslessly,
+  and remain individually droppable when a tight budget needs to preserve business
+  logic first. Root `tools` and `benchmark` code gets
+  separate compact orientation instead of competing with business internals.
 - Volatile LOC, freshness state, filters, targets, and budget metadata moved to the
   final digest line. Existing header-form maps remain readable, while unchanged
   semantic prefixes can now be reused by prompt caches.
@@ -43,10 +46,11 @@ Theme: more business-logic signal per always-loaded token.
 ### Validation
 
 - On Hologram's own repository, the deterministic estimate fell from 3,621 to about
-  1,700 digest tokens and from 3,769 to about 1,800 managed-context tokens; the compact
-  floor fell from about 1,444 to about 760. Full-grammar fixture estimates are
-  non-regressing at token granularity. These are representation measurements, not a
-  claim of improved model outcomes; matched semantic-task evaluation remains required.
+  2,170 digest tokens and from 3,769 to about 2,280 managed-context tokens while
+  restoring test suite names by default; the compact floor fell from about 1,444
+  to about 760. Full-grammar managed-context fixture estimates remain below v0.10
+  baselines. These are representation measurements, not a claim of improved model
+  outcomes; matched semantic-task evaluation remains required.
 
 ## [0.10.0] - 2026-08-14
 

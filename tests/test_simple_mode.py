@@ -14,6 +14,7 @@ from hologram import (  # noqa: E402
     extract_file,
     render_simple,
 )
+from hologram.render import _is_classless_test_case_symbol  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 JAVAMINI = FIXTURES / "javamini"
@@ -100,7 +101,7 @@ class SimpleDigestTest(unittest.TestCase):
 
 
 class FixtureTokenCeilingTest(unittest.TestCase):
-    """Known fixtures must not spend more estimated context than v0.10."""
+    """Known fixtures stay within reviewed release-level context ceilings."""
 
     def _assert_ceiling(self, name: str, ceiling: int) -> None:
         root = FIXTURES / name
@@ -110,7 +111,9 @@ class FixtureTokenCeilingTest(unittest.TestCase):
 
     @_needs_fixture("javamini")
     def test_javamini(self):
-        self._assert_ceiling("javamini", 253)
+        # The one-token increase names the otherwise invisible nested test
+        # case suite, while managed context remains well below v0.10.
+        self._assert_ceiling("javamini", 254)
 
     @_needs_fixture("javamini")
     def test_javamini_managed_context_shrinks_with_business_gold_set_intact(self):
@@ -120,7 +123,7 @@ class FixtureTokenCeilingTest(unittest.TestCase):
         # v0.10 needed about 401 managed-context planning tokens here. The
         # lower ceiling is valid only while these turn-zero architecture and
         # business-rule facts remain present together.
-        self.assertLessEqual(cost.managed_block_tokens, 360)
+        self.assertLessEqual(cost.managed_block_tokens, 362)
         for required in (
             "PricePort.java(I) ←PricingEngine",
             "PricingEngine.java(C{basePrices})",
@@ -136,7 +139,8 @@ class FixtureTokenCeilingTest(unittest.TestCase):
         self.assertNotIn("optional facts omitted", digest)
 
     def test_pymini(self):
-        self._assert_ceiling("pymini", 77)
+        # Named pytest cases are retained because the file has no suite class.
+        self._assert_ceiling("pymini", 94)
 
     @_needs_fixture("tsmini")
     def test_tsmini(self):
@@ -848,7 +852,7 @@ class CompactMapContractTest(unittest.TestCase):
         self.assertNotIn("a.py\n - _step", out)
         self.assertIn("b.py\n - _step", out)
 
-    def test_test_index_lists_every_file_but_no_test_inventory(self):
+    def test_test_index_lists_suites_and_classless_cases_not_suite_methods(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             test_file = root / "tests" / "test_service.py"
@@ -865,8 +869,7 @@ class CompactMapContractTest(unittest.TestCase):
             out = render_simple(root, syms, [test_file, go_file])
         self.assertIn("tests/test_service.py", out)
         self.assertIn("service_test.go", out)
-        self.assertNotIn("ServiceTest", out)
-        self.assertNotIn("test_run", out)
+        self.assertIn("tests/test_service.py:ServiceTest,test_run", out)
 
     def test_duplicate_top_level_names_get_file_qualification(self):
         syms = [
@@ -915,7 +918,8 @@ class CompactMapContractTest(unittest.TestCase):
             out = render_simple(root, syms, files)
 
         self.assertIn("domain/order.py\n place(order):Order", out)
-        self.assertIn("? tests ·.py\n test_order > place", out)
+        # Classless pytest case name shares the existing file/coverage line.
+        self.assertIn("? tests ·.py\n test_order:test_place > place", out)
         self.assertIn("tools\n build_fixture.py: build_fixture(root)", out)
         self.assertIn("release.sh: build();publish()", out)
         self.assertIn(
@@ -1067,15 +1071,114 @@ class PrecomputedRenderTest(unittest.TestCase):
 
 
 class TestIndexDietTest(unittest.TestCase):
-    def _sym(self, name, kind, file, container=None, calls=(), line=1):
+    def _sym(self, name, kind, file, container=None, calls=(), line=1,
+             decorators=()):
         return Symbol(name=name, kind=kind, file=file, line=line,
                       visibility="pub", lang="java", container=container,
-                      signature=f"{name}()", calls=list(calls))
+                      signature=f"{name}()", calls=list(calls),
+                      decorators=list(decorators))
 
-    def _render(self, syms, files):
+    def _render(self, syms, files, **kwargs):
         with tempfile.TemporaryDirectory() as tmp:
             return render_simple(Path(tmp), syms,
-                                 [Path(tmp) / f for f in files])
+                                 [Path(tmp) / f for f in files], **kwargs)
+
+    def test_common_spec_and_dotnet_test_paths_are_recognized(self):
+        self.assertTrue(hologram._is_test_path("spec/models/order_spec.rb"))
+        self.assertTrue(hologram._is_test_path(
+            "Order.Tests/OrderRules.cs"))
+
+    def test_classless_case_names_cover_pytest_go_and_rust_not_helpers(self):
+        syms = [
+            Symbol(name="test_rejects_expired_card", kind="fn",
+                   file="tests/test_checkout.py", line=1,
+                   visibility="pub", lang="python"),
+            Symbol(name="build_checkout", kind="fn",
+                   file="tests/test_checkout.py", line=2,
+                   visibility="pub", lang="python"),
+            Symbol(name="TestConcurrentTransfer", kind="fn",
+                   file="ledger_test.go", line=1,
+                   visibility="pub", lang="go"),
+            Symbol(name="seedLedger", kind="fn", file="ledger_test.go",
+                   line=2, visibility="priv", lang="go"),
+            Symbol(name="rejects_expired_card", kind="fn",
+                   file="tests/payment_tests.rs", line=1,
+                   visibility="priv", lang="rust", decorators=["test"]),
+            Symbol(name="payment_fixture", kind="fn",
+                   file="tests/payment_tests.rs", line=2,
+                   visibility="priv", lang="rust"),
+        ]
+        out = self._render(syms, [
+            "tests/test_checkout.py", "ledger_test.go",
+            "tests/payment_tests.rs",
+        ])
+
+        self.assertIn("tests/test_checkout.py:test_rejects_expired_card", out)
+        self.assertIn("ledger_test.go:TestConcurrentTransfer", out)
+        self.assertIn("tests/payment_tests.rs:rejects_expired_card", out)
+        self.assertNotIn("build_checkout", out)
+        self.assertNotIn("seedLedger", out)
+        self.assertNotIn("payment_fixture", out)
+
+    def test_go_short_entrypoint_names_follow_testing_convention(self):
+        def go(name):
+            return Symbol(name=name, kind="fn", file="ledger_test.go", line=1,
+                          visibility="pub", lang="go")
+
+        for name in ("Test", "Test1", "Benchmark", "Fuzz", "Example"):
+            with self.subTest(name=name):
+                self.assertTrue(_is_classless_test_case_symbol(go(name)))
+        for name in ("Tester", "Benchmarking", "Fuzzy", "Examples"):
+            with self.subTest(name=name):
+                self.assertFalse(_is_classless_test_case_symbol(go(name)))
+        python_helper = Symbol(name="TestData", kind="fn",
+                               file="tests/test_helpers.py", line=1,
+                               visibility="pub", lang="python")
+        self.assertFalse(_is_classless_test_case_symbol(python_helper))
+
+    def test_suite_evidence_beats_helper_classification(self):
+        suites = [
+            self._sym("TestCheckout", "class", "tests/payment_scenarios.py"),
+            self._sym("OrderRules", "class", "Order.Tests/PaymentScenarios.cs",
+                      decorators=("TestClass",)),
+            self._sym("CheckoutSuite", "class", "test/Checkout.java",
+                      decorators=("Suite",)),
+            self._sym("CalculatorFacts", "class", "tests/Calculator.cs"),
+        ]
+        helper = self._sym("TestDataBuilder", "class",
+                           "tests/payment_scenarios.py", line=9)
+        members = [
+            self._sym("test_rejects_expired_card", "method",
+                      "tests/payment_scenarios.py", container="TestCheckout"),
+            self._sym("rejectsExpiredCard", "method", "tests/Calculator.cs",
+                      container="CalculatorFacts", decorators=("Fact",)),
+        ]
+        catalog = set()
+        out = self._render(
+            suites + [helper] + members,
+            [symbol.file for symbol in suites],
+            helpers={id(symbol): True for symbol in suites + [helper]},
+            budget_catalog=catalog,
+        )
+        for name in ("TestCheckout", "OrderRules", "CheckoutSuite",
+                     "CalculatorFacts"):
+            self.assertIn(name, out)
+        self.assertNotIn("rejectsExpiredCard", out)
+        self.assertNotIn("test_rejects_expired_card", out)
+        self.assertIn(":*TestDataBuilder", out)
+        self.assertEqual(sum(bundle.category == "test-cases"
+                             for bundle in catalog), 4)
+
+        skeleton = self._render(
+            suites + [helper] + members,
+            [symbol.file for symbol in suites],
+            helpers={id(symbol): True for symbol in suites + [helper]},
+            detail=7,
+        )
+        for name in ("TestCheckout", "OrderRules", "CheckoutSuite",
+                     "CalculatorFacts"):
+            self.assertNotIn(name, skeleton)
+        self.assertIn("TestDataBuilder", skeleton)
 
     def test_single_class_file_folds_and_keeps_edge(self):
         syms = [self._sym("loadTheme", "fn", "src/Theme.java"),
@@ -1090,17 +1193,53 @@ class TestIndexDietTest(unittest.TestCase):
 
     def test_multi_class_file_stays_one_file_landmark(self):
         syms = [self._sym("PricingTest", "class", "test/PricingTest.java"),
-                self._sym("Bulk", "class", "test/PricingTest.java", line=9)]
-        out = self._render(syms, ["test/PricingTest.java"])
-        self.assertIn("\n PricingTest\n", out)
-        self.assertNotIn("{PricingTest,Bulk}", out)
-        self.assertNotIn("Bulk", out)
+                self._sym("BulkTest", "class", "test/PricingTest.java", line=9)]
+        catalog = set()
+        retained = set()
+        out = self._render(syms, ["test/PricingTest.java"],
+                           budget_catalog=catalog,
+                           budget_retained=retained)
+        self.assertIn("\n PricingTest:BulkTest\n", out)
+        self.assertNotIn("{PricingTest,BulkTest}", out)
+        self.assertEqual(
+            [bundle.category for bundle in catalog], ["test-cases"])
+        self.assertEqual(catalog, retained)
+
+        skeleton = self._render(syms, ["test/PricingTest.java"], detail=7)
+        self.assertIn("\n PricingTest\n", skeleton)
+        self.assertNotIn("BulkTest", skeleton)
 
     def test_stem_mismatch_still_uses_exact_file(self):
         syms = [self._sym("ServiceTest", "class", "test/AllTests.java")]
         out = self._render(syms, ["test/AllTests.java"])
-        self.assertIn("\n AllTests\n", out)
-        self.assertNotIn("ServiceTest", out)
+        self.assertIn("\n AllTests:ServiceTest\n", out)
+
+    def test_case_suite_names_factor_losslessly(self):
+        syms = [self._sym("CasesTest", "class", "test/CasesTest.java"),
+                self._sym("BulkOrdersTest", "class", "test/CasesTest.java", line=2),
+                self._sym("SmallOrdersTest", "class", "test/CasesTest.java", line=3)]
+        out = self._render(syms, ["test/CasesTest.java"])
+        self.assertIn("CasesTest:{Bulk,Small}OrdersTest", out)
+
+    def test_same_file_duplicate_case_name_is_one_fact(self):
+        syms = [self._sym("CasesTest", "class", "test/CasesTest.java"),
+                self._sym("ScenarioTest", "class", "test/CasesTest.java", line=2),
+                self._sym("ScenarioTest", "class", "test/CasesTest.java", line=8)]
+        catalog = set()
+        out = self._render(syms, ["test/CasesTest.java"],
+                           budget_catalog=catalog)
+        self.assertEqual(out.count("ScenarioTest"), 1)
+        self.assertEqual(sum(bundle.category == "test-cases"
+                             for bundle in catalog), 1)
+
+    def test_non_suite_class_is_not_mislabeled_as_case(self):
+        syms = [self._sym("OrderTest", "class", "test/OrderTest.java"),
+                self._sym("FixtureBuilder", "class", "test/OrderTest.java", line=2),
+                self._sym("ExpiredCards", "class", "test/OrderTest.java", line=3,
+                          decorators=("Nested",))]
+        out = self._render(syms, ["test/OrderTest.java"])
+        self.assertIn("OrderTest:ExpiredCards", out)
+        self.assertNotIn("FixtureBuilder", out)
 
     def test_mixed_extensions_keep_everything(self):
         syms = [self._sym("ATest", "class", "test/ATest.java"),
