@@ -797,7 +797,9 @@ class MakefileExtractTest(unittest.TestCase):
             root = Path(tmp)
             (root / "Makefile").write_text(
                 "deploy: build\n\techo $(ENV)\n\nbuild:\n\t@:\n")
-            body = build_digest(root).splitlines()[2:]
+            lines = build_digest(root).splitlines()
+            body = lines[2:-1]  # stable header/legend and volatile metadata footer
+        self.assertIn(" LOC ", lines[-1])
         self.assertEqual(body, [
             "Makefile(C)",
             " deploy(ENV) > build",

@@ -163,29 +163,50 @@ def _state_hash(root: Path, langs: set[str] | None = None) -> str:
     return state.hexdigest()[:12]
 
 
+def _digest_metadata_line(digest: str) -> str:
+    """Canonical metadata only: current footer or legacy first-line header.
+
+    Semantic facts may legally contain text such as ``· budget 5``. Searching
+    the whole digest would let such a constant override freshness/settings on
+    rebuild, so readers accept metadata only at the two versioned locations.
+    """
+    lines = [line for line in digest.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    if re.match(r"^· [\d,]+ LOC(?: ·|$)", lines[-1]):
+        return lines[-1]
+    if re.match(r"^# hologram · [\d,]+ LOC(?: ·|$)", lines[0]):
+        return lines[0]
+    return ""
+
+
 def _digest_state(digest: str) -> str | None:
-    """The `state` stamp recorded in a digest's header line, if any."""
-    m = re.search(r"· state (\w{12})", digest.split("\n", 1)[0])
+    """The `state` stamp recorded in a digest's metadata, if any.
+
+    Current maps place volatile metadata last for prompt-cache stability;
+    legacy maps carried the same fields on the first line.
+    """
+    m = re.search(r"· state (\w{12})", _digest_metadata_line(digest))
     return m.group(1) if m else None
 
 
 def _digest_langs(digest: str) -> set[str] | None:
-    """The `langs` filter recorded in a digest's header line, if any — how a
+    """The `langs` filter recorded in a digest's metadata, if any — how a
     `--lang`-restricted map remembers its own scope across rebuilds."""
-    m = re.search(r"· langs ([\w,]+)", digest.split("\n", 1)[0])
+    m = re.search(r"· langs ([\w,]+)", _digest_metadata_line(digest))
     return set(m.group(1).split(",")) if m else None
 
 
 def _digest_budget(digest: str) -> int | None:
-    """The token budget recorded in a digest's header line, if any."""
-    m = re.search(r"· budget (\d+)", digest.split("\n", 1)[0])
+    """The token budget recorded in a digest's metadata, if any."""
+    m = re.search(r"· budget (\d+)", _digest_metadata_line(digest))
     return int(m.group(1)) if m else None
 
 
 def _digest_targets(digest: str) -> list[str] | None:
-    """The `targets` restriction recorded in a digest's header line, if any —
+    """The `targets` restriction recorded in a digest's metadata, if any —
     which context files carry the map, remembered across rebuilds."""
-    m = re.search(r"· targets ([^·\n]+)", digest.split("\n", 1)[0])
+    m = re.search(r"· targets ([^·\n]+)", _digest_metadata_line(digest))
     return [t.strip() for t in m.group(1).split(",")] if m else None
 
 

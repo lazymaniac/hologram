@@ -549,13 +549,30 @@ class BudgetConditionTest(unittest.TestCase):
             ws = Path(tmp) / "wsA"
             bench.make_workspace(corpus, ws, "A", budget=60)
             info = bench._embedded_map_info(ws)
-            header = bench.hologram.embedded_digest(
-                ws / "CLAUDE.md").splitlines()[0]
+            metadata = bench.hologram.gather._digest_metadata_line(
+                bench.hologram.embedded_digest(ws / "CLAUDE.md"))
             self.assertEqual(info["effective_map_budget"], 60)
-            self.assertEqual(info["effective_map_adaptive"], " A" in header)
-            if " A" in header:
+            self.assertEqual(info["effective_map_adaptive"], " A" in metadata)
+            if " A" in metadata:
                 self.assertGreater(info["effective_map_detail"], 0)
             bench.drop_workspace(corpus, ws)
+
+    def test_body_budget_text_cannot_spoof_benchmark_metadata(self):
+        digest = (
+            "# hologram\n"
+            "· f(args):Ret\n"
+            "config.py\n"
+            " = BANNER=· budget 5 L1\n"
+            "· 1 LOC · state abcdef123456 · budget 80 A7\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            bench.hologram.embed_digest(ws / "CLAUDE.md", digest)
+            info = bench._embedded_map_info(ws)
+
+        self.assertEqual(info["effective_map_budget"], 80)
+        self.assertEqual(info["effective_map_detail"], 7)
+        self.assertTrue(info["effective_map_adaptive"])
 
 
 class ActedOnFindingsTest(unittest.TestCase):
@@ -930,6 +947,35 @@ class StructuredReviewMeasurementTest(unittest.TestCase):
 
 
 class CoachConditionTest(unittest.TestCase):
+    def test_legacy_long_note_cost_uses_actual_managed_block(self):
+        hologram = bench.hologram
+        digest = ("# hologram\n· C/R/I{fields} · f(args):Ret\n"
+                  "svc.py\n run():int\n· 2 LOC · state abcdef123456")
+        legacy_note = "Legacy project-map guidance. " + ("Read first. " * 80)
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            target = ws / "CLAUDE.md"
+            target.write_text(
+                f"{hologram.embed._EMBED_START}\n{legacy_note}\n\n```\n"
+                f"{digest}\n```\n{hologram.embed._EMBED_END}\n")
+            text = target.read_text()
+            span = hologram.embed._block_span(text)
+            self.assertIsNotNone(span)
+            actual_block = text[span[0]:span[1]]
+            info = bench._embedded_map_info(ws)
+
+        self.assertEqual(
+            info["effective_managed_block_tokens"],
+            hologram.estimate_tokens(actual_block),
+        )
+        self.assertEqual(info["effective_coaching_tokens"], 0)
+        self.assertEqual(
+            info["effective_managed_block_tokens"],
+            info["effective_digest_tokens"]
+            + info["effective_wrapper_tokens"]
+            + info["effective_coaching_tokens"],
+        )
+
     def test_ac_keeps_coaching_a_strips_it(self):
         from hologram.embed import _COACH_SENTENCE
         with tempfile.TemporaryDirectory() as tmp:
@@ -937,15 +983,34 @@ class CoachConditionTest(unittest.TestCase):
             ws_a = Path(tmp) / "wsA"
             bench.make_workspace(corpus, ws_a, "A")
             a_text = (ws_a / "CLAUDE.md").read_text()
+            a_info = bench._embedded_map_info(ws_a)
             bench.drop_workspace(corpus, ws_a)
             ws_ac = Path(tmp) / "wsAC"
             bench.make_workspace(corpus, ws_ac, "AC")
             ac_text = (ws_ac / "CLAUDE.md").read_text()
+            ac_info = bench._embedded_map_info(ws_ac)
             bench.drop_workspace(corpus, ws_ac)
         self.assertIn("hologram:start", a_text)
         self.assertNotIn(_COACH_SENTENCE.strip(), a_text)
         self.assertIn("hologram:start", ac_text)
         self.assertIn(_COACH_SENTENCE.strip(), ac_text)
+        self.assertEqual(a_info["effective_map_tokens"],
+                         a_info["effective_digest_tokens"])
+        self.assertEqual(a_info["effective_digest_tokens"],
+                         ac_info["effective_digest_tokens"])
+        self.assertEqual(a_info["effective_wrapper_tokens"],
+                         ac_info["effective_wrapper_tokens"])
+        self.assertEqual(a_info["effective_coaching_tokens"], 0)
+        self.assertGreater(ac_info["effective_coaching_tokens"], 0)
+        self.assertGreater(ac_info["effective_managed_block_tokens"],
+                           a_info["effective_managed_block_tokens"])
+        for info in (a_info, ac_info):
+            self.assertEqual(
+                info["effective_managed_block_tokens"],
+                info["effective_digest_tokens"]
+                + info["effective_wrapper_tokens"]
+                + info["effective_coaching_tokens"],
+            )
 
 
 class RunOneTest(unittest.TestCase):
@@ -982,6 +1047,13 @@ class RunOneTest(unittest.TestCase):
         self.assertEqual(row["acceptance_status"], "ok")
         self.assertIsNone(row["requested_budget"])
         self.assertGreater(row["effective_map_tokens"], 0)
+        self.assertEqual(row["effective_map_tokens"],
+                         row["effective_digest_tokens"])
+        self.assertEqual(
+            row["effective_managed_block_tokens"],
+            row["effective_digest_tokens"] + row["effective_wrapper_tokens"]
+            + row["effective_coaching_tokens"],
+        )
         self.assertEqual(row["schema_version"], 3)
         self.assertEqual(row["hologram_version"], bench.hologram.__version__)
         self.assertRegex(row["tool_revision"], r"^[0-9a-f]{12}$")
@@ -1380,6 +1452,34 @@ class ScopeJudgeTest(unittest.TestCase):
 
 
 class ReportTest(unittest.TestCase):
+    def test_condition_summary_exposes_static_context_cost_components(self):
+        base = {
+            "task": "inspect", "kind": "navigate", "rep": 0,
+            "model": "m", "accepted": True, "duplicated": [],
+            "runner_status": "ok", "acceptance_status": "ok",
+            "effective_digest_tokens": 100,
+            "effective_wrapper_tokens": 20,
+        }
+        md = bench.report([
+            {**base, "condition": "A", "effective_coaching_tokens": 0,
+             "effective_managed_block_tokens": 120},
+            {**base, "condition": "AC", "effective_coaching_tokens": 5,
+             "effective_managed_block_tokens": 125},
+        ])
+
+        self.assertIn("digest ctx", md)
+        self.assertIn("wrapper ctx", md)
+        self.assertIn("coaching ctx", md)
+        self.assertIn("managed ctx", md)
+        a_line = next(line for line in md.splitlines()
+                      if line.startswith("| A | navigate"))
+        ac_line = next(line for line in md.splitlines()
+                       if line.startswith("| AC | navigate"))
+        self.assertTrue(a_line.endswith(
+            "| 100 ± 0 | 20 ± 0 | 0 ± 0 | 120 ± 0 |"))
+        self.assertTrue(ac_line.endswith(
+            "| 100 ± 0 | 20 ± 0 | 5 ± 0 | 125 ± 0 |"))
+
     def test_structured_review_section_uses_only_eligible_counts_not_ids(self):
         eligible = {
             "task": "inspect", "kind": "fix", "condition": "AR", "rep": 0,

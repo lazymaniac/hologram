@@ -67,13 +67,16 @@ dict and mutate it, never rebind) because tests monkeypatch entries through
    (name/kind/signature/params/calls/supers/raises/`bindings`/`size`). Python uses
    stdlib `ast`; languages registered in `_GRAMMAR_MODULES` use tree-sitter;
    HTML, CSS, Helm, Make, Bash, and Lua use narrow scanners.
-3. **render** — `render_simple` owns *all* layout: the directory trie, same-shape type
-   grouping, receiver resolution through `bindings`, transitive reduction of call
-   chains, prefix-factored private names, the test index, markers (`✓ ×0 ~N !E`).
-   No extractor formats output.
+3. **render** — `render_simple` owns *all* layout: exact-file/path-compressed tries,
+   lossless cross-file grouping for conventional one-type files, receiver resolution
+   through `bindings`, transitive reduction of call chains, name factoring, compact
+   test/tool/benchmark landmarks, and markers (`✓ ×0 ~N !E`). No extractor formats
+   output.
 
 `build_digest` = `_gather` (scan + extract + state hash) → level-invariant call/
-usage/helper precomputation → one or more complete `render_simple` candidates.
+usage/helper precomputation → full and semantic-floor renders → globally ranked,
+dependency-closed whole-fact restoration when a budget binds. Every budget trial is
+a complete `render_simple` candidate; no fact is byte-truncated.
 
 Consequences worth knowing before editing:
 
@@ -86,14 +89,27 @@ Consequences worth knowing before editing:
   `_state_hash` recomputes the same value without parsing, which is what makes `check`
   and `--if-stale` cheap; it must stay byte-identical in method to the hash `_gather`
   accumulates. Freshness is read back out of the embedded block by `embedded_digest` +
-  `_digest_state` — CLAUDE.md is the only place a generated map is stored.
+  `_digest_state`. Current maps put volatile LOC/state/settings in the footer to keep
+  the semantic prefix cache-stable; readers must continue accepting legacy
+  metadata-bearing headers. CLAUDE.md is the only place a generated map is stored.
 - **Determinism is the contract.** No LLM, no timestamps, no set iteration leaking into
   output. Under a fixed Python/parser toolchain, the same sources and settings
   produce the same digest; the state hash does not detect dependency upgrades.
 - **Output size is a representation decision, never truncation.** When adding a fact to
   the digest, pay for it by compressing elsewhere (names not types, fields not field
-  types, factored prefixes, file/class-only test index). Format decisions were measured
-  with an o200k tokenizer.
+  types, lossless prefix/suffix factoring, one landmark per test/support file). A
+  private inventory name may disappear only when the same exact target remains visible
+  in a retained call chain. Format decisions are checked against fixture token
+  baselines; `tools/measure_tokens.py` provides optional o200k measurement.
+- **The map is push-only by design.** Do not add a query/retrieval step, generated
+  side-index, or coaching that requires the agent to remember a tool call. The product
+  distinction is maximum useful business-logic semantics already present at session
+  start.
+- **Budget means digest budget.** `adaptive-bundles-v2` starts from a compact pushed
+  floor, ranks optional facts by tested/cross-file value, fan-in, and file breadth,
+  closes method-call dependencies, and verifies every admission by full rendering.
+  Wrapper and coaching costs are exposed separately by `managed_context_cost`, CLI
+  output, stats JSON, and benchmark rows; evolve these schemas additively.
 - **Language depth varies on purpose** — see the README table. Don't promise a language
   more than its extractor delivers.
 
@@ -165,158 +181,123 @@ stay outside tracked files and release artifacts. Anonymization alone does not
 grant publication permission.
 
 <!-- hologram:start — generated, do not edit; refreshed by git hooks -->
-This is a hologram map of this repository: a deterministic index of its public API — signatures, fields, call chains, private names, test locations. Read it before exploring to find what exists and open the right file first. Line 2 is the legend. Before writing tests or helpers, check `? tests` for existing coverage and *-marked helpers. When `hologram review` reports findings, address them before finishing: reuse the named original instead of a duplicate; consolidate re-covered tests.
+Hologram project map: exact files, signatures, fields, and retained call paths. Read it before searching source. Line 2 is the legend; omissions are marked. Before adding tests/helpers, check `? tests` and `*` helpers. Address `hologram review` findings before finishing; reuse named originals and consolidate duplicate coverage.
 
 ```
-# hologram · 17,827 LOC · state 07d38a0ce631
-· C/R/I{fields} · f(args):Ret > project calls · -=private · ?=tests · ×0=no static use · ✓=tested · ~N=lines · !E=throws · @=route/annotation · = consts · p{a,b}=pa,pb · {a,b}s=as,bs · +N=more
-benchmark
- claude_runner(prompt,ws,model,max_turns,effort):RunnerOutcome > _effort_invocation,_run_process
- drop_workspace(corpus,ws) ✓
- judge_reuse(before,after,expect_reuse):dict ✓ > bench._sig_lines,_fn_name,_chain
- judge_scope(ws,expect,test_only,setup_sha):bool | None ✓ > _added_lines
- load_tasks(path):Config ~52 ✓ !SystemExit,TypeError,ValueError > Config,_validate_config,Task
- main(argv):int ~191 ✓ !SystemExit > load_tasks,_validate_matrix,_preflight_runner,_counterbalanced_schedule,_run_review_hook,_read_rows,_atomic_replace,_append_jsonl_atomic,run_one,_resumable_block,_setup_failure_row,report
- make_workspace(corpus,ws,condition,lang,budget):Path ~76 ✓ !ValueError,RuntimeError > _safe_context_targets,_record_clean_setup,_block_span,_contained_target
- parse_transcript(text):dict ~88 ✓ > _acted_on_findings,_review_tool_results
- report(rows,anon):str ~129 ✓ > _latest_cells,_anonymous_task_labels,_percent_cell,_matched_section,_review_section,_group_key,_infra_reason,_automatic_acceptance_applicable,_reuse_applicable,_short_identity,_median_mad,_numbers,_task_label
- run_one(corpus,task,condition,rep,results_dir,model,max_turns,runner,lang,budget,effort,config_revision,experiment_id,cell_id,pair_id,order_seed,condition_order,order_index,runner_mode,host_execution_acknowledged,expected_corpus_revision,experiment_conditions,experiment_reps,experiment_tasks,execute_acceptance,runner_provenance,wave_id,wave_started_at,execution_index,block_index):dict ~240 ✓ !ValueError,RuntimeError > _validate_config,_cell_spec,_utc_now,Config,_adhoc_config_revision,_runtime_provenance,_experiment_spec,make_workspace,_setup_sha,_digest_of,_embedded_map_info,_invoke_runner,_persist_outcome,judge_reuse,judge_scope,parse_transcript,_semantic_result,_empty_review_measurement,_run_acceptance,RunnerOutcome,_classify_acceptance,_resolved_model,drop_workspace,_install_review_capture,_review_final_state
- Config(R{corpus,tasks,model,max_turns,lang,budget,effort,revision})
- RunnerOutcome(R{stdout,stderr,returncode,duration_seconds,timed_out,status,error})
-  ok():bool @property
-  - __post_init__
- Task(R{id,kind,prompt,accept_cmd,expect_reuse,expect_answer,expect_in_new_code,scope_in_tests,max_turns,effort,manual_only,judge,accept_pass_codes,accept_fail_codes,semantic_judge})
- - bench.py: _safe_context_targets,_validate_config,_validate_matrix,{_adhoc_config,_task,_judge_config,_corpus}_revision,
-             _identity,_content_text,_review_{tool_results,final_state,section},_acted_on_findings,_sig_lines,_fn_name,
-             _chain,_setup_sha,_record_clean_setup,_added_lines,_effort_invocation,_terminate_process_group,
-             _run_{process,acceptance,review_hook},_as_text,_terminal_{result,transcript_error,protocol_error,cell},
-             _apply_terminal_status,{_invoke,_preflight,_dry}_runner,_classify_acceptance,_excerpt,_persist_outcome,
-             _fsync_directory,_artifact_matches,_resume_evidence_intact,_embedded_map_info,_digest_of,_utc_now,
-             _runtime_provenance,_experiment_spec,_cell_spec,_counterbalanced_schedule,_infra_reason,_resumable_block,
-             _read_rows,_atomic_replace,_append_jsonl_atomic,_empty_review_measurement,_install_review_capture,
-             _read_review_capture,_agent_commit_ids,_resolved_model,_semantic_result,
-             {_legacy_cell,_group,_legacy_pair}_key,_latest_cells,_numbers,_median_mad,_median_mad_n,_percent_cell,
-             _automatic_acceptance_applicable,_reuse_applicable,_short_identity,_anonymous_task_labels,_task_label,
-             _matched_section,_eligible_review_measurement,_setup_failure_row
+# hologram
+· C/R/I{fields} · f(args):Ret > calls · -=private · ✓=tested · ~N=lines · !E=throws · p{a,b}s=pas,pbs · +N=more
 hologram
- build_digest(root,langs,targets,budget):str ✓ > _build_digest
- build_digest_with_stats(root,langs,targets,budget):tuple[str,BudgetStats] ✓ > _build_digest
- const_signature(name,value_text):str ✓
- context_targets(root):list[Path]
- detect_language(path):str | None ✓
- embed_digest(path,digest) > _embed_block,_block_span,_seed_content
- embedded_digest(path):str ✓ > _block_span
- estimate_tokens(text):int ✓
- has_parser(lang):bool
- main() !SystemExit > run_cli
- render_report(findings,rev):str ✓
- render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers,budget_selection,budget_catalog,budget_retained):str ~654 ✓ > _tree_lines,_test_index_lines,_legend_line,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_total_loc,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_private_lines,_is_test_path,_strip_exc
- report_data(findings,rev):dict[str,object] ✓
- review_snapshots(old,new,old_digest,checks):list[Finding] ~199 ✓ > _prod_api,_raw_call_targets,_test_edges,_prod_callables,_zero_usage_names,_map_line_for,_describe,_finding,_key,_is_test_path,_is_production_symbol,_decorator_notes,review._symbol_identity,_api_delta
- run_cli(argv):int ~326 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,_uninstall,_bootstrap_or_die,run_review,build_digest_with_stats,_install_hooks,_dead_hook_scripts,_warn_if_large,embed_digest,_contained_target,_resolve_target_restriction,_digest_langs,_digest_targets,_revision_source_paths,embedded_digest,_digest_budget,_strip_block,_digest_state,run_review_data,estimate_tokens
- run_review(root,rev,langs,checks):str > render_report,run_review_findings
- run_review_data(root,rev,langs,checks):dict[str,object] > report_data,run_review_findings
- run_review_findings(root,rev,langs,checks):list[Finding] !SystemExit > snapshot,review_snapshots,build_digest,_git_env
- scan_files(root):list[Path] > detect_language,_git_env
- snapshot(root,langs):Snapshot > _gather,Snapshot
- split_params(raw):list[str] > _split_top_commas,tight_type
- strip_comments_and_strings(text):str
- summarize_budget(requested_budget,full_tokens,selected_tokens,skeleton_tokens,effective_detail,bundles,retained,selection_trials,selection_candidates,search_truncated,stop_reason):BudgetStats ✓ > BudgetStats
- tight_annotation(text):str > tight_type
- tight_type(t):str
- BudgetBundle(R{detail,category,key,estimated_chars})
-  name():str @property
- BudgetStats(R{policy_version,requested_budget,full_tokens,selected_tokens,skeleton_tokens,effective_detail,utilization,fits,retained_categories,dropped_categories,retained_bundles,dropped_bundles,selection_trials,selection_candidates,search_truncated,stop_reason})
-  as_dict():dict[str,object]
- Finding(R{check,subject,detail,kind,path,_discriminator,id})
-  to_dict():dict[str,str | None]
-  - __post_init__
- Snapshot(R{symbols,file_tokens,usage_tokens})
- Symbol(R{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,decorators,size})
- = cli.py: HOOK_NAMES
- = embed.py: CONTEXT_FILES,CONTEXT_DIRS
- = render.py: KIND_LETTER
- = symbols.py: LANG_EXTENSIONS,DENYLIST_DIRS,TYPE_KINDS,ROUTE_DECORATORS,MARKER_DECORATORS
- - bootstrap.py: _pyz_path,_tool_anchor,_venv_python,_missing_parser_langs,_venv_has_grammars,_bootstrap_or_die
- - cli.py: _hook_python,_sh_dq,_tool_invocation,_managed_hook_line,_dead_hook_scripts,_remove_managed_hook_lines,
-           _install_hooks,_strip_block,_uninstall,_warn_if_large,_contained_target,_resolve_target_restriction,
-           _revision_source_paths
- - embed.py: _embed_block,_block_span,_seed_content,_target_candidates
- - gather.py: _git_env,_generator_fingerprint,_new_state_hash,_gather,_state_hash,_digest_{state,langs,budget,targets},
-              _framework_invoked,_zero_usage_names
- - render.py: _test_stem,_is_test_path,_is_production_symbol,{_tree,_private,_braced,_test_index}_lines,_strip_exc,
-              _total_loc,_symbol_identity,_target_descriptions,_raw_call_targets,_resolved_project_calls,_BudgetSelection,
-              _bundle_key,_bundle_estimated_chars,_essential_method,_decorator_notes,_factored_name_tokens,
-              _helper_class_ids,_informative_targets,_edge_suffix,_legend_line,_build_digest
- - review.py: _key,_symbol_identity,_finding,_prod_callables,_ApiAtom,_api_{atom,signature,values,atom_label,delta},
-              _prod_api,_test_edges,_sig_lines,_map_line_for,_describe,_finding_order
- - symbols.py: _parse_throws,_split_top_commas,_base_type,_heritage
- - treesitter.py: _load_parser,_grammar_pkgs,_ast_{text,field,collect,calls},_body_lines
+ bootstrap.py
+  - _pyz_path,_tool_anchor,_venv_{python,has_grammars}
+ cli.py
+  main() !SystemExit > run_cli
+  run_cli(argv):int ~352 ✓ !SystemExit > context_targets,_state_hash,scan_files,_missing_parser_langs,_warn_if_large,_uninstall,_bootstrap_or_die,run_review,build_digest_with_stats,managed_context_cost,_install_hooks,_dead_hook_scripts,embed_digest,_contained_target,_resolve_target_restriction,_digest_{langs,targets},_revision_source_paths,embedded_digest,_digest_budget,_strip_block,_digest_state,run_review_data
+  = HOOK_NAMES
+  - _hook_python,_sh_dq,_tool_invocation,_managed_hook_line,_remove_managed_hook_lines
+ embed.py
+  context_targets(root):list[Path]
+  embed_digest(path,digest) ✓ > _embed_block,_block_span,_seed_content
+  embedded_digest(path):str ✓ > _block_span
+  managed_context_cost(digest,include_coaching):ManagedContextCost ✓ > estimate_tokens,ManagedContextCost,_embed_block
+  ManagedContextCost(R{{digest,wrapper,coaching,managed_block}_tokens})
+  = CONTEXT_{FILES,DIRS}
+  - _target_candidates
  extract
-  extract_file(path,root,text):list[Symbol] ✓ !SystemExit > detect_language,has_parser,_grammar_pkgs
-  = __init__.py: EXTRACTORS
-  - c_cpp.py: _c_{fn_declarator,params,param_names,field_names,call_entry,static,enum_symbol},_extract_c,_cpp_raises,
-              _extract_cpp
-  - csharp.py: _cs_{vis,attributes,modifier_names,params,param_names,call_entry,local_bindings,raises},_extract_cs
-  - go.py: _go_{vis,type_text,params,param_names,result,call_entry,local_bindings},_extract_go
-  - java.py: _ast_{modifiers,param_types,vis},
-             _java_{annotations,param_names,call_entry,calls,param_bindings,class_bindings,local_bindings,method_symbol},
-             _extract_java
-  - kotlin.py: _kt_{vis,params,param_names,return,call_entry,raises,local_bindings,annotations,const_symbols,fn_symbol},
-               _extract_kotlin
-  - misc.py: _lua_call_entry,_extract_{lua,bash,css,html,helm,make},_bash_call_entry,_css_symbols,
-             _make_{extend_unique,continues,without_comment,syntax_without_comment,rule_parts,recipe_prefixes,reference_end,reference_name,var_refs}
-  - php.py: _php_{vis,var_name,params,return,call_entry,local_bindings,raises,attributes,fn_symbol},_extract_php
-  - python.py: _py_{subscript_head,resolve_forward_refs,annotation,param_facts,calls,raises,bindings,decorators,fn_symbol},
-               _extract_python
-  - ruby.py: _rb_{call_entry,params,method_symbol,fields,walk},_extract_ruby
-  - rust.py: _rs_{vis,params,param_names,call_entry,local_bindings,attributes,fn_symbol},_extract_rust
-  - scala.py: _sc_{vis,params,return,call_entry,local_bindings,raises,fn_symbol},_extract_scala
-  - swift.py: _sw_{vis,params,return,call_entry,local_bindings,raises,fn_symbol},_extract_swift
-  - ts.py: _ts_{exported,params,param_names,return,call_entry,calls,decorators,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,unwrap_hoc,fc_props,route_entries,top_level_arrows,aliases_and_reexports},
-           _extract_{ts,tsx,sfc}
-tools
- audit_artifact(path,terms):list[str] > _scan_payload,_artifact_label,_archive_members,_private_path,_scan_name,_scan_archive_metadata,_scan_link_target,_is_archive_payload
- audit_history(root,terms):list[str] ~40 !SystemExit > _scan_payload,_is_archive_payload
- audit_tree(root,terms):list[str] ~43 > _indexed_entries,_private_path,_worktree_payload,_scan_name,_git_output,_untracked_files,_scan_payload,_is_archive_payload,_scan_link_target
- check_release_privacy.py:main(argv):int > _deny_terms,audit_tree,audit_history,audit_artifact
- measure_tokens.py:main(argv):int
- run_tests.py:main(argv):int
- - check_release_privacy.py: _private_path,_deny_terms,_scan_{payload,name,link_target,archive_metadata},_safe_label,
-                             _artifact_label,_git_output,_indexed_entries,_untracked_files,_publishable_files×0,
-                             _worktree_payload,_archive_members,_is_archive_payload
+  __init__.py
+   extract_file(path,root,text):list[Symbol] ✓ !SystemExit > detect_language,has_parser,_grammar_pkgs
+   = EXTRACTORS
+  c_cpp.py
+   - _c_{fn_declarator,params,param_names,field_names,call_entry,static,enum_symbol},_extract_c,_cpp_raises,_extract_cpp
+  csharp.py
+   - _cs_{vis,attributes,modifier_names,params,param_names,call_entry,local_bindings,raises},_extract_cs
+  go.py
+   - _go_{vis,type_text,params,param_names,result,call_entry,local_bindings},_extract_go
+  java.py
+   - _ast_modifiers,_java_annotations,_ast_param_types,_java_param_names,_ast_vis,
+     _java_{call_entry,calls,param_bindings,class_bindings,local_bindings,method_symbol},_extract_java
+  kotlin.py
+   - _kt_{vis,params,param_names,return,call_entry,raises,local_bindings,annotations,const_symbols,fn_symbol},
+     _extract_kotlin
+  misc.py
+   - _lua_call_entry,_extract_lua,_bash_call_entry,_extract_bash,_css_symbols,_extract_{css,html,helm},
+     _make_{extend_unique,continues,without_comment,syntax_without_comment,rule_parts,recipe_prefixes,reference_end,reference_name,var_refs},
+     _extract_make
+  php.py
+   - _php_{vis,var_name,params,return,call_entry,local_bindings,raises,attributes,fn_symbol},_extract_php
+  python.py
+   - _py_{subscript_head,resolve_forward_refs,annotation,param_facts,calls,raises,bindings,decorators,fn_symbol},
+     _extract_python
+  ruby.py
+   - _rb_{call_entry,params,method_symbol,fields,walk},_extract_ruby
+  rust.py
+   - _rs_{vis,params,param_names,call_entry,local_bindings,attributes,fn_symbol},_extract_rust
+  scala.py
+   - _sc_{vis,params,return,call_entry,local_bindings,raises,fn_symbol},_extract_scala
+  swift.py
+   - _sw_{vis,params,return,call_entry,local_bindings,raises,fn_symbol},_extract_swift
+  ts.py
+   - _ts_{exported,params,param_names,return,call_entry,calls,decorators,param_bindings,class_bindings,param_bindings_one,local_bindings,fn_symbol,unwrap_hoc,fc_props,route_entries,top_level_arrows,aliases_and_reexports},
+     _extract_{ts,tsx,sfc}
+ gather.py
+  scan_files(root):list[Path] > detect_language,_git_env
+  - _generator_fingerprint,_new_state_hash,_digest_metadata_line,_framework_invoked
+ render.py
+  build_digest(root,langs,targets,budget):str ✓ > _build_digest
+  build_digest_with_stats(root,langs,targets,budget):tuple[str,BudgetStats] ✓ > _build_digest
+  estimate_tokens(text):int ✓
+  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers,budget_{selection,catalog,retained}):str ~829 ✓ > _target_descriptions,{_tree,_test_index}_lines,_legend_line,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_total_loc,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_private_lines,_source_role,_is_test_path,_factored_name_tokens,render._symbol_identity,_strip_exc
+  summarize_budget(requested_budget,{full,selected,skeleton}_tokens,effective_detail,bundles,retained,selection_{trials,candidates},search_truncated,stop_reason):BudgetStats ~41 ✓ > BudgetStats
+  BudgetBundle(R{detail,category,key,estimated_chars,source_file,semantic_tier,distinct_file_fanin,reason})
+   name():str @property
+  BudgetStats(R{policy_version,requested_budget,{full,selected,skeleton}_tokens,effective_detail,utilization,fits,{retained,dropped}_categories,{retained,dropped}_bundles,selection_{trials,candidates},search_truncated,stop_reason,{retained,dropped}_reasons})
+   as_dict():dict[str,object]
+  = KIND_LETTER
+  - _test_stem,_BudgetSelection,_informative_targets
+ review.py
+  render_report(findings,rev):str ✓
+  report_data(findings,rev):dict[str,object] ✓
+  review_snapshots(old,new,old_digest,checks):list[Finding] ~199 ✓ > _prod_api,_raw_call_targets,_test_edges,_prod_callables,_zero_usage_names,_map_line_for,_describe,_finding,_key,_is_{test_path,production_symbol},_decorator_notes,review._symbol_identity,_api_delta
+  run_review(root,rev,langs,checks):str > render_report,run_review_findings
+  run_review_data(root,rev,langs,checks):dict[str,object] > report_data,run_review_findings
+  run_review_findings(root,rev,langs,checks):list[Finding] !SystemExit > snapshot,review_snapshots,build_digest,_git_env
+  snapshot(root,langs):Snapshot > _gather,Snapshot
+  Finding(R{check,subject,detail,kind,path,_discriminator,id})
+   to_dict():dict[str,str | None]
+   - __post_init__
+  Snapshot(R{symbols,{file,usage}_tokens})
+  - _ApiAtom,_api_{atom,signature,values,atom_label},_sig_lines,_finding_order
+ symbols.py
+  const_signature(name,value_text):str ✓
+  detect_language(path):str | None ✓
+  split_params(raw):list[str] > _split_top_commas,tight_type
+  strip_comments_and_strings(text):str
+  tight_annotation(text):str > tight_type
+  tight_type(t):str
+  Symbol(R{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,decorators,size})
+  = LANG_EXTENSIONS,DENYLIST_DIRS,TYPE_KINDS,{ROUTE,MARKER}_DECORATORS
+  - _parse_throws,_base_type,_heritage
+ treesitter.py
+  has_parser(lang):bool
+  - _load_parser,_ast_{text,field,collect,calls},_body_lines
 ? tests ·.py
- test_adaptive_budget{AdaptiveBudgetGoldenTest>build_digest_with_stats+1,BudgetStatsContractTest>summarize_budget+5} > _gather +6
- test_bench{TaskLoaderTest>load_tasks+1,TranscriptMetricsTest>parse_transcript,DuplicationDetectorTest>judge_reuse,
-            ExperimentIdentityTest>_experiment_spec+7,WorkspaceTest>make_workspace+2,
-            BudgetConditionTest>make_workspace+3,ActedOnFindingsTest>parse_transcript,
-            ReviewConditionTest>make_workspace+3,StructuredReviewMeasurementTest>Finding+9,
-            CoachConditionTest>make_workspace+1,RunOneTest>_infra_reason+3,ScopeJudgeTest>judge_scope,
-            ReportTest>_review_section+1,CliTest>bench.main+6}
- test_budget_integrity{WholeMapBudgetSelectionTest>build_digest+2,
-                       {EntrypointFloor,MeaningfulDunder,ConstructorIntegrity}Test>Symbol+1,OwnerIdentityTest>Symbol+2} > _gather +5
- test_cli{{CliOptionSurface,CliBuild,InitHooks,InitLang,HookQuoting,TargetOption,LangFilterPersistence,Bootstrap,PrintCommand,Uninstall,UninstallPython,SizeWarning}Test>run_cli,
-          ManagedHookLineTest>_sh_dq+1,LegacyHookMigrationTest>run_cli+1,PostCommitHookE2ETest>run_cli,
-          BudgetTest>build_digest+4,HookPythonSelectionTest}
- test_extract_langs{{PythonExtract,TypeScriptExtract,ArrowFunction,DecoratorExtract}Test>extract_file}
- test_freshness_and_markers{StateAndCheckTest>run_cli+1,{TestedMarker,SizeMarker,TestIndex}Test>build_digest,
-                            DisplayNameTest>render_simple+1,TestHelperTest>build_digest+2,
-                            {Embed,ContextTargets,DiffCommand}Test>run_cli}
- test_more_langs{{Go,CSharp,Bash,Css,Html,Helm,Kotlin,Tsx,Sfc,Ruby,Swift,Scala}ExtractTest>extract_file,
-                 {Rust,Cpp,Lua,Angular,Php}ExtractTest>extract_file+1,
-                 {CExtract,HtmlNestedBlocks,TsGaps,TsLossRecovery}Test>extract_file,ReactComponentTest>extract_file+1,
-                 MakefileExtractTest>extract_file+3}
- test_release_privacy{ReleasePrivacyTest}
- test_review{{Dup,Recover,Place}CheckTest>review_snapshots,DeadOrphanApiTest>review_snapshots+1,
-             ReportAndCliTest>render_report+4} > Snapshot +1
- test_simple_mode{CallExtractionTest>extract_file,
-                  {SimpleDigest,SameShapeGrouping,FieldNames,ReconstructablePath,ConstExtract,TightFormat}Test>build_digest,
-                  RenderUnitTest>Symbol+2,{EnumValues,InterfaceMethod,QualifiedCall,Throws}Test>extract_file+1,
-                  {LanguageFilter,Legend,ZeroUsageMarker}Test>build_digest+2,RelationsTest>extract_file+2,
-                  {InterfaceImplementors,TransitiveReduction,GroupExtras,CompactMapContract,TestIndexDiet}Test>Symbol+1,
-                  SecretRedactionTest>build_digest+1,{RouteRender,CtorSuppression,DunderPrivate}Test>render_simple+1,
-                  VoidOmissionTest>extract_file,PrivateMembersTest>Symbol+2,PrecomputedRenderTest>Symbol+4} > Symbol
- test_stats_cli{BudgetStatsCliTest>run_cli}
- test_treesitter{TreeSitterJavaTest,MissingParserErrorTest}
+ test_adaptive_budget > _gather +10
+ test_bench > load_tasks +34
+ test_budget_integrity > _gather +9
+ test_cli > run_cli +7
+ test_extract_langs > extract_file
+ test_freshness_and_markers > _digest_langs +9
+ test_more_langs > extract_file +3
+ test_release_privacy
+ test_review > Snapshot +7
+ test_simple_mode > extract_file +13
+ test_stats_cli > run_cli
+ test_treesitter
+tools
+ check_release_privacy.py: main(argv):int;audit_tree(root,terms):list[str];audit_artifact(path,terms):list[str] +1
+ measure_tokens.py: main(argv):int
+ run_tests.py: main(argv):int
+benchmark
+ bench.py: main(argv):int;run_one(...);report(rows,anon):str +11
+· 18,719 LOC · state b84cec029b17
 ```
 <!-- hologram:end -->

@@ -28,6 +28,54 @@ def _proj(tmp: Path) -> Path:
     return root
 
 
+class DigestMetadataCompatibilityTest(unittest.TestCase):
+    def test_legacy_header_and_current_footer_parse_identically(self):
+        stamp = ("· 10 LOC · state abcdef123456 · langs java,python "
+                 "· targets AGENTS.md,CLAUDE.md · budget 800 A7")
+        legacy = f"# hologram {stamp}\n· legend\nbody\n"
+        current = f"# hologram\n· legend\nbody\n{stamp}\n"
+
+        for digest in (legacy, current):
+            with self.subTest(layout=digest.splitlines()[0]):
+                self.assertEqual(hologram._digest_state(digest),
+                                 "abcdef123456")
+                self.assertEqual(hologram.gather._digest_langs(digest),
+                                 {"java", "python"})
+                self.assertEqual(hologram.gather._digest_targets(digest),
+                                 ["AGENTS.md", "CLAUDE.md"])
+                self.assertEqual(hologram.gather._digest_budget(digest), 800)
+
+    def test_semantic_text_cannot_spoof_footer_metadata(self):
+        digest = (
+            "# hologram\n"
+            "· f(args):Ret\n"
+            "config.py\n"
+            " = BANNER=· state badbadbadbad · langs rust · "
+            "targets EVIL.md · budget 5 L1\n"
+            "· 10 LOC · state abcdef123456 · langs java,python "
+            "· targets AGENTS.md,CLAUDE.md · budget 800 A7\n"
+        )
+
+        self.assertEqual(hologram._digest_state(digest), "abcdef123456")
+        self.assertEqual(hologram.gather._digest_langs(digest),
+                         {"java", "python"})
+        self.assertEqual(hologram.gather._digest_targets(digest),
+                         ["AGENTS.md", "CLAUDE.md"])
+        self.assertEqual(hologram.gather._digest_budget(digest), 800)
+
+    def test_state_and_loc_changes_touch_only_final_metadata_line(self):
+        symbol = Symbol(name="price", kind="fn", file="orders.py", line=1,
+                        signature="price(order)", visibility="pub",
+                        lang="python")
+        first = hologram.render_simple(
+            Path("."), [symbol], [], state="aaaaaaaaaaaa", loc=10)
+        second = hologram.render_simple(
+            Path("."), [symbol], [], state="bbbbbbbbbbbb", loc=11)
+
+        self.assertEqual(first.splitlines()[:-1], second.splitlines()[:-1])
+        self.assertNotEqual(first.splitlines()[-1], second.splitlines()[-1])
+
+
 class StateAndCheckTest(unittest.TestCase):
     def test_state_stamp_matches_state_hash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -36,6 +84,10 @@ class StateAndCheckTest(unittest.TestCase):
             embedded = hologram.embedded_digest(root / "CLAUDE.md")
             self.assertEqual(hologram._digest_state(embedded),
                              hologram._state_hash(root))
+        lines = embedded.splitlines()
+        self.assertEqual(lines[0], "# hologram")
+        self.assertNotIn("state", "\n".join(lines[:2]))
+        self.assertIn("· state ", lines[-1])
 
     def test_unreadable_file_is_skipped_by_gather_and_state_alike(self):
         """`_gather` must skip what `_state_hash` skips.
@@ -175,7 +227,7 @@ class TestIndexTest(unittest.TestCase):
         # non-obvious target (run) is the headline
         self.assertIn("> run +1", line)
 
-    def test_class_edges_get_own_line_cap_and_overflow(self):
+    def test_file_edge_gets_one_headline_and_overflow(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "p"
             root.mkdir()
@@ -187,13 +239,11 @@ class TestIndexTest(unittest.TestCase):
                 + "".join(f"        helper{i}()\n" for i in range(5)) +
                 "\nclass QuietTest:\n    def test_nothing(self):\n        pass\n")
             out = build_digest(root)
-        line = next(ln for ln in out.splitlines() if "CoveredTest" in ln)
-        # braced form: headline target glued to the member, remainder as +N;
-        # the edge-less sibling stays a plain member of the same braces
-        self.assertIn("CoveredTest>helper0+4", line)
+        line = next(ln for ln in out.splitlines() if "test_lib" in ln)
+        self.assertIn("test_lib > helper0 +4", line)
         self.assertNotIn("helper1", line)
-        self.assertIn("QuietTest", line)
-        self.assertNotIn("QuietTest>", line)
+        self.assertNotIn("CoveredTest", out)
+        self.assertNotIn("QuietTest", out)
         self.assertIn("+N=more", out.splitlines()[1])
 
 
@@ -228,8 +278,8 @@ class TestHelperTest(unittest.TestCase):
     def test_directory_only_test_path_class_becomes_helper(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = build_digest(self._proj(Path(tmp)))
-        self.assertIn("*NeutralDriver(C)", out)
-        self.assertIn("send(path,body) > run", out)   # sig + resolved chain
+        self.assertIn("driver:*NeutralDriver > run", out)
+        self.assertNotIn("send(path,body)", out)  # source remains one read away
         self.assertNotIn("_internal", out.split("*NeutralDriver", 1)[1])
         self.assertNotIn("*SvcTest", out)             # real test class excluded
         self.assertIn("*=test helper", out.splitlines()[1])
@@ -283,11 +333,55 @@ class EmbedTest(unittest.TestCase):
         self.assertNotIn("whole codebase at a glance", text)
 
     def test_embed_note_stays_short_and_identifiable(self):
-        self.assertIn("hologram map of this repository", hologram._EMBED_NOTE)
+        self.assertIn("Hologram project map", hologram._EMBED_NOTE)
         self.assertIn("Line 2 is the legend", hologram._EMBED_NOTE)
         # raised 420 -> 500 for the act-on-findings coaching sentence; the
         # pin exists so the in-band note never creeps toward a manual
         self.assertLess(len(hologram._EMBED_NOTE), 500)
+
+    def test_managed_context_cost_accounts_for_every_component(self):
+        from hologram.embed import managed_context_cost
+
+        uncoached = managed_context_cost(
+            self.DIGEST, include_coaching=False)
+        coached = managed_context_cost(self.DIGEST)
+
+        self.assertEqual(coached.digest_tokens,
+                         hologram.estimate_tokens(self.DIGEST))
+        self.assertEqual(coached.wrapper_tokens, uncoached.wrapper_tokens)
+        self.assertEqual(uncoached.coaching_tokens, 0)
+        self.assertGreater(coached.coaching_tokens, 0)
+        self.assertGreater(coached.managed_block_tokens,
+                           uncoached.managed_block_tokens)
+        for cost in (uncoached, coached):
+            self.assertEqual(
+                cost.managed_block_tokens,
+                cost.digest_tokens + cost.wrapper_tokens
+                + cost.coaching_tokens,
+            )
+
+    def test_managed_context_cost_normalizes_embedded_trailing_whitespace(self):
+        from hologram.embed import managed_context_cost
+
+        padded = self.DIGEST + "\n" + (" " * 4096)
+        for include_coaching in (False, True):
+            with self.subTest(include_coaching=include_coaching):
+                plain = managed_context_cost(
+                    self.DIGEST, include_coaching=include_coaching)
+                cost = managed_context_cost(
+                    padded, include_coaching=include_coaching)
+                self.assertEqual(cost, plain)
+                self.assertTrue(all(value >= 0 for value in (
+                    cost.digest_tokens,
+                    cost.wrapper_tokens,
+                    cost.coaching_tokens,
+                    cost.managed_block_tokens,
+                )))
+                self.assertEqual(
+                    cost.managed_block_tokens,
+                    cost.digest_tokens + cost.wrapper_tokens
+                    + cost.coaching_tokens,
+                )
 
     def test_embed_is_idempotent_and_refreshes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -320,11 +414,11 @@ class EmbedTest(unittest.TestCase):
             path = Path(tmp) / "CLAUDE.md"
             hologram.embed_digest(path, self.DIGEST)
             text = path.read_text()
-        self.assertIn("hologram map of this repository", text)
+        self.assertIn("Hologram project map", text)
         self.assertIn("Line 2 is the legend", text)
         # the note lives inside the managed block, not in user-owned prose
         self.assertLess(text.index(hologram._EMBED_START),
-                        text.index("hologram map of this repository"))
+                        text.index("Hologram project map"))
 
     def test_embedded_digest_roundtrips_the_exact_digest(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -469,7 +563,7 @@ class DiffCommandTest(unittest.TestCase):
             with contextlib.redirect_stdout(buf):
                 code = run_cli(["diff", "HEAD", "--root", str(root)])
             self.assertEqual(code, 0)
-            self.assertIn("+fresh_fn():int", buf.getvalue())
+            self.assertIn("+ fresh_fn():int", buf.getvalue())
 
 
 if __name__ == "__main__":

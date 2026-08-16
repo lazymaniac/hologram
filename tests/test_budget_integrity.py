@@ -73,10 +73,10 @@ class WholeMapBudgetSelectionTest(unittest.TestCase):
         self.assertLess(sizes[0], sizes[-1])
         self.assertEqual(selected, candidates[min(
             range(len(candidates)), key=lambda level: (sizes[level], level))])
-        self.assertNotIn(" L7", selected.splitlines()[0])
+        self.assertNotIn(" L7", selected.splitlines()[-1])
         self.assertIn("smallest complete candidate is L0", err.getvalue())
 
-    def test_least_degraded_whole_candidate_wins(self):
+    def test_semantic_floor_refills_whole_facts_within_budget(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source: list[str] = []
@@ -91,18 +91,28 @@ class WholeMapBudgetSelectionTest(unittest.TestCase):
                 "    return _private_helper_with_long_name_0()",
             ])
             (root / "app.py").write_text("\n".join(source))
-            candidates = _budget_candidates(root, 90)
-            sizes = [estimate_tokens(candidate) for candidate in candidates]
+            chosen_budget = None
+            for candidate_budget in range(1, 200):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    candidate, candidate_stats = build_digest_with_stats(
+                        root, budget=candidate_budget)
+                if (candidate_stats.effective_detail.startswith("L7-adaptive:")
+                        and " > _private_helper_with_long_name_0" in candidate):
+                    chosen_budget = candidate_budget
+                    break
+            self.assertIsNotNone(chosen_budget)
             with patch("hologram.render.render_simple",
                        wraps=render_simple) as renderer:
-                selected, stats = build_digest_with_stats(root, budget=90)
+                selected, stats = build_digest_with_stats(
+                    root, budget=chosen_budget)
 
-        self.assertTrue(all(size > 90 for size in sizes[:3]))
-        self.assertLessEqual(sizes[3], 90)
-        self.assertLess(sizes[4], sizes[3])
-        self.assertEqual(selected, candidates[3])
-        self.assertEqual(stats.effective_detail, "L3")
-        self.assertGreaterEqual(renderer.call_count, _MAX_LEVEL + 1)
+        self.assertLessEqual(estimate_tokens(selected), chosen_budget)
+        self.assertIn("run()", selected)
+        self.assertIn(" > _private_helper_with_long_name_0", selected)
+        self.assertRegex(
+            selected.splitlines()[-1], rf"· budget {chosen_budget} A7$")
+        self.assertTrue(stats.effective_detail.startswith("L7-adaptive:"))
+        self.assertGreater(renderer.call_count, 1)
 
 
 class EntrypointFloorTest(unittest.TestCase):
@@ -218,8 +228,8 @@ class EntrypointFloorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = render_simple(Path(tmp), symbols, [])
 
-        self.assertIn("a.py:_route() @GET/a", output)
-        self.assertIn("b.py:_route() @GET/b", output)
+        self.assertIn("a.py\n _route() @GET/a", output)
+        self.assertIn("b.py\n _route() @GET/b", output)
 
     def test_duplicate_private_route_owners_are_file_qualified(self):
         symbols: list[Symbol] = []
@@ -235,8 +245,8 @@ class EntrypointFloorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = render_simple(Path(tmp), symbols, [])
 
-        self.assertIn("a.py:_Controller(C)", output)
-        self.assertIn("b.py:_Controller(C)", output)
+        self.assertIn("a.py\n _Controller(C)", output)
+        self.assertIn("b.py\n _Controller(C)", output)
         self.assertNotIn("_Controller,_Controller", output)
 
 
@@ -262,8 +272,8 @@ class OwnerIdentityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = render_simple(Path(tmp), self._symbols(), [])
 
-        self.assertIn("one.py:Client(C)", output)
-        self.assertIn("two.py:Client(C)", output)
+        self.assertIn("one.py\n  use_alpha() > alpha\n  Client(C)", output)
+        self.assertIn("two.py\n  Client(C)", output)
         lines = [line.strip() for line in output.splitlines()]
         self.assertEqual(lines.count("alpha()"), 1)
         self.assertEqual(lines.count("beta()"), 1)
@@ -442,7 +452,7 @@ class MeaningfulDunderTest(unittest.TestCase):
 
         self.assertIn("- M: _hidden", output)
 
-    def test_repeated_orphan_module_owners_are_file_qualified(self):
+    def test_repeated_orphan_module_owners_use_exact_file_nodes_once(self):
         symbols: list[Symbol] = []
         for file in ("a.lua", "b.lua"):
             symbols.extend([
@@ -456,8 +466,8 @@ class MeaningfulDunderTest(unittest.TestCase):
             output = render_simple(Path(tmp), symbols, [])
 
         for file in ("a.lua", "b.lua"):
-            self.assertIn(f"{file}:M: quote()", output)
-            self.assertIn(f"- {file}:M: _hidden", output)
+            self.assertIn(f"{file}\n M: quote()\n - M: _hidden", output)
+            self.assertEqual(output.count(file), 1)
 
     def test_orphan_module_qualified_calls_keep_their_chain(self):
         symbols = [

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -15,23 +16,72 @@ _EMBED_END = "<!-- hologram:end -->"
 
 
 _COACH_SENTENCE = (
-    " Before writing tests or helpers, check `? tests` for existing coverage "
-    "and *-marked helpers. When `hologram review` reports findings, address "
-    "them before finishing: reuse the named original instead of a duplicate; "
-    "consolidate re-covered tests."
+    " Before adding tests/helpers, check `? tests` and `*` helpers. Address "
+    "`hologram review` findings before finishing; reuse named originals and "
+    "consolidate duplicate coverage."
 )
 
-_EMBED_NOTE = (
-    "This is a hologram map of this repository: a deterministic index of its "
-    "public API — signatures, fields, call chains, private names, test "
-    "locations. Read it before exploring to find what exists and open the "
-    "right file first. Line 2 is the legend." + _COACH_SENTENCE
+_EMBED_NOTE_BASE = (
+    "Hologram project map: exact files, signatures, fields, and retained call "
+    "paths. Read it before searching source. Line 2 is the legend; omissions "
+    "are marked."
 )
+_EMBED_NOTE = _EMBED_NOTE_BASE + _COACH_SENTENCE
 
 
-def _embed_block(digest: str) -> str:
-    return (f"{_EMBED_START}\n{_EMBED_NOTE}\n\n```\n{digest.rstrip()}\n```\n"
+def _embed_block(digest: str, *, include_coaching: bool = True) -> str:
+    note = _EMBED_NOTE if include_coaching else _EMBED_NOTE_BASE
+    return (f"{_EMBED_START}\n{note}\n\n```\n{digest.rstrip()}\n```\n"
             f"{_EMBED_END}")
+
+
+@dataclass(frozen=True)
+class ManagedContextCost:
+    """Estimated token components of one canonical managed context block.
+
+    ``wrapper_tokens`` includes the explanatory base note, markers, and code
+    fences. ``coaching_tokens`` is zero when coaching is not present. The
+    components are allocated by marginal differences so they always sum
+    exactly despite the estimator's ceiling operation.
+    """
+
+    digest_tokens: int
+    wrapper_tokens: int
+    coaching_tokens: int
+    managed_block_tokens: int
+
+
+def managed_context_cost(digest: str, *,
+                         include_coaching: bool = True) -> ManagedContextCost:
+    """Planning estimates for the digest and the block actually loaded.
+
+    Budget selection still applies to the digest alone. This helper accounts
+    for the separate embedding overhead without changing that contract.
+    """
+    # Lazy import keeps embedding independent during module initialization;
+    # render does not need to know how or where its digest will be delivered.
+    from .render import estimate_tokens
+
+    payload = digest.rstrip()
+    # Account the bytes actually embedded. Normalizing both the component and
+    # total prevents arbitrary trailing whitespace from producing a negative
+    # wrapper allocation.
+    # The block always contributes one delimiter newline after the normalized
+    # digest. Allocate that byte to the digest so canonical build output keeps
+    # the same estimate as render/stats while arbitrary padding is discarded.
+    digest_tokens = estimate_tokens(payload + "\n")
+    uncoached_tokens = estimate_tokens(
+        _embed_block(payload, include_coaching=False))
+    managed_block_tokens = estimate_tokens(
+        _embed_block(payload, include_coaching=include_coaching))
+    coaching_tokens = (managed_block_tokens - uncoached_tokens
+                       if include_coaching else 0)
+    return ManagedContextCost(
+        digest_tokens=digest_tokens,
+        wrapper_tokens=uncoached_tokens - digest_tokens,
+        coaching_tokens=coaching_tokens,
+        managed_block_tokens=managed_block_tokens,
+    )
 
 
 def _block_span(existing: str) -> tuple[int, int] | None:
@@ -141,4 +191,3 @@ def _target_candidates(root: Path) -> list[Path]:
     """The full universe --target values may name, present on disk or not."""
     return ([root / rel for rel in CONTEXT_FILES]
             + [root / rel / name for rel, name in CONTEXT_DIRS])
-

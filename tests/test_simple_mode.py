@@ -23,6 +23,22 @@ needs_java = unittest.skipUnless(hologram.has_parser("java"),
                                  "tree-sitter-java not installed")
 
 
+def _fixture_parsers_available(name: str) -> bool:
+    root = FIXTURES / name
+    grammar_langs = hologram.treesitter._GRAMMAR_MODULES
+    langs = {hologram.detect_language(path) for path in root.rglob("*")
+             if path.is_file()}
+    return all(hologram.has_parser(lang) for lang in langs
+               if lang in grammar_langs)
+
+
+def _needs_fixture(name: str):
+    return unittest.skipUnless(
+        _fixture_parsers_available(name),
+        f"optional parsers for {name} not installed",
+    )
+
+
 class CallExtractionTest(unittest.TestCase):
     @needs_java
     def test_java_method_calls_recorded(self):
@@ -83,11 +99,64 @@ class SimpleDigestTest(unittest.TestCase):
         self.assertNotIn("calls ", body)
 
 
+class FixtureTokenCeilingTest(unittest.TestCase):
+    """Known fixtures must not spend more estimated context than v0.10."""
+
+    def _assert_ceiling(self, name: str, ceiling: int) -> None:
+        root = FIXTURES / name
+        first = build_digest(root)
+        self.assertEqual(first, build_digest(root))
+        self.assertLessEqual(hologram.estimate_tokens(first), ceiling)
+
+    @_needs_fixture("javamini")
+    def test_javamini(self):
+        self._assert_ceiling("javamini", 253)
+
+    @_needs_fixture("javamini")
+    def test_javamini_managed_context_shrinks_with_business_gold_set_intact(self):
+        digest = build_digest(JAVAMINI)
+        cost = hologram.managed_context_cost(digest)
+
+        # v0.10 needed about 401 managed-context planning tokens here. The
+        # lower ceiling is valid only while these turn-zero architecture and
+        # business-rule facts remain present together.
+        self.assertLessEqual(cost.managed_block_tokens, 360)
+        for required in (
+            "PricePort.java(I) ←PricingEngine",
+            "PricingEngine.java(C{basePrices})",
+            "evaluate(order,items):Quote !UnknownItem > "
+            "UnknownItemException,Quote",
+            "{ItemId,OrderId,UserId}.java(R{value})",
+            "of(raw):Self > Self",
+            "Vehicle.java(I) sealed:Bicycle|Scooter",
+            "? tests ·.java\n src/test/PricingEngineTest",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, digest)
+        self.assertNotIn("optional facts omitted", digest)
+
+    def test_pymini(self):
+        self._assert_ceiling("pymini", 77)
+
+    @_needs_fixture("tsmini")
+    def test_tsmini(self):
+        self._assert_ceiling("tsmini", 101)
+
+    @_needs_fixture("polyglot")
+    def test_polyglot(self):
+        self._assert_ceiling("polyglot", 983)
+
+    @_needs_fixture("webmini")
+    def test_webmini(self):
+        self._assert_ceiling("webmini", 163)
+
+
 @needs_java
 class SameShapeGroupingTest(unittest.TestCase):
     def test_identical_types_grouped_with_hole_notation(self):
         out = build_digest(JAVAMINI)
-        self.assertIn("ItemId,OrderId,UserId(R{value})", out)
+        # Conventional one-type files group by their exact physical leaves.
+        self.assertIn("{ItemId,OrderId,UserId}.java(R{value})", out)
         self.assertEqual(out.count("of(raw):Self"), 1)
         self.assertNotIn("of(raw):UserId", out)
 
@@ -138,7 +207,7 @@ class EnumValuesTest(unittest.TestCase):
     @needs_java
     def test_enum_values_rendered(self):
         out = build_digest(JAVAMINI)
-        self.assertIn("OrderStatus(E{NEW,PAID,SHIPPED})", out)
+        self.assertIn("OrderStatus.java(E{NEW,PAID,SHIPPED})", out)
 
     def test_python_enum_values_extracted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -171,7 +240,7 @@ class InterfaceMethodTest(unittest.TestCase):
 
     def test_interface_methods_rendered(self):
         out = build_digest(JAVAMINI)
-        idx = out.index("PricePort(I)")
+        idx = out.index("PricePort.java(I)")
         after = out[idx:idx + 200]
         self.assertIn("quoteFor(order):Quote", after)
 
@@ -196,7 +265,7 @@ class QualifiedCallTest(unittest.TestCase):
 class FieldNamesTest(unittest.TestCase):
     def test_declared_field_names_shown(self):
         out = build_digest(JAVAMINI)
-        self.assertIn("PricingEngine(C{basePrices})", out)
+        self.assertIn("PricingEngine.java(C{basePrices})", out)
         self.assertNotIn("C{Map<ItemId,Long>}", out)
 
 
@@ -207,6 +276,12 @@ class ReconstructablePathTest(unittest.TestCase):
         lines = out.splitlines()
         self.assertIn("src", lines)
         self.assertTrue(any(ln.strip() == "engine" for ln in lines))
+
+    def test_conventional_file_is_one_hybrid_node_not_a_duplicate_parent(self):
+        out = build_digest(JAVAMINI)
+        matching = [line.strip() for line in out.splitlines()
+                    if "PricingEngine.java" in line]
+        self.assertEqual(matching, ["PricingEngine.java(C{basePrices})"])
 
 
 @needs_java
@@ -267,12 +342,12 @@ class RelationsTest(unittest.TestCase):
     def test_relations_rendered(self):
         out = build_digest(JAVAMINI)
         # interface relations live on the interface line, not per implementor
-        self.assertIn("PricePort(I) ←PricingEngine", out)
+        self.assertIn("PricePort.java(I) ←PricingEngine", out)
         self.assertNotIn(": PricePort", out)
-        self.assertIn("Vehicle(I) sealed:Bicycle|Scooter", out)
+        self.assertIn("Vehicle.java(I) sealed:Bicycle|Scooter", out)
         self.assertNotIn(": Vehicle", out)  # sealed permits already say it
         # non-interface supers keep the : T suffix
-        self.assertIn("UnknownItemException(C) : RuntimeException", out)
+        self.assertIn("UnknownItemException.java(C) : RuntimeException", out)
 
 
 class InterfaceImplementorsTest(unittest.TestCase):
@@ -310,8 +385,8 @@ class LegendTest(unittest.TestCase):
         out = build_digest(JAVAMINI)
         second = out.splitlines()[1]
         self.assertIn("C/R/I{fields}", second)
-        self.assertIn("f(args):Ret > project calls", second)
-        self.assertIn("?=tests", second)
+        self.assertIn("f(args):Ret > calls", second)
+        self.assertIn("? tests", out)
 
     def test_legend_covers_emitted_notation_and_nothing_else(self):
         digest = build_digest(JAVAMINI)
@@ -321,7 +396,7 @@ class LegendTest(unittest.TestCase):
         for notation, clause in ((" : ", ":T=supers"), ("sealed:", "sealed:A|B"),
                                  ("»", "»=re-exports"), ("Self", "Self=own type"),
                                  ("✓", "✓=tested"),
-                                 ("×0", "×0=no static use"), (" ~", "~N=lines")):
+                                 ("×0", "×0=unused"), (" ~", "~N=lines")):
             if notation in body:
                 self.assertIn(clause, second)
             else:
@@ -358,7 +433,7 @@ class LegendTest(unittest.TestCase):
         self.assertIn("(T{", body)
         self.assertIn("C/R/I/T{fields}", legend)
         self.assertIn("T:target", legend)
-        self.assertNotIn("p{a,b}=pa,pb", legend)
+        self.assertNotIn("p{a,b}s=pas,pbs", legend)
 
     def test_no_query_or_regeneration_prose(self):
         out = build_digest(JAVAMINI)
@@ -379,8 +454,7 @@ class ConstExtractTest(unittest.TestCase):
                 "app = object()\n"
                 "LOGGER = make()\n")
             out = build_digest(root)
-        self.assertIn("= config.py: MAX_RETRIES=3,BASE_URL,TIERS", out)
-        self.assertIn("= consts", out.splitlines()[1])
+        self.assertIn("config.py\n = MAX_RETRIES=3,BASE_URL,TIERS", out)
         self.assertNotIn("_HIDDEN", out)
         self.assertNotIn("LOGGER", out)      # call RHS: not a literal
         self.assertNotIn("example.com", out)  # >24 chars renders name-only
@@ -460,7 +534,8 @@ class RouteRenderTest(unittest.TestCase):
                    decorators=['GetMapping("/users/{id}")']))
         self.assertIn("UserController(C) @/api/v1", out)
         self.assertIn("find():User @GET/users/{id}", out)
-        self.assertIn("@=route/annotation", out)
+        # Route atoms are self-describing; concise legend spends no clause on @.
+        self.assertNotIn("@=route/annotation", out.splitlines()[1])
 
     def test_jaxrs_verb_and_path_pair(self):
         out = self._render(
@@ -629,9 +704,13 @@ class GroupExtrasTest(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), syms, [])
-        self.assertIn("AId,BId(R{value})", out)          # grouped despite extra method
-        self.assertEqual(out.count("of(raw):Self"), 1)  # shared shown once
-        self.assertIn("BId: extra():int", out)            # divergence kept -> no coverage loss
+        # Non-conventional modules retain exact file nodes. Their methods stay
+        # lossless even when that means cross-file shape grouping is unsafe.
+        self.assertIn("a.py\n  AId(R{value})", out)
+        self.assertIn("of(raw):AId", out)
+        self.assertIn("b.py\n  BId(R{value})", out)
+        self.assertIn("of(raw):BId", out)
+        self.assertIn("extra():int", out)
 
 
 class PrivateMembersTest(unittest.TestCase):
@@ -653,7 +732,7 @@ class PrivateMembersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), self._syms(), [])
         self.assertIn("- _evict,_rebalance", out)      # class privates, names only
-        self.assertIn("- util.py: _helper", out)       # module-level privates per file
+        self.assertIn("util.py\n  - _helper", out)     # exact module file node
         self.assertNotIn("_evict(int)", out)           # no signatures by default
 
     def test_prefix_factoring_is_lossless_and_profitable(self):
@@ -673,8 +752,8 @@ class PrivateMembersTest(unittest.TestCase):
         self.assertEqual(packed, "{load,save,drop}_spec")
 
     def test_prefix_and_suffix_groups_claim_disjoint_names(self):
-        # every name reconstructable exactly once; ×0-marked names never
-        # join a suffix group (marker must stay outermost)
+        # every name reconstructable exactly once; marked and unmarked names
+        # never mix, so the marker remains unambiguous
         packed = ",".join(_factored_name_tokens([
             "_run_a", "_run_b", "_run_c", "AlphaTest", "BetaTest",
             "GammaTest", "EpsilonTest×0",
@@ -682,6 +761,35 @@ class PrivateMembersTest(unittest.TestCase):
         self.assertEqual(
             packed,
             "_run_{a,b,c},{Alpha,Beta,Gamma}Test,EpsilonTest×0")
+
+    def test_shared_unused_marker_stays_outside_factored_family(self):
+        packed = ",".join(_factored_name_tokens([
+            "_business_rule_alpha×0",
+            "_business_rule_beta×0",
+            "_business_rule_gamma×0",
+            "_business_rule_live",
+        ]))
+        self.assertEqual(
+            packed,
+            "_business_rule_{alpha,beta,gamma}×0,_business_rule_live")
+
+    def test_sequence_factoring_preserves_duplicates_and_interleaved_order(self):
+        self.assertEqual(
+            _factored_name_tokens(["_", "_"], dedupe=False), ["_", "_"])
+        self.assertEqual(
+            _factored_name_tokens(
+                ["load_a", "validate", "load_b"], dedupe=False),
+            ["load_a", "validate", "load_b"],
+        )
+
+    def test_rendered_signature_keeps_repeated_placeholder_arity(self):
+        symbols = [Symbol(
+            name="compare", kind="fn", file="lib.rs", line=1,
+            params=["i32", "i32"], param_names=["_", "_"],
+            signature="compare(i32,i32)", visibility="pub", lang="rust")]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = render_simple(Path(tmp), symbols, [])
+        self.assertIn("compare(_,_)", output)
 
 
 class CompactMapContractTest(unittest.TestCase):
@@ -719,11 +827,28 @@ class CompactMapContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), syms, [])
         self.assertIn("run() > _step", out)
-        self.assertIn("- svc.py: _step", out)
+        # Retained call already names the private helper; inventory must not
+        # pay for the same semantic fact twice.
+        self.assertNotIn("- _step", out)
         self.assertNotIn("json.dumps", out)
         self.assertNotIn("_step()", out)
 
-    def test_test_index_lists_every_file_and_class_but_no_test_function(self):
+    def test_called_private_dedup_is_exact_for_same_named_twins(self):
+        run = Symbol(name="run", kind="fn", file="a.py", line=1,
+                     visibility="pub", calls=["_step"])
+        called = Symbol(name="_step", kind="fn", file="a.py", line=2,
+                        visibility="priv")
+        twin = Symbol(name="_step", kind="fn", file="b.py", line=1,
+                      visibility="priv")
+        resolved = ({id(run): ["a._step"]}, set(), {id(run): [called]})
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render_simple(Path(tmp), [run, called, twin], [],
+                                resolved=resolved)
+        self.assertIn("run() > a._step", out)
+        self.assertNotIn("a.py\n - _step", out)
+        self.assertIn("b.py\n - _step", out)
+
+    def test_test_index_lists_every_file_but_no_test_inventory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             test_file = root / "tests" / "test_service.py"
@@ -738,8 +863,9 @@ class CompactMapContractTest(unittest.TestCase):
                        line=2, visibility="pub", lang="python"),
             ]
             out = render_simple(root, syms, [test_file, go_file])
-        self.assertIn("test_service.py{ServiceTest}", out)
+        self.assertIn("tests/test_service.py", out)
         self.assertIn("service_test.go", out)
+        self.assertNotIn("ServiceTest", out)
         self.assertNotIn("test_run", out)
 
     def test_duplicate_top_level_names_get_file_qualification(self):
@@ -753,10 +879,48 @@ class CompactMapContractTest(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), syms, [])
-        self.assertIn("a.py:run()", out)
-        self.assertIn("b.py:run()", out)
-        self.assertIn("a.py:Thing(C{left})", out)
-        self.assertIn("b.py:Thing(C{right})", out)
+        self.assertIn("a.py\n run()\n Thing(C{left})", out)
+        self.assertIn("b.py\n run()\n Thing(C{right})", out)
+
+    def test_support_roles_are_compact_actionable_file_landmarks(self):
+        syms = [
+            Symbol(name="place", kind="fn", file="domain/order.py", line=1,
+                   visibility="pub", lang="python", param_names=["order"],
+                   params=["Order"], returns="Order"),
+            Symbol(name="test_place", kind="fn",
+                   file="tests/test_order.py", line=1,
+                   visibility="pub", lang="python", calls=["place"]),
+            Symbol(name="build_fixture", kind="fn",
+                   file="tools/build_fixture.py", line=1,
+                   visibility="pub", lang="python", param_names=["root"],
+                   params=["Path"]),
+            Symbol(name="_load_template", kind="fn",
+                   file="tools/build_fixture.py", line=2,
+                   visibility="priv", lang="python"),
+            Symbol(name="build", kind="method", file="tools/release.sh",
+                   line=1, container="release.sh", visibility="pub", lang="bash"),
+            Symbol(name="publish", kind="method", file="tools/release.sh",
+                   line=2, container="release.sh", visibility="pub", lang="bash"),
+            Symbol(name="run_matrix", kind="fn",
+                   file="benchmark/bench.py", line=1,
+                   visibility="pub", lang="python", param_names=["cases"],
+                   params=["list"]),
+            Symbol(name="report", kind="fn", file="benchmark/bench.py", line=2,
+                   visibility="pub", lang="python", param_names=["rows"],
+                   params=["list"]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = [root / symbol.file for symbol in syms]
+            out = render_simple(root, syms, files)
+
+        self.assertIn("domain/order.py\n place(order):Order", out)
+        self.assertIn("? tests ·.py\n test_order > place", out)
+        self.assertIn("tools\n build_fixture.py: build_fixture(root)", out)
+        self.assertIn("release.sh: build();publish()", out)
+        self.assertIn(
+            "benchmark\n bench.py: run_matrix(cases);report(rows)", out)
+        self.assertNotIn("_load_template", out)
 
 
 @needs_java
@@ -764,17 +928,18 @@ class TightFormatTest(unittest.TestCase):
     def test_ascii_return_sep_and_tight_commas(self):
         out = build_digest(JAVAMINI)
         self.assertIn("evaluate(order,items):Quote", out)
-        self.assertIn("OrderStatus(E{NEW,PAID,SHIPPED})", out)
-        self.assertIn("ItemId,OrderId,UserId(R{value})", out)
-        self.assertIn("Vehicle(I) sealed:Bicycle|Scooter", out)
+        self.assertIn("OrderStatus.java(E{NEW,PAID,SHIPPED})", out)
+        self.assertIn("{ItemId,OrderId,UserId}.java(R{value})", out)
+        self.assertIn("Vehicle.java(I) sealed:Bicycle|Scooter", out)
         ev = next(ln for ln in out.splitlines() if "evaluate(order" in ln)
         self.assertNotIn("→", ev)   # ascii `:Ret`, not the pretty arrow
 
     def test_zero_usage_marker(self):
         out = build_digest(JAVAMINI)
-        app = next(ln for ln in out.splitlines() if "App(C)" in ln)
+        app = next(ln for ln in out.splitlines() if "App.java(C)" in ln)
         main = next(ln for ln in out.splitlines() if "main(args)" in ln)
-        pricing = next(ln for ln in out.splitlines() if "PricingEngine(C{" in ln)
+        pricing = next(ln for ln in out.splitlines()
+                       if "PricingEngine.java(C{" in ln)
         self.assertIn("×0", app)
         self.assertIn("×0", main)
         self.assertNotIn("×0", pricing)
@@ -833,7 +998,8 @@ class ZeroUsageMarkerTest(unittest.TestCase):
         unused = next(line for line in out.splitlines()
                       if line.strip().startswith("unused()"))
         caller = next(line for line in lines if line.strip().startswith("caller()"))
-        private_line = next(line for line in lines if "app.py:" in line)
+        private_line = next(line for line in lines
+                            if line.strip().startswith("- "))
         self.assertNotIn("×0", used_class)
         self.assertIn("×0", unused_class)
         self.assertNotIn("×0", used)
@@ -876,7 +1042,7 @@ class ZeroUsageMarkerTest(unittest.TestCase):
             out = build_digest(root)
 
         self.assertIn("_orphan×0", out)
-        self.assertIn("×0=no static use", out)
+        self.assertIn("×0=unused", out)
 
 
 class PrecomputedRenderTest(unittest.TestCase):
@@ -918,20 +1084,23 @@ class TestIndexDietTest(unittest.TestCase):
                           container="ThemeTest", calls=["loadTheme"])]
         out = self._render(syms, ["src/Theme.java", "test/ThemeTest.java"])
         self.assertIn("? tests ·.java", out)
-        self.assertIn("ThemeTest>loadTheme", out)
+        self.assertIn("ThemeTest > loadTheme", out)
         self.assertNotIn("ThemeTest{", out)
         self.assertNotIn(".java{", out)
 
-    def test_multi_class_file_keeps_braces(self):
+    def test_multi_class_file_stays_one_file_landmark(self):
         syms = [self._sym("PricingTest", "class", "test/PricingTest.java"),
                 self._sym("Bulk", "class", "test/PricingTest.java", line=9)]
         out = self._render(syms, ["test/PricingTest.java"])
-        self.assertIn("PricingTest{PricingTest,Bulk}", out)
+        self.assertIn("\n PricingTest\n", out)
+        self.assertNotIn("{PricingTest,Bulk}", out)
+        self.assertNotIn("Bulk", out)
 
-    def test_stem_mismatch_keeps_braces(self):
+    def test_stem_mismatch_still_uses_exact_file(self):
         syms = [self._sym("ServiceTest", "class", "test/AllTests.java")]
         out = self._render(syms, ["test/AllTests.java"])
-        self.assertIn("AllTests{ServiceTest}", out)
+        self.assertIn("\n AllTests\n", out)
+        self.assertNotIn("ServiceTest", out)
 
     def test_mixed_extensions_keep_everything(self):
         syms = [self._sym("ATest", "class", "test/ATest.java"),
@@ -965,7 +1134,7 @@ class CtorSuppressionTest(unittest.TestCase):
 
     def test_bare_field_restating_ctor_kept_for_ordinary_class(self):
         out = self._render(_ctor_fixture())
-        self.assertIn("Engine(C{basePrices})", out)
+        self.assertIn("Engine.java(C{basePrices})", out)
         # Fields do not prove that an ordinary class is publicly constructible.
         self.assertIn("\n  Engine(basePrices)", out)
 

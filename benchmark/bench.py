@@ -1034,11 +1034,33 @@ def _embedded_map_info(ws: Path) -> dict:
         digest = hologram.embedded_digest(target)
         if not digest:
             continue
-        header = digest.split("\n", 1)[0]
+        text = target.read_text(errors="replace")
+        span = hologram.embed._block_span(text)
+        block = text[span[0]:span[1]] if span is not None else ""
+        digest_tokens = hologram.estimate_tokens(digest)
+        managed_tokens = hologram.estimate_tokens(block)
+        coaching = hologram.embed._COACH_SENTENCE
+        if coaching in block:
+            uncoached_tokens = hologram.estimate_tokens(
+                block.replace(coaching, "", 1))
+            coaching_tokens = managed_tokens - uncoached_tokens
+        else:
+            # Legacy notes cannot be separated reliably. Count their complete
+            # bytes as wrapper instead of reconstructing today's shorter block
+            # and under-reporting historical benchmark context.
+            coaching_tokens = 0
+        wrapper_tokens = managed_tokens - digest_tokens - coaching_tokens
+        metadata = hologram.gather._digest_metadata_line(digest)
         budget_match = re.search(
-            r"· budget (\d+)(?: (?P<mode>[LA])(?P<detail>\d+))?", header)
+            r"· budget (\d+)(?: (?P<mode>[LA])(?P<detail>\d+))?", metadata)
         return {
-            "effective_map_tokens": hologram.estimate_tokens(digest),
+            # Historical consumers use effective_map_tokens for the digest.
+            # Keep that meaning and expose the actual loaded block additively.
+            "effective_map_tokens": digest_tokens,
+            "effective_digest_tokens": digest_tokens,
+            "effective_wrapper_tokens": wrapper_tokens,
+            "effective_coaching_tokens": coaching_tokens,
+            "effective_managed_block_tokens": managed_tokens,
             "effective_map_detail": (int(budget_match.group("detail") or 0)
                                      if budget_match else 0),
             "effective_map_adaptive": bool(
@@ -1046,7 +1068,11 @@ def _embedded_map_info(ws: Path) -> dict:
             "effective_map_budget": (int(budget_match.group(1))
                                      if budget_match else None),
         }
-    return {"effective_map_tokens": None, "effective_map_detail": None,
+    return {"effective_map_tokens": None, "effective_digest_tokens": None,
+            "effective_wrapper_tokens": None,
+            "effective_coaching_tokens": None,
+            "effective_managed_block_tokens": None,
+            "effective_map_detail": None,
             "effective_map_adaptive": None, "effective_map_budget": None}
 
 
@@ -2142,8 +2168,9 @@ def report(rows: list[dict], anon: bool = False) -> str:
              "semantic | semantic n | manual pending | answer match | answer n | "
              "scope match | scope n | duplication | duplication n | reads | "
              "files | searches | turns | fresh input | cache-created | cache-read | "
-             "total input | output |",
-             "|" + "|".join(["---"] * 32) + "|"]
+             "total input | output | digest ctx | wrapper ctx | coaching ctx | "
+             "managed ctx |",
+             "|" + "|".join(["---"] * 36) + "|"]
     groups = sorted({_group_key(row) for row in rows},
                     key=lambda item: tuple(str(value) for value in item))
     for group in groups:
@@ -2190,7 +2217,11 @@ def report(rows: list[dict], anon: bool = False) -> str:
             f"{_median_mad(_numbers(valid, 'tokens_in_cache_created'), decimals=0)} | "
             f"{_median_mad(_numbers(valid, 'tokens_in_cache_read'), decimals=0)} | "
             f"{_median_mad(_numbers(valid, 'tokens_in'), decimals=0)} | "
-            f"{_median_mad(_numbers(valid, 'tokens_out'), decimals=0)} |")
+            f"{_median_mad(_numbers(valid, 'tokens_out'), decimals=0)} | "
+            f"{_median_mad(_numbers(valid, 'effective_digest_tokens'), decimals=0)} | "
+            f"{_median_mad(_numbers(valid, 'effective_wrapper_tokens'), decimals=0)} | "
+            f"{_median_mad(_numbers(valid, 'effective_coaching_tokens'), decimals=0)} | "
+            f"{_median_mad(_numbers(valid, 'effective_managed_block_tokens'), decimals=0)} |")
     lines.append("")
     lines.extend(_matched_section(
         rows, anon=anon, task_labels=task_labels))
@@ -2304,7 +2335,11 @@ def _setup_failure_row(*, task: Task, condition: str, rep: int,
         "hologram_version": hologram.__version__,
         "tool_revision": _TOOL_REVISION,
         "requested_budget": config.budget,
-        "effective_map_tokens": None, "effective_map_detail": None,
+        "effective_map_tokens": None, "effective_digest_tokens": None,
+        "effective_wrapper_tokens": None,
+        "effective_coaching_tokens": None,
+        "effective_managed_block_tokens": None,
+        "effective_map_detail": None,
         "effective_map_adaptive": None,
         "effective_map_budget": None,
         "accepted": False, "accept_cmd_ok": False,

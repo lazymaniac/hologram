@@ -14,7 +14,7 @@ from ._version import __version__
 from .bootstrap import (_bootstrap_or_die, _missing_parser_langs, _pyz_path,
                         _venv_python)
 from .embed import (_block_span, _target_candidates, context_targets,
-                    embed_digest, embedded_digest)
+                    embed_digest, embedded_digest, managed_context_cost)
 from .extract import EXTRACTORS
 from .gather import (_digest_budget, _digest_langs, _digest_state,
                      _digest_targets, _git_env,
@@ -226,10 +226,12 @@ def _uninstall(root: Path, keep_blocks: bool, quiet: bool) -> None:
         print("removed: " + (", ".join(removed) if removed else "nothing"))
 
 
-def _warn_if_large(digest: str, threshold: int) -> None:
-    tokens = estimate_tokens(digest)
+def _warn_if_large(digest: str, threshold: int, *, managed: bool = False) -> None:
+    tokens = (managed_context_cost(digest).managed_block_tokens
+              if managed else estimate_tokens(digest))
     if threshold and tokens > threshold:
-        print(f"hologram: warning: the map is ~{tokens:,} tokens "
+        subject = "managed context" if managed else "map"
+        print(f"hologram: warning: the {subject} is ~{tokens:,} tokens "
               f"(threshold {threshold:,}) — that is a lot of always-loaded "
               f"context. Consider --lang filters to narrow it. The map was "
               f"still written exactly; raise or disable with --warn-tokens.",
@@ -346,11 +348,11 @@ def run_cli(argv: list[str] | None = None) -> int:
     def add_budget(command: argparse.ArgumentParser) -> None:
         command.add_argument(
             "--budget", type=int, default=None, metavar="N",
-            help="estimated token target; over budget, whole fact categories "
-                 "drop in a deterministic ladder, then whole facts refill "
-                 "remaining room. The least-degraded fitting candidate wins, "
-                 "or the smallest complete candidate is emitted with a "
-                 "warning. Build/init record it; --budget 0 selects unlimited")
+            help="estimated digest-token target; over budget, keep the compact "
+                 "semantic floor, then globally restore ranked, dependency-"
+                 "closed whole facts. If the floor cannot fit, emit the "
+                 "smallest complete candidate with a warning. Build/init "
+                 "record it; --budget 0 selects unlimited")
 
     def add_quiet(command: argparse.ArgumentParser) -> None:
         command.add_argument("--quiet", action="store_true")
@@ -591,17 +593,30 @@ def run_cli(argv: list[str] | None = None) -> int:
                 subprocess.run(["git", "-C", str(root), "worktree", "remove",
                                 "--force", str(wt)], capture_output=True,
                                env=_git_env())
-        body_old = old.splitlines()[2:]  # drop state-bearing header + notation line
-        body_new = new.splitlines()[2:]
+        def semantic_lines(digest: str) -> list[str]:
+            lines = digest.splitlines()[2:]  # stable title + notation line
+            if lines and re.match(r"^· [\d,]+ LOC(?: ·|$)", lines[-1]):
+                lines.pop()  # volatile cache-stability footer is not a code fact
+            return lines
+
+        body_old = semantic_lines(old)
+        body_new = semantic_lines(new)
         for ln in difflib.unified_diff(body_old, body_new, fromfile=args.rev,
                                        tofile="worktree", lineterm=""):
             print(ln)
         return 0
 
     if args.cmd == "stats":
-        _digest, stats = build_digest_with_stats(
+        digest, stats = build_digest_with_stats(
             root, langs=langs, targets=target_names, budget=budget)
         payload = stats.as_dict()
+        context_cost = managed_context_cost(digest)
+        payload.update({
+            "digest_tokens": context_cost.digest_tokens,
+            "wrapper_tokens": context_cost.wrapper_tokens,
+            "coaching_tokens": context_cost.coaching_tokens,
+            "managed_block_tokens": context_cost.managed_block_tokens,
+        })
         if args.json:
             print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         else:
@@ -614,11 +629,19 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(f"policy: {stats.policy_version}")
             print(f"budget: {budget_text} · fits: "
                   f"{'yes' if stats.fits else 'no'} · utilization: {utilization}")
-            print(f"tokens: selected {stats.selected_tokens:,} · "
+            print(f"tokens: selected digest {stats.selected_tokens:,} · "
                   f"full {stats.full_tokens:,} · "
                   f"skeleton {stats.skeleton_tokens:,}")
+            print(f"managed block: {context_cost.managed_block_tokens:,} · "
+                  f"wrapper {context_cost.wrapper_tokens:,} · "
+                  f"coaching {context_cost.coaching_tokens:,}")
             print(f"detail: {stats.effective_detail} · "
                   f"bundles retained {retained:,} · dropped {dropped:,}")
+            if stats.retained_reasons:
+                reason_text = ", ".join(
+                    f"{reason}={count}"
+                    for reason, count in stats.retained_reasons)
+                print(f"retained for: {reason_text}")
             print(f"search: {stats.stop_reason} · "
                   f"trials {stats.selection_trials:,} · "
                   f"candidates {stats.selection_candidates:,}"
@@ -641,13 +664,18 @@ def run_cli(argv: list[str] | None = None) -> int:
               file=sys.stderr)
     digest = build_digest(root, langs=langs, targets=target_names,
                           budget=budget)
-    if not budget:
-        _warn_if_large(digest, args.warn_tokens)
+    _warn_if_large(digest, args.warn_tokens, managed=True)
     for t in targets:
         embed_digest(t, digest)
     if not args.quiet:
         names = ", ".join(str(t.relative_to(root)) for t in targets)
-        print(f"hologram: {estimate_tokens(digest)} tokens embedded in {names}")
+        cost = managed_context_cost(digest)
+        # Keep the documented leading digest count for scripts consuming old
+        # output, while making the complete always-loaded cost explicit.
+        print(f"hologram: {cost.digest_tokens} tokens embedded in {names} "
+              f"(digest; managed {cost.managed_block_tokens} = wrapper "
+              f"{cost.wrapper_tokens} + coaching {cost.coaching_tokens} + "
+              f"digest {cost.digest_tokens})")
     return 0
 
 
