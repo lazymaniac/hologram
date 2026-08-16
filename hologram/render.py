@@ -1583,9 +1583,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             sig = f"{sig} ×0"
         kept = _selected_calls(sym)
         if sym.raises:
-            sig = (f"{sig} !"
-                   f"{','.join(_factored_name_tokens(
-                       [_strip_exc(r) for r in sym.raises], dedupe=False))}")
+            raise_names = _factored_name_tokens(
+                [_strip_exc(r) for r in sym.raises], dedupe=False)
+            sig = f"{sig} !{','.join(raise_names)}"
         if grouped:
             kept = [_norm(c, own) for c in kept]
             sig = _norm(sig, own)
@@ -1597,12 +1597,12 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         # Ordinary class fields do not: an equal-looking constructor still
         # carries the otherwise absent fact that callers can construct it.
         # Comparing the full line also keeps record ctors with any extra fact.
+        component_names = ",".join(_factored_name_tokens(
+            list(components), dedupe=False))
         return (kind == "record" and bool(components)
                 and ms.kind == "ctor"
                 and _sig_line(ms, ms.container or ms.name, False)
-                == (f"{ms.name}"
-                    f"({','.join(_factored_name_tokens(
-                        list(components), dedupe=False))})"))
+                == f"{ms.name}({component_names})")
 
     # Interface relations stated once, on the interface: `I ←Impl|Impl` replaces
     # each implementor's `: I` suffix (sealed permits already carry the list).
@@ -1691,26 +1691,27 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             if kind == "type" and components and not named_fields:
                 inner = f"{letter}:{components[0]}"
             elif components:
-                inner = (f"{letter}{{"
-                         f"{','.join(_factored_name_tokens(
-                             list(components), dedupe=False))}}}")
+                component_names = ",".join(_factored_name_tokens(
+                    list(components), dedupe=False))
+                inner = f"{letter}{{{component_names}}}"
             else:
                 inner = letter
-            permit_suffix = (f" sealed:{'|'.join(_factored_name_tokens(
-                                list(permits), dedupe=False))}"
-                             if permits else "")
-            rel_suffix = (f" : {','.join(_factored_name_tokens(
-                              list(supers), dedupe=False))}"
-                          if supers else "")
+            permit_names = "|".join(_factored_name_tokens(
+                list(permits), dedupe=False))
+            permit_suffix = f" sealed:{permit_names}" if permits else ""
+            super_names = ",".join(_factored_name_tokens(
+                list(supers), dedupe=False))
+            rel_suffix = f" : {super_names}" if supers else ""
+            impl_names = "|".join(_factored_name_tokens(
+                list(impls), dedupe=False))
             impl_suffix = ("" if not impls else
                            f" ←{len(impls)} impls" if len(impls) > 6 else
-                           f" ←{'|'.join(_factored_name_tokens(
-                               list(impls), dedupe=False))}")
+                           f" ←{impl_names}")
             hot_suffix = " ×0" if unused else ""
             deco_suffix = "".join(f" @{n}" for n in deco_notes)
-            call_suffix = (f" > {','.join(_factored_name_tokens(
-                               list(type_calls), dedupe=False))}"
-                           if type_calls else "")
+            call_names = ",".join(_factored_name_tokens(
+                list(type_calls), dedupe=False))
+            call_suffix = f" > {call_names}" if type_calls else ""
             payload.append(f"{names}({inner}){deco_suffix}{rel_suffix}"
                            f"{permit_suffix}{impl_suffix}{hot_suffix}{call_suffix}")
             # Methods shared by every member print once (Self-normalized); each
