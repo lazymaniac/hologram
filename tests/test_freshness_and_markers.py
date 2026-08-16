@@ -240,10 +240,13 @@ class TestIndexTest(unittest.TestCase):
                 "\nclass QuietTest:\n    def test_nothing(self):\n        pass\n")
             out = build_digest(root)
         line = next(ln for ln in out.splitlines() if "test_lib" in ln)
-        self.assertIn("test_lib:{Covered,Quiet}Test > helper0 +4", line)
+        self.assertIn(
+            "test_lib:CoveredTest,test_all,QuietTest,test_nothing > helper0 +4",
+            line,
+        )
         self.assertNotIn("helper1", line)
-        self.assertNotIn("test_all", out)
-        self.assertNotIn("test_nothing", out)
+        self.assertIn("test_all", out)
+        self.assertIn("test_nothing", out)
         self.assertIn("+N=more", out.splitlines()[1])
 
 
