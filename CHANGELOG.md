@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-08-20
+
+Theme: the test index costs what it is worth.
+
+### Changed
+
+- **`? tests` renders through the same path-compressed trie as the source section.**
+  Test files used to carry their whole relative path on every line, so a deep package
+  tree restated one prefix hundreds of times. Directories are now stated once and the
+  file landmark sits under them.
+- **Wrapped case names no longer pad to the length of their path.** Continuation lines
+  indent one level instead of aligning under an eighty-character prefix, which on a
+  deep tree made the section half whitespace.
+
+Both are representation changes: file landmarks, suite names, case names, helper
+names, and test-to-business edges are byte-for-byte what they were, and the source
+section is unchanged. On a 114k-LOC Java corpus with 293 test files the `? tests`
+section drops 56% (140,913 to 61,788 characters) and the whole map goes from about
+60,600 to about 40,900 estimated tokens. Repos whose tests sit in one shallow
+directory see little change.
+
 ## [0.11.0] - 2026-08-16
 
 Theme: more business-logic signal per always-loaded token.
@@ -630,7 +651,8 @@ agents already read — so the shape of the code is in context from turn zero.
   "hologram-map[grammars]"` for all parsers), or copy `hologram.py` into a repo
   and run it with plain `python3`.
 
-[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/lazymaniac/hologram/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/lazymaniac/hologram/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/lazymaniac/hologram/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/lazymaniac/hologram/compare/v0.9.0...v0.9.1
