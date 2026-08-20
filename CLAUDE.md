@@ -389,6 +389,6 @@ tools
 benchmark
  bench.py: main(argv):int;run_one(...);report(rows,anon):str +11
 ‥ optional facts omitted — NEVER guess; read source before relying on them
-· 19,160 LOC · state c52695df3217 · budget 6000 A7
+· 19,160 LOC · state 214a555b17cb · budget 6000 A7
 ```
 <!-- hologram:end -->
