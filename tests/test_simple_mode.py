@@ -112,7 +112,7 @@ class FixtureTokenCeilingTest(unittest.TestCase):
     @_needs_fixture("javamini")
     def test_javamini(self):
         # All three JUnit case methods plus the nested suite stay visible.
-        self._assert_ceiling("javamini", 281)
+        self._assert_ceiling("javamini", 274)
 
     @_needs_fixture("javamini")
     def test_javamini_managed_context_shrinks_with_business_gold_set_intact(self):
@@ -122,7 +122,7 @@ class FixtureTokenCeilingTest(unittest.TestCase):
         # v0.10 needed about 401 managed-context planning tokens here. The
         # lower ceiling is valid only while these turn-zero architecture and
         # business-rule facts remain present together.
-        self.assertLessEqual(cost.managed_block_tokens, 389)
+        self.assertLessEqual(cost.managed_block_tokens, 383)
         for required in (
             "PricePort.java(I) ←PricingEngine",
             "PricingEngine.java(C{basePrices})",
@@ -131,7 +131,7 @@ class FixtureTokenCeilingTest(unittest.TestCase):
             "{ItemId,OrderId,UserId}.java(R{value})",
             "of(raw):Self > Self",
             "Vehicle.java(I) sealed:Bicycle|Scooter",
-            "? tests ·.java\n src/test/PricingEngineTest",
+            "? tests ·.java\n src/test\n  PricingEngineTest",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, digest)
@@ -143,15 +143,15 @@ class FixtureTokenCeilingTest(unittest.TestCase):
 
     @_needs_fixture("tsmini")
     def test_tsmini(self):
-        self._assert_ceiling("tsmini", 101)
+        self._assert_ceiling("tsmini", 92)
 
     @_needs_fixture("polyglot")
     def test_polyglot(self):
-        self._assert_ceiling("polyglot", 983)
+        self._assert_ceiling("polyglot", 903)
 
     @_needs_fixture("webmini")
     def test_webmini(self):
-        self._assert_ceiling("webmini", 163)
+        self._assert_ceiling("webmini", 162)
 
 
 @needs_java
@@ -872,10 +872,11 @@ class CompactMapContractTest(unittest.TestCase):
                        line=4, visibility="pub", lang="python"),
             ]
             out = render_simple(root, syms, [test_file, go_file])
-        self.assertIn("tests/test_service.py", out)
+        # the directory is a trie node, stated once above its files
+        self.assertIn("\n tests\n", out)
         self.assertIn("service_test.go", out)
         self.assertIn(
-            "tests/test_service.py:ServiceTest,test_{run,failure,health}",
+            "  test_service.py:ServiceTest,test_{run,failure,health}",
             out,
         )
 
@@ -1131,13 +1132,13 @@ class TestIndexDietTest(unittest.TestCase):
             "tests/payment_tests.rs", "src/rules.rs", "src/stem_case.rs",
         ])
 
-        self.assertIn("tests/test_checkout.py:test_rejects_expired_card", out)
+        self.assertIn("  test_checkout.py:test_rejects_expired_card", out)
         self.assertIn("ledger_test.go:TestConcurrentTransfer", out)
-        self.assertIn("tests/payment_tests.rs:rejects_expired_card", out)
-        self.assertIn("src/rules.rs:rejects_inline_rule", out)
+        self.assertIn("  payment_tests.rs:rejects_expired_card", out)
+        self.assertIn("  rules.rs:rejects_inline_rule", out)
         self.assertEqual(out.count("rejects_inline_rule"), 1)
         self.assertIn("business_rule() ✓", out)
-        self.assertIn("src/stem_case.rs:stem_case", out)
+        self.assertIn("  stem_case.rs:stem_case", out)
         self.assertNotIn("build_checkout", out)
         self.assertNotIn("seedLedger", out)
         self.assertNotIn("payment_fixture", out)
@@ -1246,6 +1247,39 @@ class TestIndexDietTest(unittest.TestCase):
         syms = [self._sym("ServiceTest", "class", "test/AllTests.java")]
         out = self._render(syms, ["test/AllTests.java"])
         self.assertIn("\n AllTests:ServiceTest\n", out)
+
+    def test_deep_package_paths_are_stated_once_without_path_length_padding(self):
+        # Java-shaped corpora repeat one package prefix across hundreds of test
+        # files, and aligning wrapped case names under that prefix costs more
+        # than the names themselves.
+        names = [f"rejectsTheOrderWhenTheCardHasExpired{index}"
+                 for index in range(6)]
+        syms = [self._sym("ATest", "class", "src/test/java/com/x/a/ATest.java"),
+                self._sym("BTest", "class", "src/test/java/com/x/a/BTest.java"),
+                self._sym("CTest", "class", "src/test/java/com/x/a/b/CTest.java")]
+        syms.extend(
+            self._sym(name, "method", "src/test/java/com/x/a/ATest.java",
+                      container="ATest", line=index + 2,
+                      decorators=("Test",))
+            for index, name in enumerate(names)
+        )
+        out = self._render(syms, ["src/test/java/com/x/a/ATest.java",
+                                  "src/test/java/com/x/a/BTest.java",
+                                  "src/test/java/com/x/a/b/CTest.java"])
+
+        index_lines = out.split("? tests")[1].splitlines()
+        self.assertEqual(out.count("src/test/java/com/x/a"), 1)
+        self.assertIn("  b", index_lines)          # deeper package nests once
+        for name in names:
+            self.assertIn(name, out)
+        for landmark in ("ATest:", "BTest", "CTest"):
+            self.assertIn(landmark, out)
+        wrapped = [line for line in index_lines
+                   if line.strip() and not line.strip().startswith(
+                       ("ATest", "BTest", "CTest", "b", "src"))]
+        self.assertTrue(wrapped)                   # the case list really wraps
+        self.assertLessEqual(
+            max(len(line) - len(line.lstrip(" ")) for line in index_lines), 6)
 
     def test_case_suite_names_factor_losslessly(self):
         syms = [self._sym("CasesTest", "class", "test/CasesTest.java"),

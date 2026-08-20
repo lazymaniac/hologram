@@ -826,10 +826,17 @@ def _factored_name_tokens(names: list[str], *, dedupe: bool = True) -> list[str]
             if index not in claimed or index in replacements]
 
 
-def _private_lines(prefix: str, names: list[str], width: int = 120) -> list[str]:
-    """Wrap factored names only between independently reconstructable tokens."""
+def _private_lines(prefix: str, names: list[str], width: int = 120,
+                   continuation: str | None = None) -> list[str]:
+    """Wrap factored names only between independently reconstructable tokens.
+
+    Wrapped lines align under the prefix by default, which reads well while the
+    prefix is a short sigil. Callers whose prefix is long (a file landmark) pass
+    a fixed continuation instead: padding that scales with the prefix costs more
+    than the names it aligns."""
     lines: list[str] = []
-    continuation = " " * len(prefix)
+    if continuation is None:
+        continuation = " " * len(prefix)
     current = prefix
     for token in _factored_name_tokens(names):
         candidate = current + ("," if current.strip() != prefix.strip() else "") + token
@@ -919,6 +926,11 @@ def _edge_suffix(owner: str, targets: list[str], braced: bool = False) -> str:
     return f" > {','.join(shown)}" + (f" +{more}" if more else "")
 
 
+# Wrapped case names sit one level inside their file landmark: enough to read
+# as continuation, never as a sibling file.
+_CASE_CONTINUATION = "  "
+
+
 def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       resolved_calls: dict[int, list[str]] | None = None,
                       helper_ids: dict[int, bool] | None = None,
@@ -976,22 +988,29 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     suffixes = {Path(p).suffix for p in test_paths}
     shared_ext = (next(iter(suffixes))
                   if len(suffixes) == 1 and next(iter(suffixes)) else "")
-    lines: list[str] = []
+    # Test paths share deep directory prefixes (one package tree per module);
+    # stating each one once through the same trie the source section uses keeps
+    # the landmark identical and drops the repetition.
+    payload_by_dir: dict[str, list[str]] = {}
     for path in test_paths:
         display_path = Path(*Path(path).parts[1:]) if strip_first else Path(path)
         display = str(display_path).removesuffix(shared_ext)
+        directory = str(Path(display).parent)
+        leaf = Path(display).name
         case_names = cases.get(path, [])
-        case_lines = (_private_lines(display + ":", case_names)
-                      if case_names else [display])
+        case_lines = (_private_lines(leaf + ":", case_names,
+                                     continuation=_CASE_CONTINUATION)
+                      if case_names else [leaf])
         helper_names = _factored_name_tokens(helpers.get(path, []))
         helper_suffix = (f":*{','.join(helper_names)}"
                          if helper_names else "")
         case_lines[-1] += (helper_suffix
                            + _edge_suffix(Path(path).stem,
                                           edges.get(path, [])))
-        lines.extend(case_lines)
+        payload_by_dir.setdefault("" if directory == "." else directory,
+                                  []).extend(case_lines)
     header = f"? tests ·{shared_ext}" if shared_ext else "? tests"
-    return [header, *(" " + line for line in lines)]
+    return [header, *(" " + line for line in _tree_lines(payload_by_dir))]
 
 
 def _legend_line(text: str, has_priv: bool, has_tests: bool,

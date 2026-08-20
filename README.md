@@ -60,8 +60,9 @@ src
  ids
   {ItemId,OrderId,UserId}.java(R{value})
 ? tests ·.java
- src/test/PricingEngineTest:BulkDiscounts,ordersOverTenItemsGetTenPercentOff,smallOrdersPayFullPrice,
-                            unknownItemIsRejected
+ src/test
+  PricingEngineTest:BulkDiscounts,ordersOverTenItemsGetTenPercentOff,smallOrdersPayFullPrice,
+    unknownItemIsRejected
 · 186 LOC · state 0123456789ab
 ```
 
@@ -75,8 +76,9 @@ essentials are:
   calls. `←` shows implementors.
 - `×0` means no static project reference was found; `!E` means a callable
   throws. These are navigation hints, not correctness claims.
-- `? tests` retains a compact, reconstructable landmark for every detected
-  test file, plus suite names and every recognized function/method case name,
+- `? tests` uses the same path-compressed tree as the source section and
+  retains a compact, reconstructable landmark for every detected test file,
+  plus suite names and every recognized function/method case name,
   so an agent can inspect existing coverage before recreating it. Same-named
   methods in different suites gain their suite owner. `*` marks reusable test
   helpers; separate tool/benchmark landmarks stay compact. The footer carries
