@@ -63,7 +63,7 @@ src
  src/test
   PricingEngineTest:BulkDiscounts,ordersOverTenItemsGetTenPercentOff,smallOrdersPayFullPrice,
     unknownItemIsRejected
-· 186 LOC · state 0123456789ab
+· 186 LOC · input 1,051 · output 285 tokens · state 0123456789ab
 ```
 
 The second line is generated with the map and explains its applicable core
@@ -81,8 +81,12 @@ essentials are:
   plus suite names and every recognized function/method case name,
   so an agent can inspect existing coverage before recreating it. Same-named
   methods in different suites gain their suite owner. `*` marks reusable test
-  helpers; separate tool/benchmark landmarks stay compact. The footer carries
-  freshness and saved settings.
+  helpers; separate tool/benchmark landmarks stay compact.
+- The footer carries freshness and saved settings, plus what the map cost:
+  `input` is the estimated token count of the scanned sources, `output` the
+  estimated count of the map itself — the compression the block bought, stated
+  inside the block. Both use the `ceil(characters / 4)` estimate the budget
+  uses.
 
 ## Common commands
 

@@ -101,7 +101,12 @@ class SimpleDigestTest(unittest.TestCase):
 
 
 class FixtureTokenCeilingTest(unittest.TestCase):
-    """Known fixtures stay within reviewed release-level context ceilings."""
+    """Known fixtures stay within reviewed release-level context ceilings.
+
+    The ceilings rose by nine tokens in v0.14 when the footer began stating the
+    corpus and map token counts. That is a flat per-map cost a real corpus
+    barely registers; these fixtures are small enough to make it look large.
+    """
 
     def _assert_ceiling(self, name: str, ceiling: int) -> None:
         root = FIXTURES / name
@@ -112,7 +117,7 @@ class FixtureTokenCeilingTest(unittest.TestCase):
     @_needs_fixture("javamini")
     def test_javamini(self):
         # All three JUnit case methods plus the nested suite stay visible.
-        self._assert_ceiling("javamini", 274)
+        self._assert_ceiling("javamini", 283)
 
     @_needs_fixture("javamini")
     def test_javamini_managed_context_shrinks_with_business_gold_set_intact(self):
@@ -120,9 +125,9 @@ class FixtureTokenCeilingTest(unittest.TestCase):
         cost = hologram.managed_context_cost(digest)
 
         # v0.10 needed about 401 managed-context planning tokens here. The
-        # lower ceiling is valid only while these turn-zero architecture and
+        # ceiling is valid only while these turn-zero architecture and
         # business-rule facts remain present together.
-        self.assertLessEqual(cost.managed_block_tokens, 383)
+        self.assertLessEqual(cost.managed_block_tokens, 392)
         for required in (
             "PricePort.java(I) ←PricingEngine",
             "PricingEngine.java(C{basePrices})",
@@ -139,19 +144,19 @@ class FixtureTokenCeilingTest(unittest.TestCase):
 
     def test_pymini(self):
         # Named pytest cases are retained because the file has no suite class.
-        self._assert_ceiling("pymini", 94)
+        self._assert_ceiling("pymini", 103)
 
     @_needs_fixture("tsmini")
     def test_tsmini(self):
-        self._assert_ceiling("tsmini", 92)
+        self._assert_ceiling("tsmini", 101)
 
     @_needs_fixture("polyglot")
     def test_polyglot(self):
-        self._assert_ceiling("polyglot", 903)
+        self._assert_ceiling("polyglot", 912)
 
     @_needs_fixture("webmini")
     def test_webmini(self):
-        self._assert_ceiling("webmini", 162)
+        self._assert_ceiling("webmini", 171)
 
 
 @needs_java
@@ -492,11 +497,14 @@ class SecretRedactionTest(unittest.TestCase):
                 "SESSION_COOKIE = 'sid'\n"
                 "MAX_RETRIES = 3\n")
             out = build_digest(root)
+        # A value can only leak through a rendered fact; the footer states LOC
+        # and token counts, and its "tokens" contains a short secret's letters.
+        facts = "\n".join(out.splitlines()[:-1])
         self.assertIn("API_KEY", out)          # the name stays informative
         self.assertNotIn("abcd1234", out)
         self.assertNotIn("hunter2", out)
-        self.assertNotIn("tok", out.replace("AUTH_TOKEN", ""))
-        self.assertNotIn("sid", out.replace("SESSION_COOKIE", ""))
+        self.assertNotIn("tok", facts.replace("AUTH_TOKEN", ""))
+        self.assertNotIn("sid", facts.replace("SESSION_COOKIE", ""))
         self.assertIn("MAX_RETRIES=3", out)    # innocent values still inline
 
     def test_secret_shaped_values_redacted_regardless_of_name(self):

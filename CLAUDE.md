@@ -207,7 +207,7 @@ hologram
   build_digest(root,langs,targets,budget):str ✓ > _build_digest
   build_digest_with_stats(root,langs,targets,budget):tuple[str,BudgetStats] ✓ > _build_digest
   estimate_tokens(text):int ✓
-  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers,budget_{selection,catalog,retained}):str ~918 ✓ > _target_descriptions,{_tree,_test_index}_lines,_legend_line,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_total_loc,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,render._symbol_identity
+  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,source_tokens,resolved,helpers,budget_{selection,catalog,retained}):str ~944 ✓ > _target_descriptions,{_tree,_test_index}_lines,_legend_line,estimate_tokens,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_corpus_size,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,render._symbol_identity
   summarize_budget(requested_budget,{full,selected,skeleton}_tokens,effective_detail,bundles,retained,selection_{trials,candidates},search_truncated,stop_reason):BudgetStats ~41 ✓ > BudgetStats
   BudgetBundle(R{detail,category,key,estimated_chars,source_file,semantic_tier,distinct_file_fanin,reason})
    name():str @property
@@ -304,7 +304,7 @@ hologram
  test_freshness_and_markers:DigestMetadataCompatibilityTest,
    test_{legacy_header_and_current_footer_parse_identically,semantic_text_cannot_spoof_footer_metadata,state_and_loc_changes_touch_only_final_metadata_line},
    StateAndCheckTest,
-   test_{state_stamp_matches_state_hash,unreadable_file_is_skipped_by_gather_and_state_alike,generator_change_invalidates_state,fingerprint_covers_every_package_source,check_fresh_then_stale,check_stale_when_no_block_embedded,build_if_stale_skips_when_fresh},
+   test_{state_stamp_matches_state_hash,footer_states_the_corpus_cost_and_the_map_cost,unreadable_file_is_skipped_by_gather_and_state_alike,generator_change_invalidates_state,fingerprint_covers_every_package_source,check_fresh_then_stale,check_stale_when_no_block_embedded,build_if_stale_skips_when_fresh},
    TestedMarkerTest,test_{symbol_named_in_tests_gets_check,untested_symbol_unmarked},SizeMarkerTest,
    test_large_body_marked_small_not,TestIndexTest,test_test_files_and_classless_test_functions_are_listed,
    test_file_{level_coverage_edges_for_classless_tests,edge_gets_one_headline_and_overflow},DisplayNameTest,
@@ -333,7 +333,7 @@ hologram
    test_{type_aliases,object_literal_api,reexports},ReactComponentTest,
    test_{jsx_usage_becomes_calls_intrinsics_dropped,memo_wrapped_default_export_recovered,fc_type_argument_replaces_untyped_props,component_render_tree_in_digest},
    AngularExtractTest,
-   test_{component_selector_and_injectable,di_and_output_bindings,route_config_extracted,digest_shows_selector_and_routes,inline_template_elements_become_component_edges,templateurl_external_html_joins,duplicate_selector_produces_no_edge},
+   test_{component_selector_and_injectable,di_and_output_bindings,route_config_extracted,digest_shows_selector_and_routes,templateurl_external_html_joins,duplicate_selector_produces_no_edge},
    TsLossRecoveryTest,
    test_{interface_methods_extracted,untyped_field_bound_through_new_expression,decorated_and_readonly_ctor_params_parse},
    TsxExtractTest,test_jsx_component_arrow_extracted,SfcExtractTest,test_component_symbol_and_script_contents,
@@ -389,6 +389,6 @@ tools
 benchmark
  bench.py: main(argv):int;run_one(...);report(rows,anon):str +11
 ‥ optional facts omitted — NEVER guess; read source before relying on them
-· 19,239 LOC · state 984489b05eab · budget 6000 A7
+· 19,311 LOC · input 215,433 · output 5,999 tokens · state 8b90d4dd4ec6 · budget 6000 A7
 ```
 <!-- hologram:end -->

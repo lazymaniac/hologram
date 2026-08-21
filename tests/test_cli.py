@@ -768,7 +768,10 @@ class PrintCommandTest(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("PricingEngine", out.getvalue())
             self.assertTrue(out.getvalue().startswith("# hologram\n· "))
-            self.assertIn(" LOC · state ", out.getvalue().splitlines()[-1])
+            self.assertRegex(
+                out.getvalue().splitlines()[-1],
+                r"^· [\d,]+ LOC · input [\d,]+ · output [\d,]+ tokens"
+                r" · state \w{12}$")
             after = sorted(p.relative_to(proj) for p in proj.rglob("*"))
             self.assertEqual(before, after)  # no CLAUDE.md created, nothing embedded
 

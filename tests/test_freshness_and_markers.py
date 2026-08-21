@@ -1,3 +1,4 @@
+import re
 import subprocess
 import sys
 import tempfile
@@ -88,6 +89,28 @@ class StateAndCheckTest(unittest.TestCase):
         self.assertEqual(lines[0], "# hologram")
         self.assertNotIn("state", "\n".join(lines[:2]))
         self.assertIn("· state ", lines[-1])
+
+    def test_footer_states_the_corpus_cost_and_the_map_cost(self):
+        """The map is a compression claim, so the footer states both sides.
+
+        ``output`` is measured on text that contains ``output``, so the render
+        has to reach a fixed point instead of stating a stale count.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--quiet"])
+            embedded = hologram.embedded_digest(root / "CLAUDE.md")
+            corpus = sum(hologram.estimate_tokens(path.read_text())
+                         for path in sorted(root.rglob("*.py")))
+
+        match = re.match(
+            r"^· [\d,]+ LOC · input ([\d,]+) · output ([\d,]+) tokens · ",
+            embedded.splitlines()[-1])
+        self.assertIsNotNone(match, embedded.splitlines()[-1])
+        stated_input, stated_output = (int(group.replace(",", ""))
+                                       for group in match.groups())
+        self.assertEqual(stated_input, corpus)
+        self.assertEqual(stated_output, hologram.estimate_tokens(embedded))
 
     def test_unreadable_file_is_skipped_by_gather_and_state_alike(self):
         """`_gather` must skip what `_state_hash` skips.
