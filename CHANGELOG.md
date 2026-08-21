@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The test index states landmarks and support, never call targets.** The
+  `> target +N` coverage edge is gone: it spent tokens naming one arbitrary
+  target and counting the rest, and what a test file exercises is already
+  legible from the case names it carries. `? tests` now holds exactly test
+  classes, test functions and methods, helper classes, helper functions, and
+  declared fixtures.
+- **Fixtures and shared helper functions are named.** A fixture qualifies by
+  declaration (`@pytest.fixture`, `@BeforeEach`, `@Rule`, …) because the
+  framework injects it by name rather than calling it; a plain function has to
+  be used by another test file. Teardown markers earn no name. Both render in
+  the existing `*` group, whose legend clause is now `*=helper/fixture`.
+
 ### Added
 
 - **L8, a structure-only floor below the semantic floor.** When even L7 cannot fit a

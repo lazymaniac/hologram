@@ -518,7 +518,6 @@ _BUNDLE_CATEGORY_ORDER = {
     "test-files": 5,
     "test-cases": 6,
     "private-names": 7,
-    "test-coverage": 8,
 }
 
 
@@ -620,7 +619,7 @@ def _bundle_estimated_chars(category: str, symbol: Symbol,
         parts = [symbol.name, *symbol.calls]
     elif category == "const-values":
         parts = [symbol.signature or symbol.name]
-    elif category in ("test-coverage", "test-cases"):
+    elif category == "test-cases":
         parts = [symbol.name, *symbol.calls]
     else:
         display_params = [
@@ -863,6 +862,53 @@ def _private_lines(prefix: str, names: list[str], width: int = 120,
     return lines
 
 
+# Declared setup that hands a test something to work with. Teardown markers
+# are absent on purpose: they name no reusable thing.
+_FIXTURE_DECORATORS = {
+    "fixture", "beforeeach", "beforeall", "beforeclass", "beforemethod",
+    "beforesuite", "beforetest", "before", "registerextension", "rule",
+    "classrule", "testfixture", "onetimesetup", "setupfixture",
+}
+
+
+def _decorator_bases(symbol: Symbol) -> set[str]:
+    """Bare, comparable decorator names: `@pytest.fixture(scope="module")`
+    and `[SetUpAttribute]` both reduce to their marker word."""
+    return {
+        decorator.split("(", 1)[0].split(".")[-1].casefold()
+        .removesuffix("attribute")
+        for decorator in symbol.decorators
+    }
+
+
+def _is_test_fixture_symbol(symbol: Symbol) -> bool:
+    """A declared fixture: setup a test reuses by name, not a test itself."""
+    return (symbol.kind in ("fn", "method")
+            and symbol.lang != "make"
+            and _is_test_path(symbol.file)
+            and bool(_decorator_bases(symbol) & _FIXTURE_DECORATORS))
+
+
+def _test_reference_counter(file_tokens: dict[str, set[str]] | None,
+                            make_files: set[str]):
+    """How many *other* test files mention a name — the shared-use evidence
+    both helper classes and helper functions are judged on."""
+    counts: dict[str, int] = {}
+    test_files = ([f for f in sorted(file_tokens)
+                   if _is_test_path(f) and f not in make_files]
+                  if file_tokens else [])
+
+    def refs(name: str, own_file: str) -> int:
+        if not file_tokens:
+            return 1  # no reference data: conservatively keep the helper name
+        if name not in counts:
+            counts[name] = sum(1 for f in test_files
+                               if f != own_file and name in file_tokens[f])
+        return counts[name]
+
+    return refs
+
+
 def _helper_class_ids(symbols: list[Symbol],
                       file_tokens: dict[str, set[str]] | None) -> dict[int, bool]:
     """Test-support classes worth surfacing: reusable drivers, builders, and
@@ -873,20 +919,8 @@ def _helper_class_ids(symbols: list[Symbol],
     internal callers; compact rendering uses membership only and emits the
     helper name on its file landmark, never its implementation internals."""
     ids: dict[int, bool] = {}
-    ref_counts: dict[str, int] = {}
     make_files = {s.file for s in symbols if s.lang == "make"}
-    test_files: list[str] = ([f for f in sorted(file_tokens)
-                              if _is_test_path(f) and f not in make_files]
-                             if file_tokens else [])
-
-    def refs(name: str, own_file: str) -> int:
-        if not file_tokens:
-            return 1  # no reference data: conservatively keep the helper name
-        if name not in ref_counts:
-            ref_counts[name] = sum(1 for f in test_files
-                                   if f != own_file and name in file_tokens[f])
-        return ref_counts[name]
-
+    refs = _test_reference_counter(file_tokens, make_files)
     for s in symbols:
         if (s.kind != "class" or s.lang == "make"
                 or not _is_test_path(s.file)):
@@ -903,40 +937,42 @@ def _helper_class_ids(symbols: list[Symbol],
     return ids
 
 
-_EDGE_CAP = 1  # coverage-edge targets shown per test file; rest summarize to +N
+def _test_support_ids(symbols: list[Symbol],
+                      file_tokens: dict[str, set[str]] | None) -> dict[int, bool]:
+    """Every reusable piece of test support worth naming in the index:
+    helper classes, shared helper functions, and declared fixtures.
 
-
-def _informative_targets(owner: str, targets: list[str]) -> list[str]:
-    """Coverage targets not already guessable from the test's own name:
-    `TaskLoaderTest > load_tasks` says nothing, so it renders as `+1`;
-    surprising targets keep their names."""
-    flat_owner = re.sub(r"[_./-]", "", owner).casefold()
-    out = []
-    for t in targets:
-        base = re.sub(r"[_./-]", "", t.rsplit(".", 1)[-1]).casefold()
-        if base and base in flat_owner:
+    Functions are judged exactly as classes are — support that lives on a test
+    path only through its directory, or that two or more *other* test files
+    call by name. A fixture qualifies by declaration: it is written to be
+    reused, and the framework injects it by name rather than calling it, so
+    reference counting would miss it."""
+    ids = dict(_helper_class_ids(symbols, file_tokens))
+    make_files = {s.file for s in symbols if s.lang == "make"}
+    refs = _test_reference_counter(file_tokens, make_files)
+    for symbol in symbols:
+        if id(symbol) in ids:
             continue
-        out.append(t)
-    return out
-
-
-def _edge_suffix(owner: str, targets: list[str], braced: bool = False) -> str:
-    """`>headline+N` coverage note. Inside braces it glues to the member name
-    with no spaces so the comma stays the member separator."""
-    if not targets:
-        return ""
-    informative = _informative_targets(owner, targets)
-    shown = informative[:_EDGE_CAP]
-    more = len(targets) - len(shown)
-    if braced:
-        if not shown:
-            # every target was guessable from the name; a bare +1/+2 says
-            # nearly nothing, so only larger surfaces earn the marker
-            return f"+{more}" if more > 2 else ""
-        return f">{shown[0]}" + (f"+{more}" if more else "")
-    if not shown:
-        return f" +{more}" if more > 2 else ""
-    return f" > {','.join(shown)}" + (f" +{more}" if more else "")
+        if _is_test_fixture_symbol(symbol):
+            ids[id(symbol)] = True
+            continue
+        if (symbol.kind != "fn" or symbol.container is not None
+                or symbol.lang == "make"
+                or not _is_test_path(symbol.file)
+                or _is_classless_test_case_symbol(symbol)):
+            continue
+        # A function is support only when another test file actually uses it.
+        # Classes can earn the name on location alone; functions are far more
+        # numerous, so without reference data the index stays quiet about them
+        # and an unreferenced local remains its own file's business.
+        if not file_tokens:
+            continue
+        shared = refs(symbol.name, symbol.file)
+        off_test_file = (not _test_stem(Path(symbol.file).stem)
+                         and not symbol.name.casefold().startswith("test"))
+        if shared >= 2 or (off_test_file and shared >= 1):
+            ids[id(symbol)] = True
+    return ids
 
 
 # Wrapped case names sit one level inside their file landmark: enough to read
@@ -945,20 +981,23 @@ _CASE_CONTINUATION = "  "
 
 
 def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
-                      resolved_calls: dict[int, list[str]] | None = None,
+                      resolved_calls=None,
                       helper_ids: dict[int, bool] | None = None,
                       sig_line=None,
                       case_ids: set[int] | None = None,
                       case_labels: dict[int, str] | None = None,
                       case_files: set[str] | None = None,
                       selected_files: set[str] | None = None) -> list[str]:
-    """Compact test orientation: file, selected test landmarks, business edge.
+    """Compact test orientation: file, test landmarks, reusable support.
 
     Suite names and every recognized function/method case help agents find
     existing coverage before they add a duplicate.  They remain independently
     budgetable; an omitted name never removes its file landmark.  Reusable
-    helpers remain named, but their internals stay in source.  ``sig_line``
-    remains accepted for source compatibility with callers from v0.10.
+    helpers and fixtures remain named, but their internals stay in source.
+    The index states no call targets: what a test file exercises is guessable
+    from the names it already carries, and the headline+N form spent tokens on
+    one arbitrary target.  ``sig_line`` and ``resolved_calls`` remain accepted
+    for source compatibility with callers from v0.10.
     """
     make_files = {s.file for s in symbols if s.lang == "make"}
     case_ids = case_ids or set()
@@ -979,16 +1018,6 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     test_paths.sort()
     if not test_paths:
         return []
-    edges: dict[str, list[str]] = {}
-    for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
-        if (symbol.lang == "make"
-                or not (_is_test_path(symbol.file) or symbol.file in case_files)
-                or symbol.kind not in ("fn", "method", "ctor")
-                or not resolved_calls):
-            continue
-        merged = edges.setdefault(symbol.file, [])
-        merged[:] = list(dict.fromkeys(
-            merged + resolved_calls.get(id(symbol), [])))
     first_parts = {Path(path).parts[0] for path in test_paths if Path(path).parts}
     strip_first = (len(first_parts) == 1
                    and next(iter(first_parts)).casefold() in ("test", "tests", "__tests__"))
@@ -1020,9 +1049,7 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
         helper_names = _factored_name_tokens(helpers.get(path, []))
         helper_suffix = (f":*{','.join(helper_names)}"
                          if helper_names else "")
-        case_lines[-1] += (helper_suffix
-                           + _edge_suffix(Path(path).stem,
-                                          edges.get(path, [])))
+        case_lines[-1] += helper_suffix
         payload_by_dir.setdefault("" if directory == "." else directory,
                                   []).extend(case_lines)
     header = f"? tests ·{shared_ext}" if shared_ext else "? tests"
@@ -1054,7 +1081,7 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
     if has_priv:
         items.append("-=private")
     if has_helpers:
-        items.append("*=test helper")
+        items.append("*=helper/fixture")
     if "×0" in text:
         items.append("×0=unused")
     if "✓" in text:
@@ -1098,7 +1125,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     """Compact project facts as a package trie.
 
     `loc`, `source_tokens`, `resolved` (the _resolved_project_calls triple)
-    and `helpers` (_helper_class_ids) are level-invariant and may be precomputed by the
+    and `helpers` (_test_support_ids) are level-invariant and may be precomputed by the
     caller — they MUST come from the same id()-keyed `symbols` list; when
     None they are computed here, so the function stays independently usable.
 
@@ -1132,8 +1159,6 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         cross_file = any(id(origin) in cross_file_callers for origin in origins)
         if category == "tested-call-chains":
             tier, reason = 0, "tested call path"
-        elif category == "test-coverage":
-            tier, reason = 1, "test-to-business edge"
         elif category == "test-cases":
             tier, reason = 2, "existing test case"
         elif category == "untested-call-chains":
@@ -1878,7 +1903,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             meta_tail += f" L{detail}"
     body = _tree_lines(payload_by_dir)
     helper_ids = (helpers if helpers is not None
-                  else _helper_class_ids(symbols, file_tokens))
+                  else _test_support_ids(symbols, file_tokens))
     method_proven_suites = {
         (symbol.file, symbol.container)
         for symbol in symbols
@@ -1934,33 +1959,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                         default=detail < _FLOOR_LEVEL,
                         payload_chars=len(label) + 1):
             selected_test_cases.add(id(symbol))
-    test_edge_groups: dict[str, list[Symbol]] = {}
-    for symbol in symbols:
-        calls = resolved_calls.get(id(symbol), [])
-        if (symbol.lang == "make"
-                or not (_is_test_path(symbol.file)
-                        or id(symbol) in test_landmark_ids)
-                or symbol.kind not in ("fn", "method", "ctor") or not calls):
-            continue
-        test_edge_groups.setdefault(symbol.file, []).append(symbol)
-    selected_test_edges: dict[int, list[str]] = {}
-    for file, callers in sorted(test_edge_groups.items()):
-        merged_calls = list(dict.fromkeys(
-            call for caller in callers
-            for call in resolved_calls.get(id(caller), ())))
-        display_owner = Path(file).stem
-        if not _edge_suffix(display_owner, merged_calls):
-            continue  # suppressed guessable edge is not a rendered fact
-        representative = callers[0]
-        edge_text = _edge_suffix(display_owner, merged_calls)
-        if _keep_bundle("test-coverage", 1, representative,
-                        default=detail < 1,
-                        suffix="|coverage",
-                        payload_chars=len(edge_text)):
-            selected_test_edges[id(representative)] = merged_calls
     # The file landmarks are themselves budgetable: at the skeleton the whole
-    # test index goes, and a restored case or coverage edge pulls its landmark
-    # back through the selection's dependency closure.
+    # test index goes, and a restored case name pulls its landmark back through
+    # the selection's dependency closure.
     make_files = {s.file for s in symbols if s.lang == "make"}
     selected_test_files: set[str] = set()
     for path in files:
@@ -1984,7 +1985,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if kept:
             selected_test_files.add(rel)
     tests = _test_index_lines(files, symbols, root,
-                              selected_test_edges,
+                              None,
                               helper_ids,
                               case_ids=selected_test_cases,
                               case_labels=case_labels,
@@ -2054,7 +2055,7 @@ def _build_digest(root: Path, langs: set[str] | None,
     # _MAX_LEVEL times and _corpus_size reads every file from disk
     loc, source_tokens = _corpus_size(files)
     resolved = _resolved_project_calls(symbols)
-    helpers = _helper_class_ids(symbols, file_tokens)
+    helpers = _test_support_ids(symbols, file_tokens)
 
     def render(level: int, *, selection: _BudgetSelection | None = None,
                catalog: set[BudgetBundle] | None = None,
@@ -2158,7 +2159,7 @@ def _build_digest(root: Path, langs: set[str] | None,
             dependency = method_dependencies.get(bundle.key)
             if dependency:
                 names.add(dependency)
-        elif bundle.category in ("test-cases", "test-coverage"):
+        elif bundle.category == "test-cases":
             # a case name renders on its file landmark line; admitting one
             # without the other would drop the fact it was selected for
             names.add(f"test-files:{bundle.source_file}")

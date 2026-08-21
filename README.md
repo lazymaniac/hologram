@@ -81,7 +81,10 @@ essentials are:
   plus suite names and every recognized function/method case name,
   so an agent can inspect existing coverage before recreating it. Same-named
   methods in different suites gain their suite owner. `*` marks reusable test
-  helpers; separate tool/benchmark landmarks stay compact.
+  support: helper classes, declared fixtures, and helper functions another
+  test file uses. The index names no call targets — what a test exercises is
+  read from the test, not from the map. Separate tool/benchmark landmarks stay
+  compact.
 - The footer carries freshness and saved settings, plus what the map cost:
   `input` is the estimated token count of the scanned sources, `output` the
   estimated count of the map itself — the compression the block bought, stated
