@@ -500,7 +500,8 @@ def _resolved_project_calls(symbols: list[Symbol]
     return displayed, tested, raw_targets
 
 
-_MAX_LEVEL = 7  # deepest budget-ladder degradation level (the skeleton)
+_FLOOR_LEVEL = 7  # deepest level at which *which facts* are rendered changes
+_MAX_LEVEL = 8    # structure-only floor: the same facts, stripped of annotation
 
 _BUDGET_POLICY_VERSION = "adaptive-bundles-v2"
 _ADAPTIVE_MAX_TRIALS = 128
@@ -1029,22 +1030,27 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
 
 
 def _legend_line(text: str, has_priv: bool, has_tests: bool,
-                 has_helpers: bool = False) -> str:
+                 has_helpers: bool = False, plain: bool = False) -> str:
     """Legend restricted to notation the rendered body actually uses.
 
     Needles must never miss real usage (a clause too many wastes a few tokens,
     a clause too few leaves notation unexplained); brace detection strips the
     always-explained type-header form `(K{` first so only factored/expansion
-    braces trigger the `p{a,b}` clause."""
+    braces trigger the `p{a,b}` clause.  A `plain` (structure-only) map carries
+    neither field lists nor return types, so it must not promise them."""
     # a type alias renders both shapes: `T{a,b}` for an object literal and
     # `T:target` for a plain alias, so each earns its clause independently
-    first = ("C/R/I/T{fields}" if "(T{" in text else "C/R/I{fields}")
-    if "(E{" in text or "(E)" in text:
-        first += " E{values}"
-    if "(T:" in text:
-        first += " T:target"
-    items = [first, "f(args):Ret > calls" if " > " in text
-             else "f(args):Ret"]  # skeleton maps carry no chains
+    if plain:
+        first = "C/R/I"
+    else:
+        first = ("C/R/I/T{fields}" if "(T{" in text else "C/R/I{fields}")
+        if "(E{" in text or "(E)" in text:
+            first += " E{values}"
+        if "(T:" in text:
+            first += " T:target"
+    signature = "f(args)" if plain else "f(args):Ret"
+    items = [first, f"{signature} > calls" if " > " in text
+             else signature]  # skeleton maps carry no chains
     if has_priv:
         items.append("-=private")
     if has_helpers:
@@ -1108,6 +1114,10 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                     if _source_role(s.file) != "main" and s.lang != "make"]
     if zero_usage is None:
         zero_usage = set()
+    # The structure-only floor keeps every fact L7 keeps and states each one
+    # with project vocabulary alone: no return/parameter types, decorators,
+    # throws, size/tested/unused markers, field lists, or type relations.
+    plain = detail >= _MAX_LEVEL
     render_origins: dict[int, list[Symbol]] = {}
     incoming_files: dict[int, set[str]] = {}
     cross_file_callers: set[int] = set()
@@ -1517,10 +1527,11 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     def _display_signature(sym: Symbol, display_name: str | None = None) -> str:
         args = _argument_names(sym)
         shape = (sym.file, sym.container or "", sym.name, tuple(args))
-        if signature_shapes[shape] > 1:
+        if signature_shapes[shape] > 1 and not plain:
             args = [f"{name}:{sym.params[index]}" if name != sym.params[index] else name
                     for index, name in enumerate(args)]
-        returns = (f":{sym.returns}" if sym.returns and sym.kind != "ctor"
+        returns = ("" if plain else
+                   f":{sym.returns}" if sym.returns and sym.kind != "ctor"
                    and sym.returns not in ("void", "Unit", "None") else "")
         if sym.signature and "(" not in sym.signature and sym.lang in ("helm", "html"):
             return sym.signature
@@ -1607,17 +1618,18 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     def _sig_line(sym: Symbol, own: str, grouped: bool,
                   display_name: str | None = None) -> str:
         sig = _display_signature(sym, display_name)
-        for note in _decorator_notes(sym.decorators, sym.lang):
-            sig = f"{sig} @{note}"
-        if sym.size >= 40:
-            sig = f"{sig} ~{sym.size}"
-        if id(sym) in tested:
-            sig = f"{sig} ✓"
-        if (sym.kind in ("fn", "method") and sym.name in zero_usage
-                and not _essential_method(sym)):
-            sig = f"{sig} ×0"
+        if not plain:
+            for note in _decorator_notes(sym.decorators, sym.lang):
+                sig = f"{sig} @{note}"
+            if sym.size >= 40:
+                sig = f"{sig} ~{sym.size}"
+            if id(sym) in tested:
+                sig = f"{sig} ✓"
+            if (sym.kind in ("fn", "method") and sym.name in zero_usage
+                    and not _essential_method(sym)):
+                sig = f"{sig} ×0"
         kept = _selected_calls(sym)
-        if sym.raises:
+        if sym.raises and not plain:
             raise_names = _factored_name_tokens(
                 [_strip_exc(r) for r in sym.raises], dedupe=False)
             sig = f"{sig} !{','.join(raise_names)}"
@@ -1723,7 +1735,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             else:
                 names = ",".join(_top_display(m) for m in members)
             letter = KIND_LETTER.get(kind, "?")
-            if kind == "type" and components and not named_fields:
+            if plain:
+                inner = letter
+            elif kind == "type" and components and not named_fields:
                 inner = f"{letter}:{components[0]}"
             elif components:
                 component_names = ",".join(_factored_name_tokens(
@@ -1733,17 +1747,19 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 inner = letter
             permit_names = "|".join(_factored_name_tokens(
                 list(permits), dedupe=False))
-            permit_suffix = f" sealed:{permit_names}" if permits else ""
+            permit_suffix = (f" sealed:{permit_names}"
+                             if permits and not plain else "")
             super_names = ",".join(_factored_name_tokens(
                 list(supers), dedupe=False))
-            rel_suffix = f" : {super_names}" if supers else ""
+            rel_suffix = f" : {super_names}" if supers and not plain else ""
             impl_names = "|".join(_factored_name_tokens(
                 list(impls), dedupe=False))
-            impl_suffix = ("" if not impls else
+            impl_suffix = ("" if not impls or plain else
                            f" ←{len(impls)} impls" if len(impls) > 6 else
                            f" ←{impl_names}")
-            hot_suffix = " ×0" if unused else ""
-            deco_suffix = "".join(f" @{n}" for n in deco_notes)
+            hot_suffix = " ×0" if unused and not plain else ""
+            deco_suffix = ("" if plain else
+                           "".join(f" @{n}" for n in deco_notes))
             call_names = ",".join(_factored_name_tokens(
                 list(type_calls), dedupe=False))
             call_suffix = f" > {call_names}" if type_calls else ""
@@ -1914,8 +1930,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     selected_test_cases: set[int] = set()
     for symbol in case_candidates:
         label = case_labels[id(symbol)]
-        if _keep_bundle("test-cases", _MAX_LEVEL, symbol,
-                        default=detail < _MAX_LEVEL,
+        if _keep_bundle("test-cases", _FLOOR_LEVEL, symbol,
+                        default=detail < _FLOOR_LEVEL,
                         payload_chars=len(label) + 1):
             selected_test_cases.add(id(symbol))
     test_edge_groups: dict[str, list[Symbol]] = {}
@@ -1956,12 +1972,12 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 or rel in make_files):
             continue
         bundle = BudgetBundle(
-            _MAX_LEVEL, "test-files", rel,
+            _FLOOR_LEVEL, "test-files", rel,
             estimated_chars=len(Path(rel).name) + 1,
             source_file=rel,
             semantic_tier=2,
             reason="test file landmark")
-        kept = (detail < _MAX_LEVEL
+        kept = (detail < _FLOOR_LEVEL
                 or (budget_selection is not None
                     and bundle.name in budget_selection.names))
         _record_bundle(bundle, kept)
@@ -1984,7 +2000,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     has_helpers = any(":*" in line for line in tests)
     legend = _legend_line("\n".join(body), has_priv,
                           bool(tests or tools or benchmark),
-                          has_helpers)
+                          has_helpers, plain=plain)
     header = f"# hologram\n{legend}\n"
     disclosure = ""
     if detail:
@@ -2062,7 +2078,7 @@ def _build_digest(root: Path, langs: set[str] | None,
     if not collect_stats and (not budget or full_tokens <= budget):
         return full, None
     skeleton_retained: set[BudgetBundle] = set()
-    skeleton = render(_MAX_LEVEL, retained=skeleton_retained)
+    skeleton = render(_FLOOR_LEVEL, retained=skeleton_retained)
     skeleton_tokens = estimate_tokens(skeleton)
 
     def stats(digest: str, retained: set[BudgetBundle],
@@ -2090,20 +2106,33 @@ def _build_digest(root: Path, langs: set[str] | None,
         return full, stats(
             full, full_retained, "full",
             stop_reason="full-fits" if budget else "unlimited")
-    # L7 is the compact pushed semantic floor.  If even it cannot fit, compare
-    # every complete ladder candidate and emit the smallest whole map.  When it
-    # does fit, all optional facts compete globally above that floor.
-    level = _MAX_LEVEL
+    # L7 is the compact pushed semantic floor, and L8 states the same facts in
+    # project vocabulary alone.  Whichever of the two fits becomes the floor
+    # that optional facts compete above; only when neither does are complete
+    # ladder candidates compared and the smallest whole map emitted.
+    level = _FLOOR_LEVEL
     digest = skeleton
+    floor_retained = skeleton_retained
+    plain_floor = ""
+    plain_retained: set[BudgetBundle] = set()
     if skeleton_tokens > budget:
+        plain_floor = render(_MAX_LEVEL, retained=plain_retained)
+        plain_tokens = estimate_tokens(plain_floor)
+        if plain_tokens <= budget:
+            level = _MAX_LEVEL
+            digest = plain_floor
+            floor_retained = plain_retained
+    if estimate_tokens(digest) > budget:
         candidates = [full]
         level_retained = [full_retained]
-        for candidate_level in range(1, _MAX_LEVEL):
+        for candidate_level in range(1, _FLOOR_LEVEL):
             retained: set[BudgetBundle] = set()
             candidates.append(render(candidate_level, retained=retained))
             level_retained.append(retained)
         candidates.append(skeleton)
         level_retained.append(skeleton_retained)
+        candidates.append(plain_floor)
+        level_retained.append(plain_retained)
         sizes = [estimate_tokens(candidate) for candidate in candidates]
         level = min(range(len(candidates)), key=lambda index: (sizes[index], index))
         digest = candidates[level]
@@ -2117,7 +2146,7 @@ def _build_digest(root: Path, langs: set[str] | None,
         return digest, stats(digest, level_retained[level],
                              f"minimum-L{level}", stop_reason="minimum")
 
-    optional = catalog - skeleton_retained
+    optional = catalog - floor_retained
     method_dependencies = {
         bundle.key: bundle.name for bundle in optional
         if bundle.category in ("public-methods", "cold-methods")
@@ -2229,11 +2258,11 @@ def _build_digest(root: Path, langs: set[str] | None,
         selection = _BudgetSelection(
             frozenset(selected), level, len(transition))
         digest = render(level, selection=selection, retained=final_retained)
-        retained_optional = final_retained - skeleton_retained
+        retained_optional = final_retained - floor_retained
         effective = (f"L{level}-adaptive:{len(retained_optional)}/"
                      f"{len(optional)}")
     else:
-        final_retained = skeleton_retained
+        final_retained = floor_retained
         effective = f"L{level}"
     did_saturate = saturated()
     stop_reason = ("saturated" if did_saturate else

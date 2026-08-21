@@ -105,6 +105,12 @@ Consequences worth knowing before editing:
   side-index, or coaching that requires the agent to remember a tool call. The product
   distinction is maximum useful business-logic semantics already present at session
   start.
+- **Two floors, one ladder.** `_FLOOR_LEVEL` (L7) is the deepest level at which *which
+  facts* render changes; `_MAX_LEVEL` (L8) renders exactly those facts stripped of
+  every non-project annotation (types, decorators, throws, `~N`/`✓`/`×0`, field lists,
+  supers/implementors/sealed). L8 is a representation change, never another fact drop,
+  so a bundle level is `_FLOOR_LEVEL` and only rendering reads `_MAX_LEVEL`. A budget
+  takes L8 only when L7 overflows; `BudgetStats.skeleton_tokens` keeps meaning L7.
 - **Budget means digest budget.** `adaptive-bundles-v2` starts from a compact pushed
   floor, ranks optional facts by tested/cross-file value, fan-in, and file breadth,
   closes method-call dependencies, and verifies every admission by full rendering.
@@ -207,7 +213,7 @@ hologram
   build_digest(root,langs,targets,budget):str ✓ > _build_digest
   build_digest_with_stats(root,langs,targets,budget):tuple[str,BudgetStats] ✓ > _build_digest
   estimate_tokens(text):int ✓
-  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,source_tokens,resolved,helpers,budget_{selection,catalog,retained}):str ~944 ✓ > _target_descriptions,{_tree,_test_index}_lines,_legend_line,estimate_tokens,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_corpus_size,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,render._symbol_identity
+  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,source_tokens,resolved,helpers,budget_{selection,catalog,retained}):str ~954 ✓ > _target_descriptions,{_tree,_test_index}_lines,_legend_line,estimate_tokens,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_corpus_size,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_decorator_notes,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,render._symbol_identity
   summarize_budget(requested_budget,{full,selected,skeleton}_tokens,effective_detail,bundles,retained,selection_{trials,candidates},search_truncated,stop_reason):BudgetStats ~41 ✓ > BudgetStats
   BudgetBundle(R{detail,category,key,estimated_chars,source_file,semantic_tier,distinct_file_fanin,reason})
    name():str @property
@@ -238,7 +244,7 @@ hologram
   has_parser(lang):bool
 ? tests ·.py
  test_adaptive_budget:AdaptiveBudgetSemanticTest,
-   test_{boundary_packing_is_deterministic_complete_and_owner_safe,tested_and_cross_file_paths_precede_local_private_leaves,skeleton_drops_the_test_index_and_a_case_restores_its_file,selected_member_chain_keeps_owning_method_line,equal_tier_selection_preserves_breadth_across_files,selected_private_inventory_keeps_whole_names_without_duplication,private_helper_remains_fallback_when_full_chain_cannot_fit,every_budget_that_holds_the_skeleton_is_a_hard_ceiling},
+   test_{boundary_packing_is_deterministic_complete_and_owner_safe,tested_and_cross_file_paths_precede_local_private_leaves,skeleton_drops_the_test_index_and_a_case_restores_its_file,structure_floor_strips_every_non_project_annotation,budget_under_the_semantic_floor_lands_on_the_structure_floor,selected_member_chain_keeps_owning_method_line,equal_tier_selection_preserves_breadth_across_files,selected_private_inventory_keeps_whole_names_without_duplication,private_helper_remains_fallback_when_full_chain_cannot_fit,every_budget_that_holds_the_skeleton_is_a_hard_ceiling},
    BudgetStatsContractTest,
    test_{stats_are_json_native_and_account_for_every_bundle,trial_cap_reports_unfillable_slack_without_fake_utilization,resolved_payload_ranking_reaches_small_chain_before_cap,smaller_whole_facts_fill_tier_before_oversized_methods,suppressed_record_constructor_is_not_counted_as_a_bundle,duplicate_ownerless_method_is_one_rendered_bundle,tiny_map_is_emitted_whole_when_no_candidate_can_fit,zero_budget_means_unlimited_and_reports_no_utilization} > _gather +10
  test_bench:TaskLoaderTest,
@@ -249,8 +255,7 @@ hologram
    test_{setup_failure_marks_structured_review_not_run,counterbalanced_schedule_records_rotating_orders,atomic_jsonl_append_preserves_complete_rows,atomic_append_rejects_preexisting_partial_line,only_fully_observed_cells_are_terminal_for_resume},
    WorkspaceTest,
    test_{condition_a_embeds_the_map,condition_b_is_control,workspace_is_isolated,outside_paths_in_context_files_are_confined,context_symlink_cannot_escape_throwaway_clone,corpus_claude_md_preserved_and_setup_committed},
-   BudgetConditionTest,
-   test_{workspace_map_carries_budget_stamp,adaptive_budget_stamp_is_recorded_as_adaptive_detail,body_budget_text_cannot_spoof_benchmark_metadata},
+   BudgetConditionTest,test_{workspace_map_carries_budget_stamp,body_budget_text_cannot_spoof_benchmark_metadata},
    ActedOnFindingsTest,
    test_{edit_of_named_file_then_commit_counts,findings_after_last_commit_do_not_count,seen_without_edit_does_not_count,pathless_findings_fall_back_to_any_edit,shipped_head_parent_revision_counts_as_real_event},
    ReviewConditionTest,test_ar_workspace_has_review_hook_corpus_untouched,
@@ -262,10 +267,8 @@ hologram
    test_{name_in_new_file_matches,unchanged_line_does_not_match,empty_expectation_is_none,test_only_excludes_prod_additions},
    ReportTest,
    test_{dry_ar_is_excluded_from_review_measurements,aggregates_by_condition,empty_rows,kind_split_and_answer_column,anon_report_has_no_symbol_names,infrastructure_failures_are_not_averaged,manual_rows_are_pending_not_automatic_successes,latest_duplicate_cell_is_reported_once,matches_every_planned_treatment_against_control,report_makes_dry_and_paid_runner_modes_visible},
-   CliTest,test_public_help_hides_internal_review_hook,test_run_writes_jsonl_and_report_reads_it,
-   test_dry_run_never_executes_acceptance_shell,
-   test_resume_{skips_only_exact_compatible_terminal_cells,retries_and_preserves_infrastructure_failure,uses_latest_attempt_not_any_older_success,retries_when_evidence_artifact_was_tampered},
-   test_runner_circuit_breaker_stops_matrix > load_tasks +34
+   CliTest,
+   test_{public_help_hides_internal_review_hook,run_writes_jsonl_and_report_reads_it,dry_run_never_executes_acceptance_shell,resume_skips_only_exact_compatible_terminal_cells,resume_uses_latest_attempt_not_any_older_success,resume_retries_when_evidence_artifact_was_tampered,runner_circuit_breaker_stops_matrix} > load_tasks +34
  test_budget_integrity:WholeMapBudgetSelectionTest,
    test_{unlimited_and_generous_normal_builds_render_once,negative_library_budget_is_rejected,budget_70_does_not_grow_a_tiny_map,semantic_floor_refills_whole_facts_within_budget},
    EntrypointFloorTest,
@@ -341,7 +344,7 @@ hologram
    test_{attributes_and_class_consts,interface_class_supers_fields,methods_visibility_typed_params_returns,ctor_bindings_calls_throws},
    SwiftExtractTest,test_{throw_types_become_raises,protocol_class_struct_kinds_and_supers,methods_visibility_init_ctor},
    ScalaExtractTest,test_{throw_new_becomes_raises,case_class_trait_object_kinds},MakefileExtractTest,
-   test_{shell_escaped_variable_is_not_a_make_parameter,dollar_run_parity_controls_make_expansion,hyphenated_override_assignments_pin_variables,custom_recipe_prefix_and_reset_are_honored,explicit_empty_recipe_overrides_earlier_recipe,named_makefile_detected_without_extension} > extract_file +3
+   test_{dollar_run_parity_controls_make_expansion,hyphenated_override_assignments_pin_variables,custom_recipe_prefix_and_reset_are_honored,named_makefile_detected_without_extension} > extract_file +3
  test_release_privacy:ReleasePrivacyTest,
    test_{clean_tree_passes,tracked_local_task_is_rejected,private_tree_path_is_redacted_when_payload_also_matches,untracked_publishable_file_is_scanned,index_and_worktree_payloads_are_both_scanned,index_and_worktree_symlink_targets_are_scanned_and_redacted,publishable_filename_is_scanned_without_echoing_it,denylist_match_does_not_echo_protected_text,zip_and_tar_payloads_are_scanned,private_archive_member_is_redacted_when_payload_also_matches,archive_member_names_and_link_targets_are_scanned,zip_symlink_target_is_scanned_and_redacted,tar_symlink_and_hardlink_targets_are_scanned_and_redacted,empty_zip_directory_name_is_scanned,empty_tar_directory_private_name_is_scanned_and_redacted,zip_comments_and_extra_fields_are_scanned_with_redacted_labels,tar_owner_and_pax_metadata_are_scanned_with_redacted_labels,gzip_wrapper_filename_is_scanned_with_redacted_label,nested_archive_payload_is_rejected_with_redacted_location,compressed_archive_blob_is_rejected_in_tree_and_history,history_scan_finds_removed_content_without_echoing_it,history_scan_includes_removed_filenames_via_tree_objects,release_workflow_runs_no_privacy_audit}
  test_review:DupCheckTest,
@@ -356,16 +359,16 @@ hologram
    FixtureTokenCeilingTest,test_{javamini,pymini,tsmini,polyglot,webmini},{SameShapeGrouping,RenderUnit}Test,
    test_{tree_shares_prefixes_once,named_fields_replace_types},EnumValuesTest,
    test_{java_enum_constants_extracted,enum_values_rendered,python_enum_values_extracted},InterfaceMethodTest,
-   {test_bodyless_interface_methods,test_primitive_return_body_method}_extracted,test_interface_methods_rendered,
-   QualifiedCallTest,test_receiver_kept_for_qualified_calls,FieldNamesTest,test_declared_field_names_shown,
-   ReconstructablePathTest,test_tree_labels_keep_real_path_segments,LanguageFilterTest,
-   test_{only_requested_language_included,cli_lang_flag},RelationsTest,
+   test_{bodyless_interface_methods_extracted,interface_methods_rendered},QualifiedCallTest,
+   test_receiver_kept_for_qualified_calls,FieldNamesTest,test_declared_field_names_shown,ReconstructablePathTest,
+   test_tree_labels_keep_real_path_segments,LanguageFilterTest,test_{only_requested_language_included,cli_lang_flag},
+   RelationsTest,
    test_{implements_extracted,sealed_permits_extracted,generic_supers_not_split_on_type_args,relations_rendered},
    InterfaceImplementorsTest,test_{inversion_moves_relation_to_interface,many_implementors_summarized_to_count},
    LegendTest,test_{legend_line_present,no_query_or_regeneration_prose},ConstExtractTest,
    test_{python_module_constants,java_static_final_values},SecretRedactionTest,test_helper_is_the_single_shared_gate,
    RouteRenderTest,
-   test_{spring_route_and_class_prefix,jaxrs_verb_and_path_pair,flask_verb_from_methods_kwarg,markers_render_bare_and_noise_dropped,angular_component_selector,no_decorators_no_legend_clause,symfony_route_with_methods_array},
+   test_{spring_route_and_class_prefix,jaxrs_verb_and_path_pair,flask_verb_from_methods_kwarg,angular_component_selector,no_decorators_no_legend_clause,symfony_route_with_methods_array},
    ThrowsTest,{test_java_throws_clause,test_python_raise_types}_extracted,TransitiveReductionTest,
    test_{implied_edge_dropped,direct_only_edge_kept,cycle_members_both_kept},VoidOmissionTest,
    test_{python_none_return_omitted,java_void_omitted_in_signature},GroupExtrasTest,
@@ -389,6 +392,6 @@ tools
 benchmark
  bench.py: main(argv):int;run_one(...);report(rows,anon):str +11
 ‥ optional facts omitted — NEVER guess; read source before relying on them
-· 19,311 LOC · input 215,433 · output 5,999 tokens · state 37f9b7a66d4b · budget 6000 A7
+· 19,421 LOC · input 216,891 · output 5,955 tokens · state a19b6b2848ac · budget 6000 A7
 ```
 <!-- hologram:end -->

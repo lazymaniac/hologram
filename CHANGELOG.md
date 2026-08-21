@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **L8, a structure-only floor below the semantic floor.** When even L7 cannot fit a
+  `--budget`, Hologram now renders the same facts in project vocabulary alone: return
+  and parameter types, decorators and route paths, `!throws`, `~N`/`✓`/`×0` markers,
+  `{field}` lists, and `: super` / `←impls` / `sealed:` relations all go, leaving the
+  source tree, type names, and function names with their parameter names. On this
+  repository the floor drops from 714 to 460 tokens. Ranked whole facts still compete
+  for slack above it, and the previous "no complete map fits" fallback now runs only
+  when L8 overflows too. `BudgetStats.skeleton_tokens` keeps meaning the L7 semantic
+  floor; `effective_detail` reports `L8` or `L8-adaptive:n/m`.
+
 ## [0.14.0] - 2026-08-21
 
 Theme: the map states what it costs.

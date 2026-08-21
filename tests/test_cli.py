@@ -332,13 +332,14 @@ class BudgetTest(unittest.TestCase):
         self.assertIn("MAX_RETRIES=3", full)
         self.assertIn("? tests", full)
         # No candidate fits a budget of 1, so the smallest complete map wins:
-        # the skeleton, which keeps the constant's name without its value and
-        # drops the test index whole.
+        # the structure floor, which keeps the constant's name without its
+        # value, drops the test index whole, and states no return types.
         self.assertIn("= MAX_RETRIES\n", a)
         self.assertNotIn("MAX_RETRIES=3", a)
         self.assertNotIn("? tests", a)
-        self.assertIn("· budget 1 L7", a.splitlines()[-1])
-        self.assertIn("smallest complete candidate is L7", err.getvalue())
+        self.assertIn("used()\n", a)
+        self.assertIn("· budget 1 L8", a.splitlines()[-1])
+        self.assertIn("smallest complete candidate is L8", err.getvalue())
 
     def test_if_stale_rebuilds_when_only_the_budget_changed(self):
         """The state hash covers sources, not settings.
