@@ -330,12 +330,15 @@ class BudgetTest(unittest.TestCase):
                 b = build_digest(root, budget=1)
         self.assertEqual(a, b)                      # same budget, same map
         self.assertIn("MAX_RETRIES=3", full)
-        # On this tiny fixture every disclosure-bearing degraded map is larger
-        # than L0, so the correct impossible-budget fallback is the full map.
-        self.assertIn("MAX_RETRIES=3", a)
-        self.assertIn("· budget 1", a.splitlines()[-1])
-        self.assertNotRegex(a.splitlines()[-1], r"· budget 1 L\d")
-        self.assertIn("smallest complete candidate is L0", err.getvalue())
+        self.assertIn("? tests", full)
+        # No candidate fits a budget of 1, so the smallest complete map wins:
+        # the skeleton, which keeps the constant's name without its value and
+        # drops the test index whole.
+        self.assertIn("= MAX_RETRIES\n", a)
+        self.assertNotIn("MAX_RETRIES=3", a)
+        self.assertNotIn("? tests", a)
+        self.assertIn("· budget 1 L7", a.splitlines()[-1])
+        self.assertIn("smallest complete candidate is L7", err.getvalue())
 
     def test_if_stale_rebuilds_when_only_the_budget_changed(self):
         """The state hash covers sources, not settings.

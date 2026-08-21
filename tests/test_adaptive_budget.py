@@ -19,16 +19,19 @@ from hologram.render import (
 from hologram.symbols import Symbol
 
 
-def _level_tokens(root: Path, detail: int, budget: int) -> int:
+def _level_digest(root: Path, detail: int, budget: int) -> str:
     files, symbols, file_tokens, usage_tokens, state = _gather(root, None)
-    digest = render_simple(
+    return render_simple(
         root, symbols, files, state=state,
         zero_usage=_zero_usage_names(symbols, usage_tokens),
         file_tokens=file_tokens, detail=detail, budget=budget,
         loc=_total_loc(files), resolved=_resolved_project_calls(symbols),
         helpers=_helper_class_ids(symbols, file_tokens),
     )
-    return estimate_tokens(digest)
+
+
+def _level_tokens(root: Path, detail: int, budget: int) -> int:
+    return estimate_tokens(_level_digest(root, detail, budget))
 
 
 def _budget_above_level(root: Path, detail: int, slack: int) -> int:
@@ -165,6 +168,38 @@ class AdaptiveBudgetSemanticTest(unittest.TestCase):
         })
         self.assertIn("checkout(order) ✓ > price", semantic_digest)
         self.assertIn("ship(items) ×0 > reserve", semantic_digest)
+
+    def test_skeleton_drops_the_test_index_and_a_case_restores_its_file(self):
+        """Orientation is the first thing a hard budget can spare.
+
+        The floor carries no test index at all — header included — and a
+        restored case name must bring its file landmark back with it, or the
+        budget would pay for a name with nothing to hang it on.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            (root / "checkout.py").write_text(
+                "def checkout(order):\n    return order\n")
+            (root / "tests" / "test_checkout.py").write_text(
+                "from checkout import checkout\n\n"
+                "class CheckoutTest:\n"
+                "    def test_rejects_expired_card(self):\n"
+                "        return checkout(object())\n")
+            skeleton = _level_digest(root, detail=7, budget=1)
+            restored, stats = _first_budget_matching(
+                root,
+                lambda digest, _stats: "test_rejects_expired_card" in digest,
+            )
+
+        self.assertNotIn("? tests", skeleton)
+        self.assertNotIn("test_checkout", skeleton)
+        self.assertNotIn("CheckoutTest", skeleton)
+        self.assertIn("checkout(order)", skeleton)      # business API survives
+
+        self.assertIn("? tests", restored)
+        self.assertIn("test_checkout", restored)
+        self.assertIn("test-files", dict(stats.retained_categories))
 
     def test_selected_member_chain_keeps_owning_method_line(self):
         with tempfile.TemporaryDirectory() as tmp:

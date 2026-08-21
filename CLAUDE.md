@@ -207,7 +207,7 @@ hologram
   build_digest(root,langs,targets,budget):str ✓ > _build_digest
   build_digest_with_stats(root,langs,targets,budget):tuple[str,BudgetStats] ✓ > _build_digest
   estimate_tokens(text):int ✓
-  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers,budget_{selection,catalog,retained}):str ~892 ✓ > _target_descriptions,{_tree,_test_index}_lines,_legend_line,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_total_loc,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,render._symbol_identity
+  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,resolved,helpers,budget_{selection,catalog,retained}):str ~918 ✓ > _target_descriptions,{_tree,_test_index}_lines,_legend_line,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_decorator_notes,_total_loc,_helper_class_ids,_edge_suffix,_is_production_symbol,_bundle_key,_essential_method,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,render._symbol_identity
   summarize_budget(requested_budget,{full,selected,skeleton}_tokens,effective_detail,bundles,retained,selection_{trials,candidates},search_truncated,stop_reason):BudgetStats ~41 ✓ > BudgetStats
   BudgetBundle(R{detail,category,key,estimated_chars,source_file,semantic_tier,distinct_file_fanin,reason})
    name():str @property
@@ -238,7 +238,7 @@ hologram
   has_parser(lang):bool
 ? tests ·.py
  test_adaptive_budget:AdaptiveBudgetSemanticTest,
-   test_{boundary_packing_is_deterministic_complete_and_owner_safe,tested_and_cross_file_paths_precede_local_private_leaves,selected_member_chain_keeps_owning_method_line,equal_tier_selection_preserves_breadth_across_files,selected_private_inventory_keeps_whole_names_without_duplication,private_helper_remains_fallback_when_full_chain_cannot_fit,every_budget_that_holds_the_skeleton_is_a_hard_ceiling},
+   test_{boundary_packing_is_deterministic_complete_and_owner_safe,tested_and_cross_file_paths_precede_local_private_leaves,skeleton_drops_the_test_index_and_a_case_restores_its_file,selected_member_chain_keeps_owning_method_line,equal_tier_selection_preserves_breadth_across_files,selected_private_inventory_keeps_whole_names_without_duplication,private_helper_remains_fallback_when_full_chain_cannot_fit,every_budget_that_holds_the_skeleton_is_a_hard_ceiling},
    BudgetStatsContractTest,
    test_{stats_are_json_native_and_account_for_every_bundle,trial_cap_reports_unfillable_slack_without_fake_utilization,resolved_payload_ranking_reaches_small_chain_before_cap,smaller_whole_facts_fill_tier_before_oversized_methods,suppressed_record_constructor_is_not_counted_as_a_bundle,duplicate_ownerless_method_is_one_rendered_bundle,tiny_map_is_emitted_whole_when_no_candidate_can_fit,zero_budget_means_unlimited_and_reports_no_utilization} > _gather +10
  test_bench:TaskLoaderTest,
@@ -365,7 +365,7 @@ hologram
    LegendTest,test_{legend_line_present,no_query_or_regeneration_prose},ConstExtractTest,
    test_{python_module_constants,java_static_final_values},SecretRedactionTest,test_helper_is_the_single_shared_gate,
    RouteRenderTest,
-   test_{spring_route_and_class_prefix,jaxrs_verb_and_path_pair,flask_verb_from_methods_kwarg,markers_render_bare_and_noise_dropped,angular_component_selector,no_decorators_no_legend_clause,symfony_route_with_methods_array,aspnet_class_prefix_and_verb_attribute},
+   test_{spring_route_and_class_prefix,jaxrs_verb_and_path_pair,flask_verb_from_methods_kwarg,markers_render_bare_and_noise_dropped,angular_component_selector,no_decorators_no_legend_clause,symfony_route_with_methods_array},
    ThrowsTest,{test_java_throws_clause,test_python_raise_types}_extracted,TransitiveReductionTest,
    test_{implied_edge_dropped,direct_only_edge_kept,cycle_members_both_kept},VoidOmissionTest,
    test_{python_none_return_omitted,java_void_omitted_in_signature},GroupExtrasTest,
@@ -389,6 +389,6 @@ tools
 benchmark
  bench.py: main(argv):int;run_one(...);report(rows,anon):str +11
 ‥ optional facts omitted — NEVER guess; read source before relying on them
-· 19,160 LOC · state 214a555b17cb · budget 6000 A7
+· 19,239 LOC · state ba5d2e2cdc8f · budget 6000 A7
 ```
 <!-- hologram:end -->

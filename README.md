@@ -125,10 +125,11 @@ so treat it as repository-derived data.
 
 When a full map exceeds `--budget N`, Hologram starts with a compact semantic
 floor: retained business types, fields, and top-level signatures with exact
-file ownership, plus external entrypoints, test landmarks, and tool/benchmark
-orientation. Additional nonredundant test-suite and function/method labels are
-default facts but can be dropped individually while their file landmarks
-remain. Hologram then restores ranked whole facts,
+file ownership, plus external entrypoints and tool/benchmark orientation. The
+test index is optional in full: at the floor it is absent entirely, and above
+it each test file landmark, suite/case label, and test-to-business edge is a
+separately restorable fact — a restored label always brings back the file
+landmark it renders on. Hologram then restores ranked whole facts,
 prioritizing tested and cross-file paths, widely used APIs, and breadth across
 files. If even the floor cannot fit, Hologram warns and emits the smallest
 complete candidate instead of cutting facts in half.
