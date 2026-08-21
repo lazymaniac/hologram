@@ -1210,9 +1210,10 @@ class TestIndexDietTest(unittest.TestCase):
         )
         for name in ("TestCheckout", "OrderRules", "CheckoutSuite",
                      "CalculatorFacts", "rejectsExpiredCard",
-                     "test_rejects_expired_card", "testLegacyStyle"):
+                     "test_rejects_expired_card", "testLegacyStyle",
+                     "TestDataBuilder"):
             self.assertNotIn(name, skeleton)
-        self.assertIn("TestDataBuilder", skeleton)
+        self.assertNotIn("? tests", skeleton)   # the whole index is optional
 
     def test_single_class_file_folds_and_keeps_edge(self):
         syms = [self._sym("loadTheme", "fn", "src/Theme.java"),
@@ -1236,11 +1237,13 @@ class TestIndexDietTest(unittest.TestCase):
         self.assertIn("\n PricingTest:BulkTest\n", out)
         self.assertNotIn("{PricingTest,BulkTest}", out)
         self.assertEqual(
-            [bundle.category for bundle in catalog], ["test-cases"])
+            sorted(bundle.category for bundle in catalog),
+            ["test-cases", "test-files"])
         self.assertEqual(catalog, retained)
 
         skeleton = self._render(syms, ["test/PricingTest.java"], detail=7)
-        self.assertIn("\n PricingTest\n", skeleton)
+        self.assertNotIn("? tests", skeleton)
+        self.assertNotIn("PricingTest", skeleton)
         self.assertNotIn("BulkTest", skeleton)
 
     def test_stem_mismatch_still_uses_exact_file(self):
@@ -1309,10 +1312,14 @@ class TestIndexDietTest(unittest.TestCase):
         case_bundles = {bundle for bundle in catalog
                         if bundle.category == "test-cases"}
         self.assertEqual(len(case_bundles), len(names))
-        self.assertEqual(case_bundles, retained)
+        self.assertEqual(catalog, retained)
+        self.assertEqual(
+            {bundle.key for bundle in catalog
+             if bundle.category == "test-files"}, {"test/CasesTest.java"})
 
         skeleton = self._render(syms, ["test/CasesTest.java"], detail=7)
-        self.assertIn("\n CasesTest\n", skeleton)
+        self.assertNotIn("? tests", skeleton)
+        self.assertNotIn("CasesTest", skeleton)
         for name in names:
             self.assertNotIn(name, skeleton)
 

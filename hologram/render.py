@@ -503,9 +503,10 @@ _BUNDLE_CATEGORY_ORDER = {
     "tested-call-chains": 2,
     "cold-methods": 3,
     "untested-call-chains": 4,
-    "test-cases": 5,
-    "private-names": 6,
-    "test-coverage": 7,
+    "test-files": 5,
+    "test-cases": 6,
+    "private-names": 7,
+    "test-coverage": 8,
 }
 
 
@@ -937,7 +938,8 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       sig_line=None,
                       case_ids: set[int] | None = None,
                       case_labels: dict[int, str] | None = None,
-                      case_files: set[str] | None = None) -> list[str]:
+                      case_files: set[str] | None = None,
+                      selected_files: set[str] | None = None) -> list[str]:
     """Compact test orientation: file, selected test landmarks, business edge.
 
     Suite names and every recognized function/method case help agents find
@@ -958,7 +960,9 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
             rel = str(path.relative_to(root))
         except ValueError:
             rel = str(path)
-        if (_is_test_path(rel) or rel in case_files) and rel not in make_files:
+        if ((_is_test_path(rel) or rel in case_files)
+                and rel not in make_files
+                and (selected_files is None or rel in selected_files)):
             test_paths.append(rel)
     test_paths.sort()
     if not test_paths:
@@ -1923,12 +1927,38 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                         suffix="|coverage",
                         payload_chars=len(edge_text)):
             selected_test_edges[id(representative)] = merged_calls
+    # The file landmarks are themselves budgetable: at the skeleton the whole
+    # test index goes, and a restored case or coverage edge pulls its landmark
+    # back through the selection's dependency closure.
+    make_files = {s.file for s in symbols if s.lang == "make"}
+    selected_test_files: set[str] = set()
+    for path in files:
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:
+            rel = str(path)
+        if ((not _is_test_path(rel) and rel not in test_case_files)
+                or rel in make_files):
+            continue
+        bundle = BudgetBundle(
+            _MAX_LEVEL, "test-files", rel,
+            estimated_chars=len(Path(rel).name) + 1,
+            source_file=rel,
+            semantic_tier=2,
+            reason="test file landmark")
+        kept = (detail < _MAX_LEVEL
+                or (budget_selection is not None
+                    and bundle.name in budget_selection.names))
+        _record_bundle(bundle, kept)
+        if kept:
+            selected_test_files.add(rel)
     tests = _test_index_lines(files, symbols, root,
                               selected_test_edges,
                               helper_ids,
                               case_ids=selected_test_cases,
                               case_labels=case_labels,
-                              case_files=test_case_files)
+                              case_files=test_case_files,
+                              selected_files=selected_test_files)
     if tests:
         body.extend(tests)
     tools = _support_landmark_lines("tools")
@@ -2061,6 +2091,10 @@ def _build_digest(root: Path, langs: set[str] | None,
             dependency = method_dependencies.get(bundle.key)
             if dependency:
                 names.add(dependency)
+        elif bundle.category in ("test-cases", "test-coverage"):
+            # a case name renders on its file landmark line; admitting one
+            # without the other would drop the fact it was selected for
+            names.add(f"test-files:{bundle.source_file}")
         return frozenset(names)
 
     # Semantic tier dominates size.  Within a tier, round-robin exact source
