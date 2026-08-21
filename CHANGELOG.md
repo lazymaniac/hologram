@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-21
+
+Theme: the map states what it costs.
+
+### Added
+
+- **The footer carries the corpus and map token counts.**
+  `· 19,311 LOC · input 215,433 · output 5,999 tokens · state … · budget …` —
+  `input` is the estimated token count of the scanned sources, `output` the
+  estimated count of the map itself. The block is always loaded, so what it costs
+  and what reading the sources instead would cost now travel with it. `output` is
+  measured on text that contains `output`, so the render iterates the footer to a
+  fixed point; where a token boundary makes two candidates alternate, the larger is
+  stated — the map never claims to be cheaper than it is.
+
+`render_simple` gained an optional `source_tokens` parameter alongside `loc`,
+precomputable by callers and computed locally when omitted. Freshness and settings
+readers are unchanged: LOC stays the footer's first field, which is how the
+metadata line is located, and legacy metadata-bearing headers still parse.
+
+The new fields cost nine tokens per map, flat.
+
 ## [0.13.0] - 2026-08-21
 
 Theme: the floor is business logic only.
