@@ -177,14 +177,25 @@ def _strip_exc(name: str) -> str:
     return name.removesuffix("Exception") or name
 
 
-def _total_loc(files: list[Path]) -> int:
-    loc = 0
+def _corpus_size(files: list[Path]) -> tuple[int, int]:
+    """Lines and estimated tokens of the scanned sources, in one read pass.
+
+    The token figure is what the map is measured against: how much context
+    reading the whole corpus would cost, beside what the map costs instead.
+    """
+    loc = tokens = 0
     for f in files:
         try:
-            loc += len(f.read_text(errors="replace").splitlines())
+            text = f.read_text(errors="replace")
         except OSError:
-            pass
-    return loc
+            continue
+        loc += len(text.splitlines())
+        tokens += estimate_tokens(text)
+    return loc, tokens
+
+
+def _total_loc(files: list[Path]) -> int:
+    return _corpus_size(files)[0]
 
 
 def _symbol_identity(symbol: Symbol) -> tuple[str, str, str, str, int]:
@@ -1072,6 +1083,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   detail: int = 0,
                   budget: int | None = None,
                   loc: int | None = None,
+                  source_tokens: int | None = None,
                   resolved: tuple | None = None,
                   helpers: dict[int, bool] | None = None,
                   budget_selection: _BudgetSelection | None = None,
@@ -1079,8 +1091,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   budget_retained: set[BudgetBundle] | None = None) -> str:
     """Compact project facts as a package trie.
 
-    `loc`, `resolved` (the _resolved_project_calls triple) and `helpers`
-    (_helper_class_ids) are level-invariant and may be precomputed by the
+    `loc`, `source_tokens`, `resolved` (the _resolved_project_calls triple)
+    and `helpers` (_helper_class_ids) are level-invariant and may be precomputed by the
     caller — they MUST come from the same id()-keyed `symbols` list; when
     None they are computed here, so the function stays independently usable.
 
@@ -1830,21 +1842,24 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         payload_by_dir.setdefault(file, []).append(
             f"» {','.join(_factored_name_tokens(names_r))}")
 
-    if loc is None:
-        loc = _total_loc(files)
-    meta = f"· {loc:,} LOC"
+    if loc is None or source_tokens is None:
+        measured_loc, measured_tokens = _corpus_size(files)
+        loc = measured_loc if loc is None else loc
+        source_tokens = (measured_tokens if source_tokens is None
+                         else source_tokens)
+    meta_tail = ""
     if state:
-        meta += f" · state {state}"
+        meta_tail += f" · state {state}"
     if langs:
-        meta += f" · langs {','.join(sorted(langs))}"
+        meta_tail += f" · langs {','.join(sorted(langs))}"
     if targets:
-        meta += f" · targets {','.join(sorted(targets))}"
+        meta_tail += f" · targets {','.join(sorted(targets))}"
     if budget:
-        meta += f" · budget {budget}"
+        meta_tail += f" · budget {budget}"
         if budget_selection is not None:
-            meta += f" A{budget_selection.level}"
+            meta_tail += f" A{budget_selection.level}"
         elif detail:
-            meta += f" L{detail}"
+            meta_tail += f" L{detail}"
     body = _tree_lines(payload_by_dir)
     helper_ids = (helpers if helpers is not None
                   else _helper_class_ids(symbols, file_tokens))
@@ -1979,8 +1994,30 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                       "before relying on them\n")
     # Semantic content stays first so state/LOC-only rebuilds retain the longest
     # possible prompt-cache prefix.  Freshness readers accept this footer and
-    # the legacy metadata-bearing header.
-    return header + "\n".join(body) + "\n" + disclosure + meta + "\n"
+    # the legacy metadata-bearing header, and locate it by the leading LOC
+    # field, so that field stays first.
+    prefix = header + "\n".join(body) + "\n" + disclosure
+
+    def _meta(output_tokens: int) -> str:
+        return (f"· {loc:,} LOC · input {source_tokens:,}"
+                f" · output {output_tokens:,} tokens{meta_tail}\n")
+
+    # The map states its own cost, so the count is measured on text that
+    # contains the count.  Iterate to a fixed point; a wider number can push
+    # the map across a token boundary, so on the rare alternation state the
+    # larger candidate — an agent planning context must never be told the map
+    # is cheaper than it is.
+    candidates: list[int] = []
+    output = estimate_tokens(prefix + _meta(0))
+    for _ in range(8):
+        candidates.append(output)
+        measured = estimate_tokens(prefix + _meta(output))
+        if measured == output:
+            break
+        output = measured
+    else:
+        output = max(candidates)
+    return prefix + _meta(output)
 
 
 def _build_digest(root: Path, langs: set[str] | None,
@@ -1998,8 +2035,8 @@ def _build_digest(root: Path, langs: set[str] | None,
     files, symbols, file_tokens, usage_tokens, state = _gather(root, langs)
     zero = _zero_usage_names(symbols, usage_tokens)
     # level-invariant work computed once — the ladder re-renders up to
-    # _MAX_LEVEL times and _total_loc reads every file from disk
-    loc = _total_loc(files)
+    # _MAX_LEVEL times and _corpus_size reads every file from disk
+    loc, source_tokens = _corpus_size(files)
     resolved = _resolved_project_calls(symbols)
     helpers = _helper_class_ids(symbols, file_tokens)
 
@@ -2009,7 +2046,8 @@ def _build_digest(root: Path, langs: set[str] | None,
         return render_simple(root, symbols, files, state=state,
                              zero_usage=zero, langs=langs, targets=targets,
                              file_tokens=file_tokens, detail=level,
-                             budget=budget, loc=loc, resolved=resolved,
+                             budget=budget, loc=loc,
+                             source_tokens=source_tokens, resolved=resolved,
                              helpers=helpers, budget_selection=selection,
                              budget_catalog=catalog,
                              budget_retained=retained)
