@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-08-21
+
+Theme: the floor is business logic only.
+
+### Changed
+
+- **The semantic floor drops the test index entirely.** At the deepest budget level
+  the `? tests` section is absent — header, file landmarks, helper names, and
+  test-to-business edges alike. Test file landmarks used to be unconditional floor
+  content, so the tightest budgets paid for test orientation before business API.
+- **Test file landmarks are now individually restorable facts** (`test-files`), ranked
+  and admitted like any other optional fact above the floor. Admitting a suite/case
+  label or a coverage edge also admits the landmark line it renders on, so a restored
+  name never arrives without the file it belongs to.
+
+Nothing changes for unlimited maps or for budgets that comfortably fit the index; the
+difference appears only when a budget binds. On this repository the floor drops from
+759 to 701 estimated tokens; corpora with hundreds of test files recover far more,
+since the index is proportional to the test tree.
+
+`hologram stats` reports the new `test-files` category alongside the existing ones —
+the schema grows additively.
+
 ## [0.12.0] - 2026-08-20
 
 Theme: the test index costs what it is worth.
