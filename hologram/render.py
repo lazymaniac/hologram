@@ -8,8 +8,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .gather import _framework_invoked, _gather, _zero_usage_names
-from .symbols import (MARKER_DECORATORS, ROUTE_DECORATORS, TYPE_KINDS, Symbol,
-                      _base_type)
+from .symbols import (FEATURE_NAMES, MARKER_DECORATORS, ROUTE_DECORATORS,
+                      TYPE_KINDS, Symbol, _base_type)
 
 
 # ---------------------------------------------------------------------------
@@ -1067,7 +1067,10 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
     neither field lists nor return types, so it must not promise them."""
     # a type alias renders both shapes: `T{a,b}` for an object literal and
     # `T:target` for a plain alias, so each earns its clause independently
-    if plain:
+    # A deselected fact class leaves its notation unused exactly as a deep
+    # ladder level does, so the clause test is what the body shows, never what
+    # the renderer was capable of showing.
+    if plain or not re.search(r"\([CRIET]\{", text):
         first = "C/R/I"
     else:
         first = ("C/R/I/T{fields}" if "(T{" in text else "C/R/I{fields}")
@@ -1119,6 +1122,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                   source_tokens: int | None = None,
                   resolved: tuple | None = None,
                   helpers: dict[int, bool] | None = None,
+                  features: frozenset[str] | None = None,
                   budget_selection: _BudgetSelection | None = None,
                   budget_catalog: set[BudgetBundle] | None = None,
                   budget_retained: set[BudgetBundle] | None = None) -> str:
@@ -1128,6 +1132,10 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     and `helpers` (_test_support_ids) are level-invariant and may be precomputed by the
     caller — they MUST come from the same id()-keyed `symbols` list; when
     None they are computed here, so the function stays independently usable.
+
+    `features` selects which fact classes render at all (None = every one, the
+    default map). A deselected class is never cataloged as a budget bundle, so
+    the budget search cannot restore what the user asked not to see.
 
     pkg
       Class(K{fields})
@@ -1145,6 +1153,12 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     # with project vocabulary alone: no return/parameter types, decorators,
     # throws, size/tested/unused markers, field lists, or type relations.
     plain = detail >= _MAX_LEVEL
+
+    def _on(feature: str) -> bool:
+        """Whether a selectable fact class renders. The ladder still wins: a
+        selected feature can be dropped by depth or budget, but a deselected
+        one is absent at every level."""
+        return features is None or feature in features
     render_origins: dict[int, list[Symbol]] = {}
     incoming_files: dict[int, set[str]] = {}
     cross_file_callers: set[int] = set()
@@ -1394,7 +1408,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         # At the L5 boundary tested chains still survive; L7 has dropped every
         # chain already. Use renderer-resolved display names, never raw calls.
         calls = (resolved_calls.get(id(method), ())
-                 if cold and id(method) in tested else ())
+                 if cold and id(method) in tested and _on("calls") else ())
         return base + sum(len(call) + 1 for call in calls)
 
     def _method_budget_bundle(method: Symbol) -> BudgetBundle:
@@ -1445,7 +1459,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         cached = selected_calls_cache.get(id(sym))
         if cached is not None:
             return cached
-        kept = list(resolved_calls.get(id(sym), ()))
+        kept = list(resolved_calls.get(id(sym), ())) if _on("calls") else []
         if kept and not (_is_test_path(sym.file) and sym.lang != "make"):
             tested_chain = id(sym) in tested
             if not _keep_bundle(
@@ -1489,7 +1503,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     # budget level.
     priv_methods_by_owner: dict[tuple[str, str, str], list[str]] = {}
     priv_top_by_file: dict[str, list[str]] = {}
-    for s in render_prod:
+    for s in render_prod if _on("private") else ():
         if s.visibility != "priv" or _essential_method(s):
             continue
         member_inventory = s.container and s.kind in ("method", "ctor")
@@ -1515,7 +1529,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             continue
         if not _keep_bundle("private-names", 3, s, default=detail < 3):
             continue
-        marked = s.kind in ("fn", "method", "class") and s.name in zero_usage
+        marked = (s.kind in ("fn", "method", "class") and s.name in zero_usage
+                  and _on("usage"))
         name = f"{s.name}×0" if marked else s.name
         if s.container and s.kind in ("method", "ctor"):
             owner_key = (_member_owner_key(s)
@@ -1640,21 +1655,27 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             lines.append(f" {display_file}{detail_text}{suffix}")
         return lines
 
+    def _selected_notes(sym: Symbol) -> list[str]:
+        """Decorator atoms, or none when the class is deselected. Type headers
+        group on this too, so a deselected note also stops splitting groups."""
+        return (_decorator_notes(sym.decorators, sym.lang)
+                if _on("decorators") else [])
+
     def _sig_line(sym: Symbol, own: str, grouped: bool,
                   display_name: str | None = None) -> str:
         sig = _display_signature(sym, display_name)
         if not plain:
-            for note in _decorator_notes(sym.decorators, sym.lang):
+            for note in _selected_notes(sym):
                 sig = f"{sig} @{note}"
-            if sym.size >= 40:
+            if sym.size >= 40 and _on("size"):
                 sig = f"{sig} ~{sym.size}"
-            if id(sym) in tested:
+            if id(sym) in tested and _on("tested"):
                 sig = f"{sig} ✓"
             if (sym.kind in ("fn", "method") and sym.name in zero_usage
-                    and not _essential_method(sym)):
+                    and not _essential_method(sym) and _on("usage")):
                 sig = f"{sig} ×0"
         kept = _selected_calls(sym)
-        if sym.raises and not plain:
+        if sym.raises and not plain and _on("raises"):
             raise_names = _factored_name_tokens(
                 [_strip_exc(r) for r in sym.raises], dedupe=False)
             sig = f"{sig} !{','.join(raise_names)}"
@@ -1722,27 +1743,31 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             if t.kind == "fn":
                 payload.append(_sig_line(t, t.name, False, _top_display(t)))
                 continue
-            components = (t.params if t.kind == "enum" else
-                          t.params[:1] if t.kind == "type" and not t.fields else
-                          t.fields or t.params)
+            components = ((t.params if t.kind == "enum" else
+                           t.params[:1] if t.kind == "type" and not t.fields
+                           else t.fields or t.params)
+                          if _on("fields") else [])
             unused = (t.kind == "class" and t.name in zero_usage
-                      and (t.file, t.name, t.lang) not in entrypoint_owners)
-            shown_supers = tuple(sup for sup in t.supers
-                                 if (t.lang, sup) not in iface_index)
+                      and (t.file, t.name, t.lang) not in entrypoint_owners
+                      and _on("usage"))
+            shown_supers = (tuple(sup for sup in t.supers
+                                  if (t.lang, sup) not in iface_index)
+                            if _on("relations") else ())
             impls = (tuple(n for n in impls_of.get((t.lang, t.name), ())
                            if n not in t.permits)
-                     if t.kind == "interface" else ())
+                     if t.kind == "interface" and _on("relations") else ())
             # Same-named top-level types must not be grouped across files: their
             # method owners and fan-in are independent even when headers match.
             duplicate_identity = (t.file
                                   if len(top_locations.get(t.name, ())) > 1
                                   else "")
+            shown_permits = tuple(t.permits) if _on("relations") else ()
             selected_type_calls = tuple(_selected_calls(t))
             group_key = (duplicate_identity, t.lang, t.kind, t.visibility,
                          tuple(components),
-                         shown_supers, tuple(t.permits), impls, unused,
-                         bool(t.fields),
-                         tuple(_decorator_notes(t.decorators, t.lang)),
+                         shown_supers, shown_permits, impls, unused,
+                         bool(t.fields) and _on("fields"),
+                         tuple(_selected_notes(t)),
                          selected_type_calls)
             groups.setdefault(group_key, []).append(t)
         for (_, _, kind, vis, components, supers, permits, impls, unused,
@@ -1840,7 +1865,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             + "; ".join(lines))
 
     consts_by_file: dict[str, list[str]] = {}
-    for s in main_prod:
+    for s in main_prod if _on("constants") else ():
         if s.kind == "const" and s.visibility == "pub":
             vals = consts_by_file.setdefault(s.file, [])
             entry = s.signature or s.name
@@ -1893,6 +1918,12 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         meta_tail += f" · state {state}"
     if langs:
         meta_tail += f" · langs {','.join(sorted(langs))}"
+    if features is not None and set(features) != FEATURE_NAMES:
+        # A full selection is the default, so it states no restriction: the
+        # common map's footer stays byte-identical to one built without the
+        # option at all. An empty selection is a real choice, not an absent
+        # one, so it stamps the word rather than an unreadable empty list.
+        meta_tail += f" · features {','.join(sorted(features)) or 'none'}"
     if targets:
         meta_tail += f" · targets {','.join(sorted(targets))}"
     if budget:
@@ -1911,7 +1942,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     }
     test_landmark_ids = {
         id(symbol)
-        for symbol in symbols
+        for symbol in (symbols if _on("tests") else ())
         if (_is_test_suite_symbol(symbol)
             or _is_classless_test_case_symbol(symbol)
             or _is_test_case_method_symbol(symbol)
@@ -1964,7 +1995,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     # the selection's dependency closure.
     make_files = {s.file for s in symbols if s.lang == "make"}
     selected_test_files: set[str] = set()
-    for path in files:
+    for path in files if _on("tests") else ():
         try:
             rel = str(path.relative_to(root))
         except ValueError:
@@ -1993,8 +2024,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                               selected_files=selected_test_files)
     if tests:
         body.extend(tests)
-    tools = _support_landmark_lines("tools")
-    benchmark = _support_landmark_lines("benchmark")
+    tools = _support_landmark_lines("tools") if _on("support") else []
+    benchmark = _support_landmark_lines("benchmark") if _on("support") else []
     body.extend(tools)
     body.extend(benchmark)
     has_priv = bool(priv_top_by_file or priv_methods_by_owner)
@@ -2039,7 +2070,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
 def _build_digest(root: Path, langs: set[str] | None,
                   targets: list[str] | None, budget: int | None, *,
-                  collect_stats: bool) -> tuple[str, BudgetStats | None]:
+                  collect_stats: bool,
+                  features: frozenset[str] | None = None
+                  ) -> tuple[str, BudgetStats | None]:
     """Build a map and return deterministic evidence for its budget policy.
 
     Selection keeps the compact semantic floor, then restores globally ranked,
@@ -2065,7 +2098,8 @@ def _build_digest(root: Path, langs: set[str] | None,
                              file_tokens=file_tokens, detail=level,
                              budget=budget, loc=loc,
                              source_tokens=source_tokens, resolved=resolved,
-                             helpers=helpers, budget_selection=selection,
+                             helpers=helpers, features=features,
+                             budget_selection=selection,
                              budget_catalog=catalog,
                              budget_retained=retained)
 
@@ -2279,19 +2313,22 @@ def _build_digest(root: Path, langs: set[str] | None,
 
 def build_digest_with_stats(root: Path, langs: set[str] | None = None,
                             targets: list[str] | None = None,
-                            budget: int | None = None
+                            budget: int | None = None,
+                            features: frozenset[str] | None = None
                             ) -> tuple[str, BudgetStats]:
     """Build a map plus the complete, JSON-ready budget decision."""
     digest, stats = _build_digest(
-        root, langs, targets, budget, collect_stats=True)
+        root, langs, targets, budget, collect_stats=True, features=features)
     assert stats is not None
     return digest, stats
 
 
 def build_digest(root: Path, langs: set[str] | None = None,
                  targets: list[str] | None = None,
-                 budget: int | None = None) -> str:
+                 budget: int | None = None,
+                 features: frozenset[str] | None = None) -> str:
     # Normal hooks need the selected map, not sorted bundle diagnostics. Rich
     # statistics remain available through build_digest_with_stats / `stats`.
     return _build_digest(
-        root, langs, targets, budget, collect_stats=False)[0]
+        root, langs, targets, budget, collect_stats=False,
+        features=features)[0]

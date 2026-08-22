@@ -16,11 +16,11 @@ from .bootstrap import (_bootstrap_or_die, _missing_parser_langs, _pyz_path,
 from .embed import (_block_span, _target_candidates, context_targets,
                     embed_digest, embedded_digest, managed_context_cost)
 from .extract import EXTRACTORS
-from .gather import (_digest_budget, _digest_langs, _digest_state,
-                     _digest_targets, _git_env,
+from .gather import (_digest_budget, _digest_features, _digest_langs,
+                     _digest_state, _digest_targets, _git_env,
                      _state_hash, scan_files)
 from .render import build_digest, build_digest_with_stats, estimate_tokens
-from .symbols import DENYLIST_DIRS, detect_language
+from .symbols import (DENYLIST_DIRS, FEATURE_NAMES, FEATURES, detect_language)
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +325,109 @@ def _revision_source_paths(root: Path, rev: str) -> list[Path]:
     return sorted(paths)
 
 
+def _parse_features(wanted: list[str]) -> frozenset[str] | None:
+    """Resolve `--features` words to a selection. None means every feature —
+    the default map — so `all` and an omitted option agree."""
+    names = {name.strip() for arg in wanted for name in arg.split(",")
+             if name.strip()}
+    if names == {"all"}:
+        return None  # explicit reset of a stored selection
+    if names == {"none"}:
+        return frozenset()  # structure only: no optional fact class at all
+    unknown = names - FEATURE_NAMES
+    if unknown:
+        raise SystemExit(
+            f"unknown feature{'s' if len(unknown) > 1 else ''}: "
+            f"{', '.join(sorted(unknown))}\n"
+            f"known: {', '.join(name for name, _ in FEATURES)}\n"
+            f"also accepted: all, none")
+    return frozenset(names)
+
+
+def _feature_checklist(selected: frozenset[str]) -> str:
+    return "\n".join(
+        f"  {index:>2}. [{'x' if name in selected else ' '}] "
+        f"{name:<10} {description}"
+        for index, (name, description) in enumerate(FEATURES, start=1))
+
+
+def _apply_feature_reply(selected: frozenset[str], reply: str
+                         ) -> frozenset[str] | None:
+    """One picker command applied to the current selection, or None when a
+    word names nothing — an unreadable reply must never silently deselect."""
+    words = [word for word in re.split(r"[,\s]+", reply.strip()) if word]
+    if not words:
+        return selected
+    if words == ["a"] or words == ["all"]:
+        return frozenset(FEATURE_NAMES)
+    if words == ["n"] or words == ["none"]:
+        return frozenset()
+    by_index = {str(index): name
+                for index, (name, _) in enumerate(FEATURES, start=1)}
+    chosen: list[str] = []
+    for word in words:
+        name = by_index.get(word) or (word if word in FEATURE_NAMES else None)
+        if name is None:
+            return None
+        chosen.append(name)
+    return frozenset(selected.symmetric_difference(chosen))
+
+
+def _pick_features(root: Path, *, langs: set[str] | None,
+                   targets: list[str] | None, budget: int | None,
+                   current: frozenset[str] | None) -> frozenset[str]:
+    """Choose map content at a terminal, priced against the full map.
+
+    Interactivity is a setup convenience, never a hidden default: without a
+    terminal this fails with the equivalent flag rather than guessing, so a
+    hook or CI run can never block on a prompt.
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise SystemExit(
+            "hologram: --interactive needs a terminal; pass "
+            "--features <name,…> instead (names: "
+            + ", ".join(name for name, _ in FEATURES) + ")")
+    selected = frozenset(FEATURE_NAMES if current is None else current)
+    full_tokens = estimate_tokens(
+        build_digest(root, langs=langs, targets=targets, budget=budget))
+    print(f"Map content for {root} — the full map is ~{full_tokens:,} tokens.\n"
+          f"Package tree, type headers, and public signatures always render; "
+          f"these are optional:")
+    while True:
+        print()
+        print(_feature_checklist(selected))
+        print("\nToggle by number or name (space/comma separated), "
+              "`a` all, `n` none, Enter to price the selection.")
+        try:
+            reply = input("features> ")
+        except EOFError:
+            raise SystemExit("hologram: no selection made") from None
+        if reply.strip():
+            updated = _apply_feature_reply(selected, reply)
+            if updated is None:
+                print(f"hologram: not a feature: {reply.strip()}")
+                continue
+            selected = updated
+            continue
+        chosen = None if selected == FEATURE_NAMES else selected
+        tokens = estimate_tokens(build_digest(
+            root, langs=langs, targets=targets, budget=budget,
+            features=chosen))
+        saved = full_tokens - tokens
+        summary = (", ".join(sorted(selected)) if selected else "none")
+        print(f"\nselected: {summary}")
+        print(f"map: ~{tokens:,} tokens"
+              + (f" ({saved:,} fewer than the full map)" if saved > 0 else
+                 " (the full map)" if not saved else
+                 f" ({-saved:,} more than the full map)"))
+        try:
+            confirm = input("write this map? [Y/n] ")
+        except EOFError:
+            raise SystemExit("hologram: no selection made") from None
+        if confirm.strip().lower() in ("", "y", "yes"):
+            return selected
+
+
 def run_cli(argv: list[str] | None = None) -> int:
     def add_root(command: argparse.ArgumentParser) -> None:
         command.add_argument("--root", type=Path, default=Path.cwd())
@@ -354,8 +457,24 @@ def run_cli(argv: list[str] | None = None) -> int:
                  "smallest complete candidate with a warning. Build/init "
                  "record it; --budget 0 selects unlimited")
 
+    def add_features(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--features", action="append", default=None, metavar="NAME",
+            help="select which fact classes the map carries, repeatable or "
+                 "comma-separated (" + ", ".join(name for name, _ in FEATURES)
+                 + "). The package tree, type headers, and public signatures "
+                   "always render. Build/init record the selection; "
+                   "--features all restores every one, --features none keeps "
+                   "structure only")
+
     def add_quiet(command: argparse.ArgumentParser) -> None:
         command.add_argument("--quiet", action="store_true")
+
+    def add_interactive(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--interactive", action="store_true",
+            help="pick map content at a terminal, priced against the full "
+                 "map, then build with the selection")
 
     def add_warn_tokens(command: argparse.ArgumentParser) -> None:
         command.add_argument(
@@ -369,6 +488,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         add_lang(command)
         add_target(command)
         add_budget(command)
+        add_features(command)
         if quiet:
             add_quiet(command)
         if warn:
@@ -402,8 +522,10 @@ def run_cli(argv: list[str] | None = None) -> int:
     p_build.add_argument("--if-stale", action="store_true",
                          help="skip the rebuild when the embedded map's state stamp "
                               "matches the current sources")
+    add_interactive(p_build)
     p_init = sub.add_parser("init", help="install git hooks, then build")
     add_map_options(p_init, quiet=True, warn=True)
+    add_interactive(p_init)
     p_check = sub.add_parser(
         "check", help="exit 0 if the embedded map is fresh, 1 if stale or missing")
     add_root(p_check)
@@ -508,6 +630,17 @@ def run_cli(argv: list[str] | None = None) -> int:
             if stored_b:
                 budget = stored_b
                 break
+    features: frozenset[str] | None = None
+    if getattr(args, "features", None):
+        features = _parse_features(args.features)
+    else:
+        # no --features given: recall the selection a previous build stamped
+        for t in targets:
+            stored_f = _digest_features(embedded_digest(t))
+            if stored_f:
+                features = (frozenset() if stored_f == {"none"}
+                            else frozenset(stored_f) & FEATURE_NAMES)
+                break
     if target_names is not None:
         deselected = [t for t in targets
                       if str(t.relative_to(root)) not in target_names]
@@ -531,11 +664,21 @@ def run_cli(argv: list[str] | None = None) -> int:
         _uninstall(root, args.keep_blocks, args.quiet)
         return 0
     if args.cmd == "build" and args.if_stale and not stale:
-        # The state hash covers sources, not settings. A changed --budget
-        # leaves every stamp fresh, so without this the rebuild is skipped and
-        # the map silently keeps the previous budget. `check` deliberately
-        # stays source-only: its own --budget is an accept-and-ignore option.
-        if all(_digest_budget(embedded_digest(t)) == budget for t in targets):
+        # The state hash covers sources, not settings. A changed --budget or
+        # --features leaves every stamp fresh, so without this the rebuild is
+        # skipped and the map silently keeps the previous settings. `check`
+        # deliberately stays source-only: its own --budget is accept-and-ignore.
+        def _stamped_features(t: Path) -> frozenset[str] | None:
+            stored = _digest_features(embedded_digest(t))
+            if not stored:
+                return None
+            return (frozenset() if stored == {"none"}
+                    else frozenset(stored) & FEATURE_NAMES)
+
+        settled = (all(_digest_budget(embedded_digest(t)) == budget
+                       for t in targets)
+                   and all(_stamped_features(t) == features for t in targets))
+        if settled:
             if not args.quiet:
                 print("fresh, skipping rebuild")
             return 0
@@ -608,7 +751,8 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if args.cmd == "stats":
         digest, stats = build_digest_with_stats(
-            root, langs=langs, targets=target_names, budget=budget)
+            root, langs=langs, targets=target_names, budget=budget,
+            features=features)
         payload = stats.as_dict()
         context_cost = managed_context_cost(digest)
         payload.update({
@@ -650,12 +794,17 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if args.cmd == "print":
         digest = build_digest(root, langs=langs, targets=target_names,
-                              budget=budget)
+                              budget=budget, features=features)
         if not budget:
             _warn_if_large(digest, args.warn_tokens)
         print(digest, end="")
         return 0
 
+    if getattr(args, "interactive", False):
+        # Picked before the hooks are written so an abandoned selection leaves
+        # the repository exactly as it was.
+        features = _pick_features(root, langs=langs, targets=target_names,
+                                  budget=budget, current=features)
     if args.cmd == "init":
         _install_hooks(root, args.quiet, langs)
     for script in sorted(_dead_hook_scripts(root)):
@@ -663,7 +812,7 @@ def run_cli(argv: list[str] | None = None) -> int:
               f"longer exists — run `hologram init --root {root}` to repair it",
               file=sys.stderr)
     digest = build_digest(root, langs=langs, targets=target_names,
-                          budget=budget)
+                          budget=budget, features=features)
     _warn_if_large(digest, args.warn_tokens, managed=True)
     for t in targets:
         embed_digest(t, digest)

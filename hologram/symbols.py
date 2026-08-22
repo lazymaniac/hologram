@@ -53,6 +53,29 @@ DENYLIST_DIRS = {
 
 TYPE_KINDS = ("class", "interface", "record", "enum", "type")
 
+# Selectable map content. Every entry names one fact class the renderer can
+# omit whole; the always-present remainder — the package trie, type headers,
+# and public signatures — is the map's identity and is not selectable. Order
+# is the order the picker lists them: semantics first, then evidence markers,
+# then inventories. Selecting a subset changes *which facts* render, never how
+# a retained fact is written, so it composes with the budget ladder instead of
+# competing with it.
+FEATURES: tuple[tuple[str, str], ...] = (
+    ("calls", "call chains between project symbols (sig > callee)"),
+    ("relations", "supers, implements, sealed permits, implementors"),
+    ("fields", "field names, record components, enum values"),
+    ("constants", "public constants and their short values"),
+    ("decorators", "routes and framework annotations (@GET/path)"),
+    ("raises", "declared or thrown exception types (!E)"),
+    ("tested", "the ✓ marker on symbols reached from a test"),
+    ("usage", "the ×0 marker on symbols with no static reference"),
+    ("size", "the ~N body-size marker on large bodies"),
+    ("private", "the names-only private member inventory"),
+    ("tests", "the test index: files, case names, fixtures"),
+    ("support", "tools/ and benchmark/ landmark lines"),
+)
+FEATURE_NAMES = frozenset(name for name, _ in FEATURES)
+
 
 @dataclass
 class Symbol:
