@@ -111,10 +111,48 @@ essentials are:
 - `--target AGENTS.md` selects context files; clear it with `--target all`.
 - `--budget 8000` sets an estimated digest-token target; clear it with
   `--budget 0`.
+- `--features calls,tests` selects which fact classes the map carries; clear it
+  with `--features all`.
 
 Other useful options include `--warn-tokens N`, `review --brief K`,
 `review --quiet-if-clean`, and `uninstall --keep-blocks`. Run
 `hologram <command> --help` for the full CLI.
+
+## Choosing what the map carries
+
+A budget decides how much fits. `--features` decides what is eligible in the
+first place — useful when a fact class is noise for your repository rather than
+merely expensive.
+
+| Feature | What it renders |
+|---|---|
+| `calls` | Call chains between project symbols (`sig > callee`) |
+| `relations` | Supers, implements, sealed permits, implementors |
+| `fields` | Field names, record components, enum values |
+| `constants` | Public constants and their short values |
+| `decorators` | Routes and framework annotations (`@GET/path`) |
+| `raises` | Declared or thrown exception types (`!E`) |
+| `tested` | The `✓` marker on symbols reached from a test |
+| `usage` | The `×0` marker on symbols with no static reference |
+| `size` | The `~N` body-size marker on large bodies |
+| `private` | The names-only private member inventory |
+| `tests` | The test index: files, case names, fixtures |
+| `support` | `tools/` and `benchmark/` landmark lines |
+
+The package tree, type headers, and public signatures are the map's identity
+and always render; `--features none` leaves exactly those. A deselected class is
+absent at every level, so a budget can never restore it. The legend states only
+notation the map actually uses, so it shrinks with your selection.
+
+```bash
+hologram build --root . --interactive
+```
+
+`--interactive` (on `build` and `init`) prices a selection against the full map
+before writing it. It needs a terminal and fails with the equivalent `--features`
+flag otherwise, so hooks and CI never block on a prompt. Note that dropping
+`calls` can make a map *larger*: a private helper named only by a retained call
+chain has to reappear in the private inventory once that chain is gone.
 
 ## Review changes
 

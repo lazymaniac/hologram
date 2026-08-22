@@ -33,12 +33,19 @@ class CliOptionSurfaceTest(unittest.TestCase):
         self.assertNotIn("--budget", review)
         self.assertNotIn("--target", review)
         self.assertNotIn("--warn-tokens", review)
+        self.assertNotIn("--features", review)
         stats = self._help("stats")
         self.assertNotIn("--quiet", stats)
         self.assertNotIn("--warn-tokens", stats)
+        self.assertIn("--features", stats)  # stats explains a real selection
         diff = self._help("diff")
         self.assertNotIn("--budget", diff)
         self.assertNotIn("--target", diff)
+        self.assertNotIn("--features", diff)
+        # only the commands that write a map offer to pick one interactively
+        self.assertNotIn("--interactive", self._help("print"))
+        self.assertIn("--interactive", self._help("build"))
+        self.assertIn("--interactive", self._help("init"))
 
     def test_push_only_surface_has_no_pull_query_command(self):
         import contextlib
@@ -887,6 +894,135 @@ class SizeWarningTest(unittest.TestCase):
                 run_cli(["build", "--root", str(proj), "--warn-tokens", "0",
                          "--quiet"])
             self.assertEqual(err.getvalue(), "")
+
+
+class FeatureSelectionCliTest(unittest.TestCase):
+    """--features is stamped into map metadata and recalled by later builds."""
+
+    def _proj(self, tmp: Path) -> Path:
+        root = tmp / "p"
+        root.mkdir()
+        (root / "app.py").write_text(
+            "LIMIT = 7\n\n\nclass Service:\n"
+            "    def run(self):\n        return self._step()\n\n"
+            "    def _step(self):\n        return 1\n")
+        return root
+
+    def test_selection_stamped_recalled_and_cleared(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--features", "calls",
+                     "--quiet"])
+            text = (root / "CLAUDE.md").read_text()
+            self.assertIn("· features calls", text)
+            self.assertIn("> _step", text)
+            self.assertNotIn("LIMIT=7", text)
+            # a rebuild without the option keeps the recorded selection
+            run_cli(["build", "--root", str(root), "--quiet"])
+            self.assertIn("· features calls",
+                          (root / "CLAUDE.md").read_text())
+            # --features all restores every one and states no restriction
+            run_cli(["build", "--root", str(root), "--features", "all",
+                     "--quiet"])
+            text = (root / "CLAUDE.md").read_text()
+            self.assertNotIn("· features", text)
+            self.assertIn("LIMIT=7", text)
+
+    def test_none_is_a_selection_not_an_absent_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--features", "none",
+                     "--quiet"])
+            text = (root / "CLAUDE.md").read_text()
+            self.assertIn("· features none", text)
+            self.assertIn("Service", text)
+            self.assertNotIn("> _step", text)
+            # recalled as empty, not as "nothing stored, use everything"
+            run_cli(["build", "--root", str(root), "--quiet"])
+            self.assertIn("· features none",
+                          (root / "CLAUDE.md").read_text())
+
+    def test_comma_and_repeat_forms_agree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--features",
+                     "calls,constants", "--quiet"])
+            comma = (root / "CLAUDE.md").read_text()
+            run_cli(["build", "--root", str(root), "--features", "calls",
+                     "--features", "constants", "--quiet"])
+            self.assertEqual(comma, (root / "CLAUDE.md").read_text())
+
+    def test_unknown_feature_names_the_known_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", str(root), "--features",
+                         "callchains", "--quiet"])
+        message = str(ctx.exception)
+        self.assertIn("unknown feature: callchains", message)
+        self.assertIn("calls", message)
+        self.assertIn("all, none", message)
+
+    def test_if_stale_rebuilds_when_only_the_selection_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._proj(Path(tmp))
+            run_cli(["build", "--root", str(root), "--quiet"])
+            # sources are untouched, so only the selection can force this
+            run_cli(["build", "--root", str(root), "--features", "calls",
+                     "--if-stale", "--quiet"])
+            self.assertIn("· features calls",
+                          (root / "CLAUDE.md").read_text())
+            run_cli(["build", "--root", str(root), "--features", "calls",
+                     "--if-stale", "--quiet"])
+            self.assertIn("· features calls",
+                          (root / "CLAUDE.md").read_text())
+
+
+class FeaturePickerTest(unittest.TestCase):
+    """The interactive picker: reply handling, and its terminal requirement."""
+
+    def test_replies_toggle_by_number_and_name(self):
+        from hologram.cli import _apply_feature_reply
+        every = frozenset(hologram.FEATURE_NAMES)
+        self.assertEqual(_apply_feature_reply(every, ""), every)
+        self.assertEqual(_apply_feature_reply(every, "a"), every)
+        self.assertEqual(_apply_feature_reply(every, "n"), frozenset())
+        self.assertEqual(_apply_feature_reply(every, "calls"),
+                         every - {"calls"})
+        self.assertEqual(_apply_feature_reply(frozenset(), "calls"),
+                         frozenset({"calls"}))
+        first = hologram.FEATURES[0][0]
+        self.assertEqual(_apply_feature_reply(every, "1"), every - {first})
+        self.assertEqual(_apply_feature_reply(every, "calls, tests"),
+                         every - {"calls", "tests"})
+
+    def test_an_unreadable_reply_changes_nothing(self):
+        from hologram.cli import _apply_feature_reply
+        every = frozenset(hologram.FEATURE_NAMES)
+        # silently dropping the unknown word would deselect `calls` on a typo
+        self.assertIsNone(_apply_feature_reply(every, "calls nonsense"))
+        self.assertIsNone(_apply_feature_reply(every, "99"))
+
+    def test_checklist_marks_the_current_selection(self):
+        from hologram.cli import _feature_checklist
+        listing = _feature_checklist(frozenset({"calls"}))
+        self.assertIn("[x] calls", listing)
+        self.assertIn("[ ] tests", listing)
+        for name, description in hologram.FEATURES:
+            self.assertIn(name, listing)
+            self.assertIn(description, listing)
+
+    def test_without_a_terminal_it_names_the_equivalent_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = Path(tmp) / "proj"
+            proj.mkdir()
+            (proj / "app.py").write_text("def run():\n    pass\n")
+            with self.assertRaises(SystemExit) as ctx:
+                run_cli(["build", "--root", str(proj), "--interactive",
+                         "--quiet"])
+            # the aborted picker must not have written anything
+            self.assertFalse((proj / "CLAUDE.md").exists())
+        self.assertIn("--features", str(ctx.exception))
 
 
 class HookPythonSelectionTest(unittest.TestCase):
