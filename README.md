@@ -81,7 +81,10 @@ essentials are:
   plus suite names and every recognized function/method case name,
   so an agent can inspect existing coverage before recreating it. Same-named
   methods in different suites gain their suite owner. `*` marks reusable test
-  helpers; separate tool/benchmark landmarks stay compact.
+  support: helper classes, declared fixtures, and helper functions another
+  test file uses. The index names no call targets — what a test exercises is
+  read from the test, not from the map. Separate tool/benchmark landmarks stay
+  compact.
 - The footer carries freshness and saved settings, plus what the map cost:
   `input` is the estimated token count of the scanned sources, `output` the
   estimated count of the map itself — the compression the block bought, stated
@@ -135,8 +138,17 @@ it each test file landmark, suite/case label, and test-to-business edge is a
 separately restorable fact — a restored label always brings back the file
 landmark it renders on. Hologram then restores ranked whole facts,
 prioritizing tested and cross-file paths, widely used APIs, and breadth across
-files. If even the floor cannot fit, Hologram warns and emits the smallest
-complete candidate instead of cutting facts in half.
+files.
+
+Below that floor is one more level, reached only when the semantic floor itself
+cannot fit: a structure-only map that states the same facts in project vocabulary
+alone. Return and parameter types, decorators and route paths, `!throws`, the
+`~N`/`✓`/`×0` markers, `{field}` lists and type relations are language and
+framework words, and all of them go; the source tree, type names, and function
+names with their parameter names stay. On this repository that is 714 tokens down
+to 460. Ranked facts still compete for whatever slack remains above it. If even
+that cannot fit, Hologram warns and emits the smallest complete candidate instead
+of cutting facts in half.
 
 The budget applies to the digest. `hologram stats` separately reports the
 wrapper, coaching text, and total managed-block estimate. `--warn-tokens`

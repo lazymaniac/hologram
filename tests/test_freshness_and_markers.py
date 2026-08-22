@@ -241,36 +241,15 @@ class TestIndexTest(unittest.TestCase):
         self.assertIn("test_svc", out)
         self.assertIn("test_run_returns_one", out)
 
-    def test_file_level_coverage_edges_for_classless_tests(self):
+    def test_index_states_no_call_targets(self):
+        """A test file's targets are guessable from the names it carries."""
         with tempfile.TemporaryDirectory() as tmp:
-            root = _proj(Path(tmp))  # test_svc.py has a top-level test fn
+            root = _proj(Path(tmp))  # test_svc.py calls Svc().run()
             out = build_digest(root)
         line = next(ln for ln in out.splitlines() if "test_svc" in ln)
-        # Svc is self-evident from the file name and folds into +N; the
-        # non-obvious target (run) is the headline
-        self.assertIn("> run +1", line)
-
-    def test_file_edge_gets_one_headline_and_overflow(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "p"
-            root.mkdir()
-            (root / "lib.py").write_text("".join(
-                f"def helper{i}():\n    pass\n\n" for i in range(5)))
-            (root / "test_lib.py").write_text(
-                "class CoveredTest:\n"
-                "    def test_all(self):\n"
-                + "".join(f"        helper{i}()\n" for i in range(5)) +
-                "\nclass QuietTest:\n    def test_nothing(self):\n        pass\n")
-            out = build_digest(root)
-        line = next(ln for ln in out.splitlines() if "test_lib" in ln)
-        self.assertIn(
-            "test_lib:CoveredTest,test_all,QuietTest,test_nothing > helper0 +4",
-            line,
-        )
-        self.assertNotIn("helper1", line)
-        self.assertIn("test_all", out)
-        self.assertIn("test_nothing", out)
-        self.assertIn("+N=more", out.splitlines()[1])
+        self.assertIn("test_svc:test_run_returns_one", line)
+        self.assertNotIn(" > ", line)
+        self.assertNotIn("+1", line)
 
 
 class DisplayNameTest(unittest.TestCase):
@@ -304,11 +283,58 @@ class TestHelperTest(unittest.TestCase):
     def test_directory_only_test_path_class_becomes_helper(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = build_digest(self._proj(Path(tmp)))
-        self.assertIn("driver:*NeutralDriver > run", out)
+        self.assertIn("driver:*NeutralDriver", out)
         self.assertNotIn("send(path,body)", out)  # source remains one read away
         self.assertNotIn("_internal", out.split("*NeutralDriver", 1)[1])
         self.assertNotIn("*SvcTest", out)             # real test class excluded
-        self.assertIn("*=test helper", out.splitlines()[1])
+        self.assertIn("*=helper/fixture", out.splitlines()[1])
+
+    def test_declared_fixtures_and_shared_helper_functions_are_named(self):
+        """Setup an agent would otherwise rebuild is what the index is for.
+
+        A fixture qualifies by declaration — the framework injects it by name
+        instead of calling it, so reference counting cannot see it. A plain
+        function has to prove reuse.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "p"
+            (root / "tests").mkdir(parents=True)
+            (root / "svc.py").write_text("def run():\n    return 1\n")
+            (root / "tests" / "conftest.py").write_text(
+                "import pytest\n\n"
+                "@pytest.fixture\n"
+                "def pricing_engine():\n    return object()\n\n"
+                "def _local_only():\n    return 2\n")
+            (root / "tests" / "support.py").write_text(
+                "def build_order(total):\n    return total\n")
+            (root / "tests" / "test_svc.py").write_text(
+                "from svc import run\n"
+                "from support import build_order\n\n"
+                "def test_runs(pricing_engine):\n"
+                "    assert run() == build_order(1)\n")
+            out = build_digest(root)
+
+        self.assertIn("conftest:*pricing_engine", out)   # declared fixture
+        self.assertIn("support:*build_order", out)       # used by another file
+        self.assertIn("test_svc:test_runs", out)         # the case itself
+        self.assertNotIn("_local_only", out)             # nobody else uses it
+        self.assertIn("*=helper/fixture", out.splitlines()[1])
+
+    def test_teardown_markers_earn_no_name(self):
+        """Setup hands the test something; teardown names no reusable thing."""
+        from hologram.render import _test_support_ids
+
+        def marked(name, decorator):
+            return Symbol(name=name, kind="method", file="tests/CartTest.java",
+                          line=1, visibility="pub", lang="java",
+                          container="CartTest", decorators=[decorator])
+
+        setup = marked("seedCart", "BeforeEach")
+        teardown = marked("dropCart", "AfterEach")
+        ids = _test_support_ids([setup, teardown], None)
+
+        self.assertIn(id(setup), ids)
+        self.assertNotIn(id(teardown), ids)
 
     def test_no_helpers_no_sigil_no_clause(self):
         with tempfile.TemporaryDirectory() as tmp:

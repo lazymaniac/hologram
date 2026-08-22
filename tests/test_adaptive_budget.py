@@ -143,10 +143,14 @@ class AdaptiveBudgetSemanticTest(unittest.TestCase):
                 "from checkout import checkout\n\n"
                 "def test_checkout():\n    return checkout(object())\n")
 
+            # Ranking is what is under test, so both searches stay on the
+            # semantic floor; the structure floor below it renders the same
+            # facts without the markers these assertions read.
             semantic_digest, semantic_stats = _first_budget_matching(
                 root,
                 lambda _digest, stats: (
-                    dict(stats.retained_reasons).get("tested call path", 0) > 0
+                    stats.effective_detail.startswith("L7")
+                    and dict(stats.retained_reasons).get("tested call path", 0) > 0
                     and dict(stats.retained_reasons).get(
                         "cross-file call path", 0) > 0
                 ),
@@ -200,6 +204,82 @@ class AdaptiveBudgetSemanticTest(unittest.TestCase):
         self.assertIn("? tests", restored)
         self.assertIn("test_checkout", restored)
         self.assertIn("test-files", dict(stats.retained_categories))
+
+    def test_structure_floor_strips_every_non_project_annotation(self):
+        """L8 states the same facts as L7 in project vocabulary alone.
+
+        Types, decorators, throws, markers, field lists and relations are
+        language and framework words; names, parameters and files are this
+        project's.  Only the latter survive the deepest level.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "shop.py").write_text(
+                "import dataclasses\n\n"
+                "@dataclasses.dataclass\n"
+                "class Quote:\n"
+                "    order: str\n"
+                "    total_cents: int\n\n"
+                "class PricingEngine(PricePort):\n"
+                "    def evaluate(self, order: str, items: int) -> Quote:\n"
+                "        if not items:\n"
+                "            raise UnknownItem(order)\n"
+                "        return Quote(order, items)\n\n"
+                "def quote_for(order: str, items: int) -> Quote:\n"
+                "    raise UnknownItem(order)\n")
+            floor = _level_digest(root, detail=7, budget=0)
+            plain = _level_digest(root, detail=8, budget=0)
+
+        body = "\n".join(plain.splitlines()[2:-1])
+        self.assertIn("shop.py", body)                      # the tree stays
+        self.assertIn("Quote(R)", body)
+        self.assertIn("PricingEngine(C)", body)
+        self.assertIn("quote_for(order,items)", body)       # parameters stay
+        for annotation in (":Quote", "@dataclass", "!UnknownItem", "{order",
+                           "total_cents", ": PricePort", "←", "sealed:",
+                           "✓", "×0", "~"):
+            with self.subTest(annotation=annotation):
+                self.assertNotIn(annotation, body)
+        # a legend may not promise notation the body no longer uses
+        legend = plain.splitlines()[1]
+        self.assertIn("C/R/I", legend)
+        self.assertNotIn("{fields}", legend)
+        self.assertNotIn(":Ret", legend)
+        self.assertLess(estimate_tokens(plain), estimate_tokens(floor))
+
+    def test_budget_under_the_semantic_floor_lands_on_the_structure_floor(self):
+        """Below L7 there used to be nothing but the whole-map fallback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "tests").mkdir()
+            for index in range(6):
+                (root / f"service_{index}.py").write_text(
+                    f"class Service{index}:\n"
+                    f"    def handle_request_number_{index}"
+                    "(self, payload: dict) -> dict:\n"
+                    "        raise NotImplementedError(payload)\n")
+            (root / "tests" / "test_services.py").write_text(
+                "from service_0 import Service0\n\n"
+                "def test_handles():\n    Service0().handle_request_number_0({})\n")
+            floor_tokens = _level_tokens(root, detail=7, budget=0)
+            plain_tokens = _level_tokens(root, detail=8, budget=0)
+            self.assertLess(plain_tokens, floor_tokens)
+            budget = plain_tokens + (floor_tokens - plain_tokens) // 2
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                digest, stats = build_digest_with_stats(root, budget=budget)
+
+        self.assertTrue(stats.fits)
+        self.assertEqual(err.getvalue(), "")        # a fitting map never warns
+        self.assertTrue(stats.effective_detail.startswith("L8"),
+                        stats.effective_detail)
+        self.assertLessEqual(estimate_tokens(digest), budget)
+        self.assertIn(" L8", digest.splitlines()[-1])
+        self.assertNotIn("):", digest)              # still no return types
+        # `skeleton_tokens` keeps meaning the L7 semantic floor, which is
+        # exactly what this budget could not afford
+        self.assertGreater(stats.skeleton_tokens, budget)
+        self.assertGreaterEqual(stats.skeleton_tokens, floor_tokens)
 
     def test_selected_member_chain_keeps_owning_method_line(self):
         with tempfile.TemporaryDirectory() as tmp:

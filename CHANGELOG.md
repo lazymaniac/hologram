@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The test index states landmarks and support, never call targets.** The
+  `> target +N` coverage edge is gone: it spent tokens naming one arbitrary
+  target and counting the rest, and what a test file exercises is already
+  legible from the case names it carries. `? tests` now holds exactly test
+  classes, test functions and methods, helper classes, helper functions, and
+  declared fixtures.
+- **Fixtures and shared helper functions are named.** A fixture qualifies by
+  declaration (`@pytest.fixture`, `@BeforeEach`, `@Rule`, …) because the
+  framework injects it by name rather than calling it; a plain function has to
+  be used by another test file. Teardown markers earn no name. Both render in
+  the existing `*` group, whose legend clause is now `*=helper/fixture`.
+
+### Added
+
+- **L8, a structure-only floor below the semantic floor.** When even L7 cannot fit a
+  `--budget`, Hologram now renders the same facts in project vocabulary alone: return
+  and parameter types, decorators and route paths, `!throws`, `~N`/`✓`/`×0` markers,
+  `{field}` lists, and `: super` / `←impls` / `sealed:` relations all go, leaving the
+  source tree, type names, and function names with their parameter names. On this
+  repository the floor drops from 714 to 460 tokens. Ranked whole facts still compete
+  for slack above it, and the previous "no complete map fits" fallback now runs only
+  when L8 overflows too. `BudgetStats.skeleton_tokens` keeps meaning the L7 semantic
+  floor; `effective_detail` reports `L8` or `L8-adaptive:n/m`.
+
 ## [0.14.0] - 2026-08-21
 
 Theme: the map states what it costs.

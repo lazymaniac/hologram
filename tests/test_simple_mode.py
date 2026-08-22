@@ -935,8 +935,8 @@ class CompactMapContractTest(unittest.TestCase):
             out = render_simple(root, syms, files)
 
         self.assertIn("domain/order.py\n place(order):Order", out)
-        # Classless pytest case name shares the existing file/coverage line.
-        self.assertIn("? tests ·.py\n test_order:test_place > place", out)
+        # Classless pytest case name shares the existing file landmark line.
+        self.assertIn("? tests ·.py\n test_order:test_place\n", out)
         self.assertIn("tools\n build_fixture.py: build_fixture(root)", out)
         self.assertIn("release.sh: build();publish()", out)
         self.assertIn(
@@ -1149,6 +1149,7 @@ class TestIndexDietTest(unittest.TestCase):
         self.assertIn("  stem_case.rs:stem_case", out)
         self.assertNotIn("build_checkout", out)
         self.assertNotIn("seedLedger", out)
+        # an unreferenced local helper stays that file's own business
         self.assertNotIn("payment_fixture", out)
 
     def test_go_short_entrypoint_names_follow_testing_convention(self):
@@ -1223,14 +1224,15 @@ class TestIndexDietTest(unittest.TestCase):
             self.assertNotIn(name, skeleton)
         self.assertNotIn("? tests", skeleton)   # the whole index is optional
 
-    def test_single_class_file_folds_and_keeps_edge(self):
+    def test_single_class_file_folds_into_one_landmark(self):
         syms = [self._sym("loadTheme", "fn", "src/Theme.java"),
                 self._sym("ThemeTest", "class", "test/ThemeTest.java"),
                 self._sym("test_load_theme", "method", "test/ThemeTest.java",
                           container="ThemeTest", calls=["loadTheme"])]
         out = self._render(syms, ["src/Theme.java", "test/ThemeTest.java"])
         self.assertIn("? tests ·.java", out)
-        self.assertIn("ThemeTest:test_load_theme > loadTheme", out)
+        self.assertIn("ThemeTest:test_load_theme", out)
+        self.assertNotIn("> loadTheme", out)   # the index states no targets
         self.assertNotIn("ThemeTest{", out)
         self.assertNotIn(".java{", out)
 
