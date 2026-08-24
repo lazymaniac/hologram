@@ -803,6 +803,124 @@ class PrivateMembersTest(unittest.TestCase):
         self.assertIn("compare(_,_)", output)
 
 
+class FeatureSelectionTest(unittest.TestCase):
+    """Each selectable fact class drops on its own, and only itself."""
+
+    def _mixed_symbols(self) -> list[Symbol]:
+        """One corpus carrying every selectable fact class at once."""
+        return [
+            Symbol(name="Port", kind="interface", file="core/port.py", line=1,
+                   visibility="pub", lang="python"),
+            Symbol(name="Engine", kind="class", file="core/engine.py", line=1,
+                   visibility="pub", lang="python", supers=["Port", "Base"],
+                   fields=["prices"], decorators=["Injectable"]),
+            Symbol(name="quote", kind="method", file="core/engine.py", line=8,
+                   container="Engine", visibility="pub", lang="python",
+                   size=60, raises=["LookupError"], calls=["_lookup"],
+                   decorators=["app.get('/quote')"]),
+            Symbol(name="_lookup", kind="method", file="core/engine.py",
+                   line=40, container="Engine", visibility="priv",
+                   lang="python"),
+            # named by no visible chain, so the inventory is where it appears
+            Symbol(name="_audit", kind="method", file="core/engine.py",
+                   line=50, container="Engine", visibility="priv",
+                   lang="python"),
+            Symbol(name="MAX_ITEMS", kind="const", file="core/engine.py",
+                   line=2, signature="MAX_ITEMS=50", visibility="pub",
+                   lang="python"),
+            Symbol(name="Widget", kind="class", file="core/widget.py", line=1,
+                   visibility="pub", lang="python"),
+            Symbol(name="test_quotes", kind="fn", file="tests/test_core.py",
+                   line=1, visibility="pub", lang="python"),
+            Symbol(name="run", kind="fn", file="tools/release.py", line=1,
+                   visibility="pub", lang="python"),
+        ]
+
+    def _render(self, features):
+        symbols = self._mixed_symbols()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            files = [root / "tests/test_core.py", root / "tools/release.py"]
+            return render_simple(root, symbols, files,
+                                 zero_usage={"Widget"}, features=features)
+
+    def test_each_feature_owns_exactly_one_notation(self):
+        # marker text -> the one feature whose removal must remove it
+        owned = {
+            "> _lookup": "calls",
+            " : Base": "relations",
+            "{prices}": "fields",
+            "MAX_ITEMS=50": "constants",
+            "@GET/quote": "decorators",
+            "!LookupError": "raises",
+            " ~60": "size",
+            "×0": "usage",
+            "_audit": "private",
+            "? tests": "tests",
+            "release.py": "support",
+        }
+        full = self._render(None)
+        for marker in owned:
+            self.assertIn(marker, full, f"{marker} missing from the full map")
+        for feature in sorted(set(owned.values())):
+            without = self._render(
+                frozenset(hologram.FEATURE_NAMES - {feature}))
+            for marker, owner in owned.items():
+                with self.subTest(dropped=feature, marker=marker):
+                    if owner == feature:
+                        self.assertNotIn(marker, without)
+                    else:
+                        self.assertIn(marker, without)
+
+    def test_omitted_selection_matches_every_feature_selected(self):
+        self.assertEqual(self._render(None),
+                         self._render(frozenset(hologram.FEATURE_NAMES)))
+
+    def test_structure_survives_an_empty_selection(self):
+        bare = self._render(frozenset())
+        # the map's identity — trie, type headers, public signatures — is not
+        # selectable, so it is exactly what an empty selection leaves
+        self.assertIn("core", bare)
+        self.assertIn("Engine", bare)
+        self.assertIn("quote()", bare)
+        self.assertNotIn("_audit", bare)
+        self.assertNotIn("? tests", bare)
+
+    def test_legend_never_promises_a_deselected_notation(self):
+        without_fields = self._render(
+            frozenset(hologram.FEATURE_NAMES - {"fields"}))
+        legend = without_fields.splitlines()[1]
+        self.assertNotIn("{fields}", legend)
+        self.assertIn("C/R/I", legend)
+
+    def test_selection_is_recorded_only_when_it_restricts(self):
+        self.assertNotIn("· features", self._render(None))
+        self.assertNotIn(
+            "· features", self._render(frozenset(hologram.FEATURE_NAMES)))
+        self.assertIn("· features none", self._render(frozenset()))
+        self.assertIn("· features calls,tests",
+                      self._render(frozenset({"calls", "tests"})))
+
+    def test_deselected_facts_never_return_through_the_budget(self):
+        """A budget restores ranked optional facts; it must never restore a
+        class the user removed, or the selection would be advisory only."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "core").mkdir()
+            (root / "core" / "engine.py").write_text(
+                "MAX_ITEMS = 50\n\n\nclass Engine:\n"
+                "    def quote(self):\n        return self._lookup()\n\n"
+                "    def _lookup(self):\n        return 1\n")
+            digest, stats = hologram.build_digest_with_stats(
+                root, budget=4000, features=frozenset({"calls"}))
+        self.assertNotIn("_lookup,", digest)
+        self.assertNotIn("MAX_ITEMS=50", digest)
+        categories = dict(stats.retained_categories)
+        categories.update(dict(stats.dropped_categories))
+        self.assertNotIn("private-names", categories)
+        self.assertNotIn("const-values", categories)
+
+
 class CompactMapContractTest(unittest.TestCase):
     def test_cross_language_test_path_patterns(self):
         for path in ("service_test.go", "service.test.ts", "service.spec.ts",

@@ -17,14 +17,15 @@ from .embed import (_EMBED_END, _EMBED_NOTE, _EMBED_START, CONTEXT_DIRS,
                     embed_digest, embedded_digest, managed_context_cost)
 from .extract import EXTRACTORS, extract_file
 from .extract.java import _extract_java
-from .gather import (_digest_state, _gather, _generator_fingerprint, _state_hash,
+from .gather import (_digest_features, _digest_state, _gather,
+                     _generator_fingerprint, _state_hash,
                      _zero_usage_names, scan_files)
 from .render import (BudgetStats, _factored_name_tokens, _is_test_path,
                      _tree_lines, build_digest, build_digest_with_stats,
                      estimate_tokens, render_simple)
-from .symbols import (DENYLIST_DIRS, LANG_EXTENSIONS, TYPE_KINDS, Symbol,
-                      detect_language, split_params, strip_comments_and_strings,
-                      tight_type)
+from .symbols import (DENYLIST_DIRS, FEATURE_NAMES, FEATURES, LANG_EXTENSIONS,
+                      TYPE_KINDS, Symbol, detect_language, split_params,
+                      strip_comments_and_strings, tight_type)
 from .treesitter import (_GRAMMAR_MODULES, _PARSERS, USING_TREESITTER,
                          _grammar_pkgs, has_parser)
 

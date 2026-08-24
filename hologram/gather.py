@@ -197,6 +197,17 @@ def _digest_langs(digest: str) -> set[str] | None:
     return set(m.group(1).split(",")) if m else None
 
 
+def _digest_features(digest: str) -> set[str] | None:
+    """The content selection recorded in a digest's metadata, if any — which
+    fact classes the map was built to carry, remembered across rebuilds.
+
+    Absent means every feature, which is also what a full selection stamps:
+    the default map states no restriction it does not have.
+    """
+    m = re.search(r"· features ([\w,]+)", _digest_metadata_line(digest))
+    return set(m.group(1).split(",")) if m else None
+
+
 def _digest_budget(digest: str) -> int | None:
     """The token budget recorded in a digest's metadata, if any."""
     m = re.search(r"· budget (\d+)", _digest_metadata_line(digest))
