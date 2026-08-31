@@ -7,33 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.15.0] - 2026-08-31
 
-- **The extension a map repeats is declared once.** A title line such as
-  `# hologram ·.py` states the corpus extension, and the file nodes that carry
-  it render bare; a leaf that states an extension has exactly the one it
-  states. Worth 1.2–1.5% of a real map (57 tokens on a 4,936-token TypeScript
-  corpus, 95 on a 6,220-token Java one) and nothing where it would not pay: a
-  stem another node already owns (`extract/` beside `extract.py`), a stem still
-  holding a dot (`shell.component`), and corpora too small or too mixed to earn
-  the declaration all keep their extensions. Grouped landmarks
-  (`{ItemId,OrderId}.java(R{value})`) keep theirs too, which is what tells a
-  reader the bare node above them is a directory.
-
-- **The test index states landmarks and support, never call targets.** The
-  `> target +N` coverage edge is gone: it spent tokens naming one arbitrary
-  target and counting the rest, and what a test file exercises is already
-  legible from the case names it carries. `? tests` now holds exactly test
-  classes, test functions and methods, helper classes, helper functions, and
-  declared fixtures.
-- **Fixtures and shared helper functions are named.** A fixture qualifies by
-  declaration (`@pytest.fixture`, `@BeforeEach`, `@Rule`, …) because the
-  framework injects it by name rather than calling it; a plain function has to
-  be used by another test file. Teardown markers earn no name. Both render in
-  the existing `*` group, whose legend clause is now `*=helper/fixture`.
+Theme: you choose the facts, and the map stops repeating itself.
 
 ### Added
 
+- **`--features` selects which fact classes the map carries.** A budget decides
+  how much of the map fits; it could not say what was eligible in the first
+  place.
+  Twelve named classes (`calls`, `relations`, `fields`, `constants`,
+  `decorators`, `raises`, `tested`, `usage`, `size`, `private`, `tests`,
+  `support`) can now be dropped whole, with `types` making thirteen. Gating
+  happens at each render site before the budget catalog, so a deselected class
+  never enters the adaptive search and cannot be restored by it. The package
+  trie, type headers, and public signatures are the map's identity and stay
+  unselectable; `--features none` leaves exactly those. The selection is stamped
+  in the footer and recalled like `--lang` and `--budget`, and `--interactive`
+  on `build`/`init` prices a selection against the full map before writing it.
 - **`--features types`.** Declared return and parameter types are now a
   selectable fact class, closing a gap between the feature catalog and the
   structure floor: L8 already stripped them, but nothing named them. They cost
@@ -48,6 +39,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for slack above it, and the previous "no complete map fits" fallback now runs only
   when L8 overflows too. `BudgetStats.skeleton_tokens` keeps meaning the L7 semantic
   floor; `effective_detail` reports `L8` or `L8-adaptive:n/m`.
+
+### Changed
+
+- **The extension a map repeats is declared once.** A title line such as
+  `# hologram ·.py` states the corpus extension, and the file nodes that carry
+  it render bare; a leaf that states an extension has exactly the one it
+  states. Worth 1.2–1.5% of a real map (57 tokens on a 4,936-token TypeScript
+  corpus, 95 on a 6,220-token Java one) and nothing where it would not pay: a
+  stem another node already owns (`extract/` beside `extract.py`), a stem still
+  holding a dot (`shell.component`), and corpora too small or too mixed to earn
+  the declaration all keep their extensions. Grouped landmarks
+  (`{ItemId,OrderId}.java(R{value})`) keep theirs too, which is what tells a
+  reader the bare node above them is a directory.
+- **The test index states landmarks and support, never call targets.** The
+  `> target +N` coverage edge is gone: it spent tokens naming one arbitrary
+  target and counting the rest, and what a test file exercises is already
+  legible from the case names it carries. `? tests` now holds exactly test
+  classes, test functions and methods, helper classes, helper functions, and
+  declared fixtures.
+- **Fixtures and shared helper functions are named.** A fixture qualifies by
+  declaration (`@pytest.fixture`, `@BeforeEach`, `@Rule`, …) because the
+  framework injects it by name rather than calling it; a plain function has to
+  be used by another test file. Teardown markers earn no name. Both render in
+  the existing `*` group, whose legend clause is now `*=helper/fixture`.
 
 ## [0.14.0] - 2026-08-21
 
@@ -738,7 +753,10 @@ agents already read — so the shape of the code is in context from turn zero.
   "hologram-map[grammars]"` for all parsers), or copy `hologram.py` into a repo
   and run it with plain `python3`.
 
-[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/lazymaniac/hologram/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/lazymaniac/hologram/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/lazymaniac/hologram/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/lazymaniac/hologram/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/lazymaniac/hologram/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/lazymaniac/hologram/compare/v0.9.1...v0.10.0
