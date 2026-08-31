@@ -106,6 +106,9 @@ class FixtureTokenCeilingTest(unittest.TestCase):
     The ceilings rose by nine tokens in v0.14 when the footer began stating the
     corpus and map token counts. That is a flat per-map cost a real corpus
     barely registers; these fixtures are small enough to make it look large.
+    Hoisting the repeated extension took two back from `pymini` and one from
+    `polyglot`; fixtures whose landmarks are all grouped pay it inline instead
+    and did not move.
     """
 
     def _assert_ceiling(self, name: str, ceiling: int) -> None:
@@ -144,7 +147,7 @@ class FixtureTokenCeilingTest(unittest.TestCase):
 
     def test_pymini(self):
         # Named pytest cases are retained because the file has no suite class.
-        self._assert_ceiling("pymini", 103)
+        self._assert_ceiling("pymini", 101)
 
     @_needs_fixture("tsmini")
     def test_tsmini(self):
@@ -152,7 +155,7 @@ class FixtureTokenCeilingTest(unittest.TestCase):
 
     @_needs_fixture("polyglot")
     def test_polyglot(self):
-        self._assert_ceiling("polyglot", 912)
+        self._assert_ceiling("polyglot", 911)
 
     @_needs_fixture("webmini")
     def test_webmini(self):
@@ -277,19 +280,82 @@ class FieldNamesTest(unittest.TestCase):
         self.assertNotIn("C{Map<ItemId,Long>}", out)
 
 
-@needs_java
 class ReconstructablePathTest(unittest.TestCase):
+    """Every rendered label names exactly one real path.
+
+    That holds whether the label states its extension or takes the one the
+    header declares, so the hoist is tested here rather than on its own.
+    """
+
+    def _render(self, *files: str) -> str:
+        symbols = [Symbol(name=f"run_{index}", kind="fn", file=file, line=1,
+                          visibility="pub", lang="python")
+                   for index, file in enumerate(files)]
+        with tempfile.TemporaryDirectory() as tmp:
+            return render_simple(Path(tmp), symbols, [])
+
+    @needs_java
     def test_tree_labels_keep_real_path_segments(self):
         out = build_digest(JAVAMINI)
         lines = out.splitlines()
         self.assertIn("src", lines)
         self.assertTrue(any(ln.strip() == "engine" for ln in lines))
 
+    @needs_java
     def test_conventional_file_is_one_hybrid_node_not_a_duplicate_parent(self):
         out = build_digest(JAVAMINI)
         matching = [line.strip() for line in out.splitlines()
                     if "PricingEngine.java" in line]
         self.assertEqual(matching, ["PricingEngine.java(C{basePrices})"])
+
+    def test_repeated_extension_is_declared_once_and_dropped_from_leaves(self):
+        out = self._render("pkg/alpha.py", "pkg/beta.py", "pkg/script.sh")
+        self.assertEqual(out.splitlines()[0], "# hologram ·.py")
+        self.assertIn("\n alpha\n", out)
+        self.assertIn("\n beta\n", out)
+        self.assertNotIn("alpha.py", out)
+        # a leaf of another extension keeps its own: bare means the declared one
+        self.assertIn("\n script.sh\n", out)
+
+    def test_one_leaf_does_not_pay_for_a_declaration(self):
+        out = self._render("only.py")
+        self.assertEqual(out.splitlines()[0], "# hologram")
+        self.assertIn("only.py", out)
+
+    def test_stem_taken_by_a_package_keeps_its_extension(self):
+        out = self._render("pkg/extract.py", "pkg/extract/core.py",
+                           "pkg/render.py")
+        self.assertIn("\n extract.py\n", out)   # `extract` is the package
+        self.assertIn("\n render\n", out)
+        self.assertIn("\n extract/core\n", out)
+
+    def test_dotted_stem_keeps_its_extension(self):
+        out = self._render("app/shell.component.ts", "app/app.routes.ts",
+                           "app/main.ts", "app/util.ts")
+        self.assertEqual(out.splitlines()[0], "# hologram ·.ts")
+        self.assertIn("\n main\n", out)
+        # `shell.component` would read as an extension the header never declared
+        self.assertIn("\n shell.component.ts\n", out)
+        self.assertIn("\n app.routes.ts\n", out)
+
+    def test_grouped_landmark_states_the_extension_a_bare_node_would_not(self):
+        """Payload naming files means the node is their directory."""
+        symbols = [
+            Symbol(name="Alpha", kind="class", file="pkg/Alpha.py", line=1,
+                   visibility="pub", lang="python"),
+            Symbol(name="Beta", kind="class", file="pkg/Beta.py", line=1,
+                   visibility="pub", lang="python"),
+            Symbol(name="run", kind="fn", file="pkg/util.py", line=1,
+                   visibility="pub", lang="python"),
+            Symbol(name="load", kind="fn", file="pkg/helpers.py", line=1,
+                   visibility="pub", lang="python"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            out = render_simple(Path(tmp), symbols, [])
+        self.assertIn("# hologram ·.py", out)
+        self.assertIn("{Alpha,Beta}.py(C)", out)
+        self.assertIn("\n util\n", out)
+        self.assertIn("\n helpers\n", out)
 
 
 @needs_java
@@ -717,9 +783,9 @@ class GroupExtrasTest(unittest.TestCase):
             out = render_simple(Path(tmp), syms, [])
         # Non-conventional modules retain exact file nodes. Their methods stay
         # lossless even when that means cross-file shape grouping is unsafe.
-        self.assertIn("a.py\n  AId(R{value})", out)
+        self.assertIn("a\n  AId(R{value})", out)
         self.assertIn("of(raw):AId", out)
-        self.assertIn("b.py\n  BId(R{value})", out)
+        self.assertIn("b\n  BId(R{value})", out)
         self.assertIn("of(raw):BId", out)
         self.assertIn("extra():int", out)
 
@@ -743,7 +809,7 @@ class PrivateMembersTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), self._syms(), [])
         self.assertIn("- _evict,_rebalance", out)      # class privates, names only
-        self.assertIn("util.py\n  - _helper", out)     # exact module file node
+        self.assertIn("util\n  - _helper", out)        # exact module file node
         self.assertNotIn("_evict(int)", out)           # no signatures by default
 
     def test_prefix_factoring_is_lossless_and_profitable(self):
@@ -817,7 +883,7 @@ class FeatureSelectionTest(unittest.TestCase):
             Symbol(name="quote", kind="method", file="core/engine.py", line=8,
                    container="Engine", visibility="pub", lang="python",
                    size=60, raises=["LookupError"], calls=["_lookup"],
-                   decorators=["app.get('/quote')"]),
+                   returns="Quote", decorators=["app.get('/quote')"]),
             Symbol(name="_lookup", kind="method", file="core/engine.py",
                    line=40, container="Engine", visibility="priv",
                    lang="python"),
@@ -848,6 +914,7 @@ class FeatureSelectionTest(unittest.TestCase):
         # marker text -> the one feature whose removal must remove it
         owned = {
             "> _lookup": "calls",
+            ":Quote": "types",
             " : Base": "relations",
             "{prices}": "fields",
             "MAX_ITEMS=50": "constants",
@@ -857,7 +924,7 @@ class FeatureSelectionTest(unittest.TestCase):
             "×0": "usage",
             "_audit": "private",
             "? tests": "tests",
-            "release.py": "support",
+            "release": "support",
         }
         full = self._render(None)
         for marker in owned:
@@ -974,8 +1041,8 @@ class CompactMapContractTest(unittest.TestCase):
             out = render_simple(Path(tmp), [run, called, twin], [],
                                 resolved=resolved)
         self.assertIn("run() > a._step", out)
-        self.assertNotIn("a.py\n - _step", out)
-        self.assertIn("b.py\n - _step", out)
+        self.assertNotIn("a\n - _step", out)
+        self.assertIn("b\n - _step", out)
 
     def test_test_index_lists_every_case_in_one_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1017,8 +1084,8 @@ class CompactMapContractTest(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), syms, [])
-        self.assertIn("a.py\n run()\n Thing(C{left})", out)
-        self.assertIn("b.py\n run()\n Thing(C{right})", out)
+        self.assertIn("a\n run()\n Thing(C{left})", out)
+        self.assertIn("b\n run()\n Thing(C{right})", out)
 
     def test_support_roles_are_compact_actionable_file_landmarks(self):
         syms = [
@@ -1052,13 +1119,13 @@ class CompactMapContractTest(unittest.TestCase):
             files = [root / symbol.file for symbol in syms]
             out = render_simple(root, syms, files)
 
-        self.assertIn("domain/order.py\n place(order):Order", out)
+        self.assertIn("domain/order\n place(order):Order", out)
         # Classless pytest case name shares the existing file landmark line.
-        self.assertIn("? tests ·.py\n test_order:test_place\n", out)
-        self.assertIn("tools\n build_fixture.py: build_fixture(root)", out)
+        self.assertIn("? tests\n test_order:test_place\n", out)
+        self.assertIn("tools\n build_fixture: build_fixture(root)", out)
         self.assertIn("release.sh: build();publish()", out)
         self.assertIn(
-            "benchmark\n bench.py: run_matrix(cases);report(rows)", out)
+            "benchmark\n bench: run_matrix(cases);report(rows)", out)
         self.assertNotIn("_load_template", out)
 
 
@@ -1258,13 +1325,16 @@ class TestIndexDietTest(unittest.TestCase):
             "tests/payment_tests.rs", "src/rules.rs", "src/stem_case.rs",
         ])
 
+        # `.rs` is the corpus extension, declared in the header and dropped
+        # from the leaves that carry it; the others state their own.
+        self.assertIn("# hologram ·.rs", out)
         self.assertIn("  test_checkout.py:test_rejects_expired_card", out)
         self.assertIn("ledger_test.go:TestConcurrentTransfer", out)
-        self.assertIn("  payment_tests.rs:rejects_expired_card", out)
-        self.assertIn("  rules.rs:rejects_inline_rule", out)
+        self.assertIn("  payment_tests:rejects_expired_card", out)
+        self.assertIn("  rules:rejects_inline_rule", out)
         self.assertEqual(out.count("rejects_inline_rule"), 1)
         self.assertIn("business_rule() ✓", out)
-        self.assertIn("  stem_case.rs:stem_case", out)
+        self.assertIn("  stem_case:stem_case", out)
         self.assertNotIn("build_checkout", out)
         self.assertNotIn("seedLedger", out)
         # an unreferenced local helper stays that file's own business
@@ -1348,7 +1418,9 @@ class TestIndexDietTest(unittest.TestCase):
                 self._sym("test_load_theme", "method", "test/ThemeTest.java",
                           container="ThemeTest", calls=["loadTheme"])]
         out = self._render(syms, ["src/Theme.java", "test/ThemeTest.java"])
-        self.assertIn("? tests ·.java", out)
+        # The header already declares `.java`, so the index states no second one.
+        self.assertIn("# hologram ·.java", out)
+        self.assertIn("? tests\n", out)
         self.assertIn("ThemeTest:test_load_theme", out)
         self.assertNotIn("> loadTheme", out)   # the index states no targets
         self.assertNotIn("ThemeTest{", out)

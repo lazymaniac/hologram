@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The extension a map repeats is declared once.** A title line such as
+  `# hologram ·.py` states the corpus extension, and the file nodes that carry
+  it render bare; a leaf that states an extension has exactly the one it
+  states. Worth 1.2–1.5% of a real map (57 tokens on a 4,936-token TypeScript
+  corpus, 95 on a 6,220-token Java one) and nothing where it would not pay: a
+  stem another node already owns (`extract/` beside `extract.py`), a stem still
+  holding a dot (`shell.component`), and corpora too small or too mixed to earn
+  the declaration all keep their extensions. Grouped landmarks
+  (`{ItemId,OrderId}.java(R{value})`) keep theirs too, which is what tells a
+  reader the bare node above them is a directory.
+
 - **The test index states landmarks and support, never call targets.** The
   `> target +N` coverage edge is gone: it spent tokens naming one arbitrary
   target and counting the rest, and what a test file exercises is already
@@ -23,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--features types`.** Declared return and parameter types are now a
+  selectable fact class, closing a gap between the feature catalog and the
+  structure floor: L8 already stripped them, but nothing named them. They cost
+  1.0% of this repository's map, 2.8% of a TypeScript corpus and 5.1% of a Java
+  one — more than seven of the twelve classes that were already selectable.
 - **L8, a structure-only floor below the semantic floor.** When even L7 cannot fit a
   `--budget`, Hologram now renders the same facts in project vocabulary alone: return
   and parameter types, decorators and route paths, `!throws`, `~N`/`✓`/`×0` markers,

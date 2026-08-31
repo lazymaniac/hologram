@@ -173,6 +173,74 @@ def _tree_lines(payload_by_dir: dict[str, list[str]]) -> list[str]:
     return out
 
 
+def _shared_suffix(paths) -> str:
+    """The one extension every path carries, or "" when they differ."""
+    suffixes = {Path(p).suffix for p in paths}
+    if len(suffixes) != 1:
+        return ""
+    return next(iter(suffixes))
+
+
+def _dominant_suffix(paths) -> str:
+    """The extension worth stating once instead of on every leaf.
+
+    Repeating `.java` on a thousand leaves states nothing a single declaration
+    does not.  The most common extension is hoisted into the section header and
+    dropped from the leaves that carry it; every other leaf keeps its own, so
+    absence means the hoisted extension and presence means exactly what is
+    written.  Only leaves `_hoisted` can actually strip are counted, and only a
+    count that outweighs the declaration earns one.
+    """
+    counts = Counter(
+        suffix for suffix, path in ((Path(p).suffix, str(p)) for p in paths)
+        if suffix and _hoisted(path, suffix) != path)
+    if not counts:
+        return ""
+    suffix, count = max(counts.items(), key=lambda kv: (kv[1], kv[0]))
+    # The declaration costs `` ·<ext>``; below that it is not worth stating.
+    return suffix if (count - 1) * len(suffix) > 2 else ""
+
+
+def _hoisted(name: str, hoisted_ext: str) -> str:
+    """Drop the declared extension from one rendered file label.
+
+    A stem that still holds a dot keeps its extension: `shell.component` would
+    read as a file whose extension is `.component`, and the reader could no
+    longer tell a declared extension from a stated one.
+    """
+    if not hoisted_ext or not name.endswith(hoisted_ext):
+        return name
+    stripped = name[:-len(hoisted_ext)]
+    if not stripped or "." in Path(stripped).name:
+        return name
+    return stripped
+
+
+def _hoist_tree_keys(payload_by_dir: dict[str, list[str]],
+                     file_keys: set[str], hoisted_ext: str
+                     ) -> dict[str, list[str]]:
+    """Drop the hoisted extension from file trie nodes, losslessly.
+
+    A stripped stem must stay reconstructable, so it never takes a name the
+    trie already owns: `extract/` beside `extract.py` keeps the extension on
+    the file rather than colliding with the package node.
+    """
+    if not hoisted_ext:
+        return payload_by_dir
+    keys = set(payload_by_dir)
+    out: dict[str, list[str]] = {}
+    for key, payload in payload_by_dir.items():
+        stripped = key
+        candidate = _hoisted(key, hoisted_ext) if key in file_keys else key
+        if candidate != key:
+            prefix = candidate + "/"
+            if (candidate not in keys
+                    and not any(k.startswith(prefix) for k in keys)):
+                stripped = candidate
+        out.setdefault(stripped, []).extend(payload)
+    return out
+
+
 def _strip_exc(name: str) -> str:
     return name.removesuffix("Exception") or name
 
@@ -987,7 +1055,8 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       case_ids: set[int] | None = None,
                       case_labels: dict[int, str] | None = None,
                       case_files: set[str] | None = None,
-                      selected_files: set[str] | None = None) -> list[str]:
+                      selected_files: set[str] | None = None,
+                      hoisted_ext: str = "") -> list[str]:
     """Compact test orientation: file, test landmarks, reusable support.
 
     Suite names and every recognized function/method case help agents find
@@ -1030,16 +1099,20 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                 case_labels.get(id(symbol), symbol.name))
         if id(symbol) in helper_ids:
             helpers.setdefault(symbol.file, []).append(symbol.name)
-    suffixes = {Path(p).suffix for p in test_paths}
-    shared_ext = (next(iter(suffixes))
-                  if len(suffixes) == 1 and next(iter(suffixes)) else "")
+    shared_ext = _shared_suffix(test_paths)
+    if hoisted_ext and any(path.endswith(hoisted_ext) for path in test_paths):
+        # The map header already declares one extension.  Composing a second
+        # would make a leaf readable only through two headers, so the local
+        # hoist stays for the test tree the global declaration cannot reach.
+        shared_ext = ""
     # Test paths share deep directory prefixes (one package tree per module);
     # stating each one once through the same trie the source section uses keeps
     # the landmark identical and drops the repetition.
     payload_by_dir: dict[str, list[str]] = {}
     for path in test_paths:
         display_path = Path(*Path(path).parts[1:]) if strip_first else Path(path)
-        display = str(display_path).removesuffix(shared_ext)
+        display = _hoisted(str(display_path),
+                           hoisted_ext).removesuffix(shared_ext)
         directory = str(Path(display).parent)
         leaf = Path(display).name
         case_names = cases.get(path, [])
@@ -1056,7 +1129,7 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     return [header, *(" " + line for line in _tree_lines(payload_by_dir))]
 
 
-def _legend_line(text: str, has_priv: bool, has_tests: bool,
+def _legend_line(text: str, has_priv: bool,
                  has_helpers: bool = False, plain: bool = False) -> str:
     """Legend restricted to notation the rendered body actually uses.
 
@@ -1064,7 +1137,9 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
     a clause too few leaves notation unexplained); brace detection strips the
     always-explained type-header form `(K{` first so only factored/expansion
     braces trigger the `p{a,b}` clause.  A `plain` (structure-only) map carries
-    neither field lists nor return types, so it must not promise them."""
+    neither field lists nor return types, so it must not promise them; neither
+    does a map whose owner deselected `types`, which is why the return clause
+    reads the body rather than the level."""
     # a type alias renders both shapes: `T{a,b}` for an object literal and
     # `T:target` for a plain alias, so each earns its clause independently
     # A deselected fact class leaves its notation unused exactly as a deep
@@ -1078,7 +1153,7 @@ def _legend_line(text: str, has_priv: bool, has_tests: bool,
             first += " E{values}"
         if "(T:" in text:
             first += " T:target"
-    signature = "f(args)" if plain else "f(args):Ret"
+    signature = "f(args):Ret" if "):" in text else "f(args)"
     items = [first, f"{signature} > calls" if " > " in text
              else signature]  # skeleton maps carry no chains
     if has_priv:
@@ -1153,6 +1228,13 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     # with project vocabulary alone: no return/parameter types, decorators,
     # throws, size/tested/unused markers, field lists, or type relations.
     plain = detail >= _MAX_LEVEL
+    source_file_keys: set[str] = set()
+
+    def _rel(path: Path) -> str:
+        try:
+            return str(path.relative_to(root))
+        except ValueError:
+            return str(path)
 
     def _on(feature: str) -> bool:
         """Whether a selectable fact class renders. The ladder still wins: a
@@ -1409,7 +1491,10 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         # chain already. Use renderer-resolved display names, never raw calls.
         calls = (resolved_calls.get(id(method), ())
                  if cold and id(method) in tested and _on("calls") else ())
-        return base + sum(len(call) + 1 for call in calls)
+        # A deselected type never reaches the line, so it must not reserve
+        # room in the trial ordering either.
+        typed = 0 if _on("types") else len(method.returns or "") + 1
+        return max(1, base - typed) + sum(len(call) + 1 for call in calls)
 
     def _method_budget_bundle(method: Symbol) -> BudgetBundle:
         cold = _member_owner_key(method) in cold_types
@@ -1566,11 +1651,12 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     def _display_signature(sym: Symbol, display_name: str | None = None) -> str:
         args = _argument_names(sym)
+        typed = not plain and _on("types")
         shape = (sym.file, sym.container or "", sym.name, tuple(args))
-        if signature_shapes[shape] > 1 and not plain:
+        if signature_shapes[shape] > 1 and typed:
             args = [f"{name}:{sym.params[index]}" if name != sym.params[index] else name
                     for index, name in enumerate(args)]
-        returns = ("" if plain else
+        returns = ("" if not typed else
                    f":{sym.returns}" if sym.returns and sym.kind != "ctor"
                    and sym.returns not in ("void", "Unit", "None") else "")
         if sym.signature and "(" not in sym.signature and sym.lang in ("helm", "html"):
@@ -1586,10 +1672,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 role_symbols.setdefault(symbol.file, []).append(symbol)
         role_files = set(role_symbols)
         for path in files:
-            try:
-                rel = str(path.relative_to(root))
-            except ValueError:
-                rel = str(path)
+            rel = _rel(path)
             if _source_role(rel) == role:
                 role_files.add(rel)
         if not role_files:
@@ -1652,7 +1735,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             display_file = (str(Path(*parts[1:]))
                             if len(parts) > 1
                             and parts[0].casefold() == role else file)
-            lines.append(f" {display_file}{detail_text}{suffix}")
+            lines.append(f" {_hoisted(display_file, hoisted_ext)}"
+                         f"{detail_text}{suffix}")
         return lines
 
     def _selected_notes(sym: Symbol) -> list[str]:
@@ -1733,6 +1817,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                              and file not in files_with_other_top_facts)
         scope = (("dir", str(Path(file).parent)) if sole_conventional
                  else ("file", file))
+        if scope[0] == "file":
+            source_file_keys.add(file)
         types_by_scope.setdefault(scope, []).extend(types)
 
     payload_by_dir: dict[str, list[str]] = {}
@@ -1774,9 +1860,13 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
              named_fields, deco_notes, type_calls), members in groups.items():
             members.sort(key=lambda s: s.name)
             if scope_kind == "dir":
-                suffixes = {Path(member.file).suffix for member in members}
-                if len(members) > 1 and len(suffixes) == 1:
-                    suffix = next(iter(suffixes))
+                # A grouped landmark names files that are *not* this trie node,
+                # so it states their extension even when the header declares
+                # one.  That is what keeps a bare node decidable: payload
+                # naming files means the node is their directory, payload
+                # naming symbols means the node is the file itself.
+                suffix = _shared_suffix(member.file for member in members)
+                if len(members) > 1 and suffix:
                     stems = [Path(member.file).stem for member in members]
                     names = "{" + ",".join(stems) + "}" + suffix
                 else:
@@ -1860,6 +1950,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     for (file, owner, _), members in sorted(orphan_methods.items()):
         lines = list(dict.fromkeys(
             _sig_line(member, owner, False) for member in members))
+        source_file_keys.add(file)
         payload_by_dir.setdefault(file, []).append(
             f"{_orphan_owner_display(file, owner, members[0].lang)}: "
             + "; ".join(lines))
@@ -1883,10 +1974,12 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 if value_bundle is not None:
                     _record_bundle(value_bundle, value_kept)
     for file, vals in sorted(consts_by_file.items()):
+        source_file_keys.add(file)
         payload_by_dir.setdefault(file, []).extend(
             _private_lines("= ", vals))
 
     for file, names_only in sorted(priv_top_by_file.items()):
+        source_file_keys.add(file)
         payload_by_dir.setdefault(file, []).extend(
             _private_lines("- ", names_only))
     public_owners = {(member.file, member.name, member.lang)
@@ -1894,6 +1987,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                      if member.kind in TYPE_KINDS}
     for (file, owner, lang), names_only in sorted(priv_methods_by_owner.items()):
         if (file, owner, lang) not in public_owners:
+            source_file_keys.add(file)
             payload_by_dir.setdefault(file, []).extend(
                 _private_lines(
                     f"- {_orphan_owner_display(file, owner, lang)}: ",
@@ -1905,6 +1999,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             if s.name not in names_r:
                 names_r.append(s.name)
     for file, names_r in sorted(reex_by_file.items()):
+        source_file_keys.add(file)
         payload_by_dir.setdefault(file, []).append(
             f"» {','.join(_factored_name_tokens(names_r))}")
 
@@ -1932,7 +2027,15 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             meta_tail += f" A{budget_selection.level}"
         elif detail:
             meta_tail += f" L{detail}"
-    body = _tree_lines(payload_by_dir)
+    # One extension repeated on every leaf states nothing the header cannot
+    # state once.  Counted over the labels the hoist can actually reach — file
+    # trie nodes plus the test and support landmarks — never the whole scan, so
+    # a declaration is only made where it is spent.
+    hoisted_ext = _dominant_suffix(
+        source_file_keys
+        | {rel for rel in map(_rel, files) if _source_role(rel) != "main"})
+    body = _tree_lines(_hoist_tree_keys(payload_by_dir, source_file_keys,
+                                        hoisted_ext))
     helper_ids = (helpers if helpers is not None
                   else _test_support_ids(symbols, file_tokens))
     method_proven_suites = {
@@ -1996,10 +2099,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     make_files = {s.file for s in symbols if s.lang == "make"}
     selected_test_files: set[str] = set()
     for path in files if _on("tests") else ():
-        try:
-            rel = str(path.relative_to(root))
-        except ValueError:
-            rel = str(path)
+        rel = _rel(path)
         if ((not _is_test_path(rel) and rel not in test_case_files)
                 or rel in make_files):
             continue
@@ -2021,7 +2121,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                               case_ids=selected_test_cases,
                               case_labels=case_labels,
                               case_files=test_case_files,
-                              selected_files=selected_test_files)
+                              selected_files=selected_test_files,
+                              hoisted_ext=hoisted_ext)
     if tests:
         body.extend(tests)
     tools = _support_landmark_lines("tools") if _on("support") else []
@@ -2030,10 +2131,9 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     body.extend(benchmark)
     has_priv = bool(priv_top_by_file or priv_methods_by_owner)
     has_helpers = any(":*" in line for line in tests)
-    legend = _legend_line("\n".join(body), has_priv,
-                          bool(tests or tools or benchmark),
-                          has_helpers, plain=plain)
-    header = f"# hologram\n{legend}\n"
+    legend = _legend_line("\n".join(body), has_priv, has_helpers, plain=plain)
+    hoist_note = f" ·{hoisted_ext}" if hoisted_ext else ""
+    header = f"# hologram{hoist_note}\n{legend}\n"
     disclosure = ""
     if detail:
         # silent omission misleads: a reader answering off a degraded map

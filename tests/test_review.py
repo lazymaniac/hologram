@@ -51,6 +51,19 @@ class DupCheckTest(unittest.TestCase):
         self.assertEqual(described.id, mapped.id)
         self.assertRegex(described.id, r"^hr1-[0-9a-f]{20}$")
 
+    def test_a_file_landmark_is_never_a_symbol_pointer(self):
+        """The map hoists the shared extension, so `order(C{...})` is a type
+        header, not the callable `order`.  Before the kind letter gated the
+        scan, the extension was the only thing keeping them apart."""
+        old = _snap([_fn("normalize_amount", file="util/text.py")])
+        new = _snap([_fn("normalize_amount", file="util/text.py"),
+                     _fn("normalise_amounts", file="billing/money.py")])
+        digest = ("# hologram ·.py\n· C/R/I{fields}\n"
+                  "util\n normalize_amount(C{cents})\n")
+        finding = review_snapshots(old, new, digest,
+                                   checks=frozenset({"dup"}))[0]
+        self.assertNotIn("(C{cents})", finding.detail)
+
     def test_delegation_is_not_duplicate(self):
         old = _snap([_fn("normalize_amount", file="util/text.py")])
         new = _snap([_fn("normalize_amount", file="util/text.py"),
