@@ -11,6 +11,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import re
 import subprocess
 import tempfile
 from collections import Counter
@@ -253,11 +254,19 @@ def _test_edges(snap: Snapshot,
     return edges
 
 
+# `Name(C{...})` is a type header, not a callable.  Once the map hoists the
+# shared extension, a file landmark reads `order(C{...})` rather than
+# `order.py(C{...})`, so the kind letter is what keeps a header from being
+# handed back as some callable's map line.
+_TYPE_HEADER = re.compile(r"\([CRIET][{):]")
+
+
 def _sig_lines(digest: str) -> list[str]:
     out = []
     for ln in digest.splitlines():
         s = ln.strip()
-        if s and not s.startswith(("#", "·", "-", "»", "?", "*", "=")) and "(" in s:
+        if (s and not s.startswith(("#", "·", "-", "»", "?", "*", "="))
+                and "(" in s and not _TYPE_HEADER.search(s.split(" ", 1)[0])):
             out.append(s)
     return out
 

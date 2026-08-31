@@ -96,8 +96,8 @@ class AdaptiveBudgetSemanticTest(unittest.TestCase):
         # Admitted facts remain complete, external routes survive, and equal
         # owner names remain file-qualified. Equal-tier room spans both files.
         self.assertIn("health() @GET/health", first)
-        self.assertIn("one.py\n Client(C)", first)
-        self.assertIn("two.py\n Client(C)", first)
+        self.assertIn("one\n Client(C)", first)
+        self.assertIn("two\n Client(C)", first)
         operation_lines = [line.strip() for line in first.splitlines()
                            if "operation_with_long_name" in line]
         self.assertTrue(operation_lines)
@@ -264,7 +264,10 @@ class AdaptiveBudgetSemanticTest(unittest.TestCase):
             floor_tokens = _level_tokens(root, detail=7, budget=0)
             plain_tokens = _level_tokens(root, detail=8, budget=0)
             self.assertLess(plain_tokens, floor_tokens)
-            budget = plain_tokens + (floor_tokens - plain_tokens) // 2
+            # One token under the semantic floor: L7 cannot fit, L8 must.
+            # A midpoint would ride the quantization of the budget stamp the
+            # level probes do not carry.
+            budget = floor_tokens - 1
             err = io.StringIO()
             with contextlib.redirect_stderr(err):
                 digest, stats = build_digest_with_stats(root, budget=budget)

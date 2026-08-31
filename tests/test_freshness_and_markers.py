@@ -86,7 +86,7 @@ class StateAndCheckTest(unittest.TestCase):
             self.assertEqual(hologram._digest_state(embedded),
                              hologram._state_hash(root))
         lines = embedded.splitlines()
-        self.assertEqual(lines[0], "# hologram")
+        self.assertEqual(lines[0], "# hologram ·.py")
         self.assertNotIn("state", "\n".join(lines[:2]))
         self.assertIn("· state ", lines[-1])
 
@@ -110,7 +110,10 @@ class StateAndCheckTest(unittest.TestCase):
         stated_input, stated_output = (int(group.replace(",", ""))
                                        for group in match.groups())
         self.assertEqual(stated_input, corpus)
-        self.assertEqual(stated_output, hologram.estimate_tokens(embedded))
+        # The count is measured on the rendered digest, which ends in the
+        # newline `embedded_digest` strips off the block.
+        self.assertEqual(stated_output,
+                         hologram.estimate_tokens(embedded + "\n"))
 
     def test_unreadable_file_is_skipped_by_gather_and_state_alike(self):
         """`_gather` must skip what `_state_hash` skips.
@@ -237,7 +240,10 @@ class TestIndexTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))
             out = build_digest(root)
-        self.assertIn("? tests ·.py", out)  # shared extension factored once
+        # `.py` is the corpus extension: the header states it once and the
+        # index states no second one.
+        self.assertIn("# hologram ·.py", out)
+        self.assertIn("? tests\n", out)
         self.assertIn("test_svc", out)
         self.assertIn("test_run_returns_one", out)
 

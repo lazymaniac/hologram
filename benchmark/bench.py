@@ -503,11 +503,17 @@ def _acted_on_findings(events: list[tuple]) -> bool:
     return False
 
 
+# A `Name(C{...})` type header is not a callable line; with the map's shared
+# extension hoisted it would otherwise read as one.
+_TYPE_HEADER = re.compile(r"\([CRIET][{):]")
+
+
 def _sig_lines(digest: str) -> list[str]:
     out = []
     for ln in digest.splitlines():
         s = ln.strip()
-        if s and not s.startswith(("#", "·", "-", "»", "?")) and "(" in s:
+        if (s and not s.startswith(("#", "·", "-", "»", "?"))
+                and "(" in s and not _TYPE_HEADER.search(s.split(" ", 1)[0])):
             out.append(s)
     return out
 

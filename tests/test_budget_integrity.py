@@ -228,8 +228,8 @@ class EntrypointFloorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = render_simple(Path(tmp), symbols, [])
 
-        self.assertIn("a.py\n _route() @GET/a", output)
-        self.assertIn("b.py\n _route() @GET/b", output)
+        self.assertIn("a\n _route() @GET/a", output)
+        self.assertIn("b\n _route() @GET/b", output)
 
     def test_duplicate_private_route_owners_are_file_qualified(self):
         symbols: list[Symbol] = []
@@ -245,8 +245,8 @@ class EntrypointFloorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = render_simple(Path(tmp), symbols, [])
 
-        self.assertIn("a.py\n _Controller(C)", output)
-        self.assertIn("b.py\n _Controller(C)", output)
+        self.assertIn("a\n _Controller(C)", output)
+        self.assertIn("b\n _Controller(C)", output)
         self.assertNotIn("_Controller,_Controller", output)
 
 
@@ -272,8 +272,8 @@ class OwnerIdentityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             output = render_simple(Path(tmp), self._symbols(), [])
 
-        self.assertIn("one.py\n  use_alpha() > alpha\n  Client(C)", output)
-        self.assertIn("two.py\n  Client(C)", output)
+        self.assertIn("one\n  use_alpha() > alpha\n  Client(C)", output)
+        self.assertIn("two\n  Client(C)", output)
         lines = [line.strip() for line in output.splitlines()]
         self.assertEqual(lines.count("alpha()"), 1)
         self.assertEqual(lines.count("beta()"), 1)
@@ -466,8 +466,9 @@ class MeaningfulDunderTest(unittest.TestCase):
             output = render_simple(Path(tmp), symbols, [])
 
         for file in ("a.lua", "b.lua"):
-            self.assertIn(f"{file}\n M: quote()\n - M: _hidden", output)
-            self.assertEqual(output.count(file), 1)
+            node = Path(file).stem   # `.lua` is declared in the header once
+            self.assertIn(f"{node}\n M: quote()\n - M: _hidden", output)
+            self.assertEqual(output.count(f"\n{node}\n"), 1)
 
     def test_orphan_module_qualified_calls_keep_their_chain(self):
         symbols = [

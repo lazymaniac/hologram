@@ -72,6 +72,26 @@ essentials are:
 
 - The tree mirrors the repository and names exact source files. Similar files
   may be grouped losslessly with braces.
+- A title line such as `# hologram ·.py` declares the extension the map would
+  otherwise repeat on every leaf: a bare leaf carries it, and a leaf that states
+  an extension has exactly the one it states. A node with children below it, or
+  whose lines name files of their own (`{ItemId,OrderId}.java(R{value})`), is a
+  directory; a bare node is the file. The declaration is made only where it
+  costs less than the repetition, which is why the Java map above carries none —
+  every one of its landmarks already names its file inline.
+
+  ```text
+  # hologram ·.py
+  · C/R/I{fields} · f(args):Ret > calls · ×0=unused · ✓=tested · !E=throws
+  app
+   main() ×0 > price_order,OrderId,ItemId
+   price_order(order,items):int ✓
+  models
+   ItemId,OrderId,UserId(R{value})
+  ```
+
+  Here `app` is `app.py` and `models` is `models.py`; both are files, because
+  neither has a node below it and neither names a file of its own.
 - `f(args):Ret > calls` shows a callable, its return type, and retained internal
   calls. `←` shows implementors.
 - `×0` means no static project reference was found; `!E` means a callable
