@@ -147,6 +147,7 @@ merely expensive.
 | Feature | What it renders |
 |---|---|
 | `calls` | Call chains between project symbols (`sig > callee`) |
+| `types` | Declared return and parameter types (`:Ret`, `arg:T`) |
 | `relations` | Supers, implements, sealed permits, implementors |
 | `fields` | Field names, record components, enum values |
 | `constants` | Public constants and their short values |

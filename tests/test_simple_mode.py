@@ -883,7 +883,7 @@ class FeatureSelectionTest(unittest.TestCase):
             Symbol(name="quote", kind="method", file="core/engine.py", line=8,
                    container="Engine", visibility="pub", lang="python",
                    size=60, raises=["LookupError"], calls=["_lookup"],
-                   decorators=["app.get('/quote')"]),
+                   returns="Quote", decorators=["app.get('/quote')"]),
             Symbol(name="_lookup", kind="method", file="core/engine.py",
                    line=40, container="Engine", visibility="priv",
                    lang="python"),
@@ -914,6 +914,7 @@ class FeatureSelectionTest(unittest.TestCase):
         # marker text -> the one feature whose removal must remove it
         owned = {
             "> _lookup": "calls",
+            ":Quote": "types",
             " : Base": "relations",
             "{prices}": "fields",
             "MAX_ITEMS=50": "constants",

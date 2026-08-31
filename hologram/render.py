@@ -1137,7 +1137,9 @@ def _legend_line(text: str, has_priv: bool,
     a clause too few leaves notation unexplained); brace detection strips the
     always-explained type-header form `(K{` first so only factored/expansion
     braces trigger the `p{a,b}` clause.  A `plain` (structure-only) map carries
-    neither field lists nor return types, so it must not promise them."""
+    neither field lists nor return types, so it must not promise them; neither
+    does a map whose owner deselected `types`, which is why the return clause
+    reads the body rather than the level."""
     # a type alias renders both shapes: `T{a,b}` for an object literal and
     # `T:target` for a plain alias, so each earns its clause independently
     # A deselected fact class leaves its notation unused exactly as a deep
@@ -1151,7 +1153,7 @@ def _legend_line(text: str, has_priv: bool,
             first += " E{values}"
         if "(T:" in text:
             first += " T:target"
-    signature = "f(args)" if plain else "f(args):Ret"
+    signature = "f(args):Ret" if "):" in text else "f(args)"
     items = [first, f"{signature} > calls" if " > " in text
              else signature]  # skeleton maps carry no chains
     if has_priv:
@@ -1489,7 +1491,10 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         # chain already. Use renderer-resolved display names, never raw calls.
         calls = (resolved_calls.get(id(method), ())
                  if cold and id(method) in tested and _on("calls") else ())
-        return base + sum(len(call) + 1 for call in calls)
+        # A deselected type never reaches the line, so it must not reserve
+        # room in the trial ordering either.
+        typed = 0 if _on("types") else len(method.returns or "") + 1
+        return max(1, base - typed) + sum(len(call) + 1 for call in calls)
 
     def _method_budget_bundle(method: Symbol) -> BudgetBundle:
         cold = _member_owner_key(method) in cold_types
@@ -1646,11 +1651,12 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     def _display_signature(sym: Symbol, display_name: str | None = None) -> str:
         args = _argument_names(sym)
+        typed = not plain and _on("types")
         shape = (sym.file, sym.container or "", sym.name, tuple(args))
-        if signature_shapes[shape] > 1 and not plain:
+        if signature_shapes[shape] > 1 and typed:
             args = [f"{name}:{sym.params[index]}" if name != sym.params[index] else name
                     for index, name in enumerate(args)]
-        returns = ("" if plain else
+        returns = ("" if not typed else
                    f":{sym.returns}" if sym.returns and sym.kind != "ctor"
                    and sym.returns not in ("void", "Unit", "None") else "")
         if sym.signature and "(" not in sym.signature and sym.lang in ("helm", "html"):
