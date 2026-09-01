@@ -201,25 +201,6 @@ class StateAndCheckTest(unittest.TestCase):
             self.assertNotEqual(claude.stat().st_mtime_ns, mtime)
 
 
-class TestedMarkerTest(unittest.TestCase):
-    def test_symbol_named_in_tests_gets_check(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = _proj(Path(tmp))
-            out = build_digest(root)
-        run_line = next(ln for ln in out.splitlines() if "run()" in ln)
-        self.assertIn("✓", run_line)                     # named in test file
-        self.assertIn("✓=tested", out)
-
-    def test_untested_symbol_unmarked(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "p"
-            root.mkdir()
-            (root / "a.py").write_text("def lonely() -> int:\n    return 1\n")
-            out = build_digest(root)
-        lonely = next(ln for ln in out.splitlines() if "lonely()" in ln)
-        self.assertNotIn("✓", lonely)
-
-
 class SizeMarkerTest(unittest.TestCase):
     def test_large_body_marked_small_not(self):
         big = "def big() -> int:\n" + "".join(
@@ -244,16 +225,16 @@ class TestIndexTest(unittest.TestCase):
         # index states no second one.
         self.assertIn("# hologram ·.py", out)
         self.assertIn("? tests\n", out)
-        self.assertIn("test_svc", out)
-        self.assertIn("test_run_returns_one", out)
+        self.assertIn("\n test_svc\n", out)
+        self.assertNotIn("test_run_returns_one", out)   # read it in the file
 
-    def test_index_states_no_call_targets(self):
-        """A test file's targets are guessable from the names it carries."""
+    def test_index_states_a_file_and_nothing_it_contains(self):
+        """The landmark points at the file; what is in it is read there."""
         with tempfile.TemporaryDirectory() as tmp:
             root = _proj(Path(tmp))  # test_svc.py calls Svc().run()
             out = build_digest(root)
         line = next(ln for ln in out.splitlines() if "test_svc" in ln)
-        self.assertIn("test_svc:test_run_returns_one", line)
+        self.assertEqual(line.strip(), "test_svc")
         self.assertNotIn(" > ", line)
         self.assertNotIn("+1", line)
 
@@ -322,7 +303,8 @@ class TestHelperTest(unittest.TestCase):
 
         self.assertIn("conftest:*pricing_engine", out)   # declared fixture
         self.assertIn("support:*build_order", out)       # used by another file
-        self.assertIn("test_svc:test_runs", out)         # the case itself
+        self.assertIn("\n test_svc\n", out)              # the file landmark
+        self.assertNotIn("test_runs", out)               # cases are not named
         self.assertNotIn("_local_only", out)             # nobody else uses it
         self.assertIn("*=helper/fixture", out.splitlines()[1])
 

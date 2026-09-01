@@ -338,15 +338,15 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(a, b)                      # same budget, same map
         self.assertIn("MAX_RETRIES=3", full)
         self.assertIn("? tests", full)
-        # No candidate fits a budget of 1, so the smallest complete map wins:
-        # the structure floor, which keeps the constant's name without its
-        # value, drops the test index whole, and states no return types.
-        self.assertIn("= MAX_RETRIES\n", a)
-        self.assertNotIn("MAX_RETRIES=3", a)
-        self.assertNotIn("? tests", a)
-        self.assertIn("used()\n", a)
-        self.assertIn("· budget 1 L8", a.splitlines()[-1])
-        self.assertIn("smallest complete candidate is L8", err.getvalue())
+        # No candidate fits a budget of 1, so the smallest complete map wins
+        # and says so. Which rung that is depends on the corpus — a level that
+        # drops call chains can grow the private inventory past the map it was
+        # meant to shrink — so the contract here is the warning and the stamp.
+        # `test_adaptive_budget` pins the structure floor itself.
+        self.assertIn("used()", a)
+        self.assertIn("· budget 1", a.splitlines()[-1])
+        self.assertIn("no complete map fits the budget", err.getvalue())
+        self.assertIn("emitting it whole", err.getvalue())
 
     def test_if_stale_rebuilds_when_only_the_budget_changed(self):
         """The state hash covers sources, not settings.

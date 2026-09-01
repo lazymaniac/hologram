@@ -170,15 +170,15 @@ class AdaptiveBudgetSemanticTest(unittest.TestCase):
             "cross-file call path": 1,
             "tested call path": 1,
         })
-        self.assertIn("checkout(order) ✓ > price", semantic_digest)
+        self.assertIn("checkout(order) > price", semantic_digest)
         self.assertIn("ship(items) ×0 > reserve", semantic_digest)
 
-    def test_skeleton_drops_the_test_index_and_a_case_restores_its_file(self):
+    def test_skeleton_drops_the_test_index_and_a_budget_restores_a_file(self):
         """Orientation is the first thing a hard budget can spare.
 
-        The floor carries no test index at all — header included — and a
-        restored case name must bring its file landmark back with it, or the
-        budget would pay for a name with nothing to hang it on.
+        The floor carries no test index at all — header included — and the
+        first thing slack buys back is the landmark naming the file, which is
+        the whole of what the index states.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -193,7 +193,7 @@ class AdaptiveBudgetSemanticTest(unittest.TestCase):
             skeleton = _level_digest(root, detail=7, budget=1)
             restored, stats = _first_budget_matching(
                 root,
-                lambda digest, _stats: "test_rejects_expired_card" in digest,
+                lambda digest, _stats: "test_checkout" in digest,
             )
 
         self.assertNotIn("? tests", skeleton)
@@ -237,7 +237,7 @@ class AdaptiveBudgetSemanticTest(unittest.TestCase):
         self.assertIn("quote_for(order,items)", body)       # parameters stay
         for annotation in (":Quote", "@dataclass", "!UnknownItem", "{order",
                            "total_cents", ": PricePort", "←", "sealed:",
-                           "✓", "×0", "~"):
+                           "×0", "~"):
             with self.subTest(annotation=annotation):
                 self.assertNotIn(annotation, body)
         # a legend may not promise notation the body no longer uses
@@ -314,7 +314,7 @@ class AdaptiveBudgetSemanticTest(unittest.TestCase):
             bundle in stats.retained_bundles
             for bundle in (f"public-methods:{key}", f"cold-methods:{key}")
         ))
-        self.assertIn("checkout(order) ✓ > calculate_total", digest)
+        self.assertIn("checkout(order) > calculate_total", digest)
 
     def test_equal_tier_selection_preserves_breadth_across_files(self):
         with tempfile.TemporaryDirectory() as tmp:
