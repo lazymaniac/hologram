@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-09-01
+
+Theme: a name says only what the reader's position does not.
+
 ### Added
 
 - **`--features params`.** Parameter names were 14–24% of a real map and were
@@ -799,7 +803,8 @@ agents already read — so the shape of the code is in context from turn zero.
   "hologram-map[grammars]"` for all parsers), or copy `hologram.py` into a repo
   and run it with plain `python3`.
 
-[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/lazymaniac/hologram/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/lazymaniac/hologram/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/lazymaniac/hologram/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/lazymaniac/hologram/compare/v0.12.0...v0.13.0
