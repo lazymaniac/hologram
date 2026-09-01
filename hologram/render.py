@@ -1492,6 +1492,11 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                     warm.add(target_owner)
         cold_types = all_types - warm
 
+    def _argument_names(sym: Symbol) -> list[str]:
+        return [sym.param_names[index] if index < len(sym.param_names)
+                and sym.param_names[index] else param
+                for index, param in enumerate(sym.params)]
+
     def _method_payload_chars(method: Symbol, cold: bool) -> int:
         base = _bundle_estimated_chars(
             "cold-methods" if cold else "public-methods", method)
@@ -1499,10 +1504,12 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         # chain already. Use renderer-resolved display names, never raw calls.
         calls = (resolved_calls.get(id(method), ())
                  if cold and id(method) in tested and _on("calls") else ())
-        # A deselected type never reaches the line, so it must not reserve
+        # A deselected fact never reaches the line, so it must not reserve
         # room in the trial ordering either.
-        typed = 0 if _on("types") else len(method.returns or "") + 1
-        return max(1, base - typed) + sum(len(call) + 1 for call in calls)
+        dropped = 0 if _on("types") else len(method.returns or "") + 1
+        if not _on("params"):
+            dropped += sum(len(name) for name in _argument_names(method))
+        return max(1, base - dropped) + sum(len(call) + 1 for call in calls)
 
     def _method_budget_bundle(method: Symbol) -> BudgetBundle:
         cold = _member_owner_key(method) in cold_types
@@ -1635,11 +1642,6 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     def _norm(text: str, own: str) -> str:
         return re.sub(rf"\b{re.escape(own)}\b", "Self", text)
 
-    def _argument_names(sym: Symbol) -> list[str]:
-        return [sym.param_names[index] if index < len(sym.param_names)
-                and sym.param_names[index] else param
-                for index, param in enumerate(sym.params)]
-
     signature_shapes = Counter(
         (s.file, s.container or "", s.name, tuple(_argument_names(s)))
         for s in render_prod if s.kind in ("fn", "method", "ctor")
@@ -1661,7 +1663,13 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         args = _argument_names(sym)
         typed = not plain and _on("types")
         shape = (sym.file, sym.container or "", sym.name, tuple(args))
-        if signature_shapes[shape] > 1 and typed:
+        if not _on("params"):
+            # The callable and how many arguments it takes are the fact; what
+            # they are called is not.  `_` is the placeholder the renderer
+            # already emits for an argument no extractor could name, so arity
+            # survives without new notation.
+            args = ["_"] * len(args)
+        elif signature_shapes[shape] > 1 and typed:
             args = [f"{name}:{sym.params[index]}" if name != sym.params[index] else name
                     for index, name in enumerate(args)]
         returns = ("" if not typed else
