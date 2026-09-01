@@ -63,6 +63,7 @@ TYPE_KINDS = ("class", "interface", "record", "enum", "type")
 FEATURES: tuple[tuple[str, str], ...] = (
     ("calls", "call chains between project symbols (sig > callee)"),
     ("types", "declared return and parameter types (:Ret, arg:T)"),
+    ("params", "parameter names on signatures (f(order,items))"),
     ("relations", "supers, implements, sealed permits, implementors"),
     ("fields", "field names, record components, enum values"),
     ("constants", "public constants and their short values"),

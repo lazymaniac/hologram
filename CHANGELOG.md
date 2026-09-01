@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--features params`.** Parameter names were 14–24% of a real map and were
+  the one large fact class with no name, because they sat in the always-on
+  "identity" remainder alongside the trie and the type headers. They are a fact
+  about the code, not the map's structure, so they are selectable now.
+  Deselecting keeps arity and drops only the names — `place(order,items)`
+  becomes `place(_,_)`, reusing the placeholder the renderer already emits for
+  an argument no extractor could name — and takes about 7% off a map that keeps
+  everything else.
+
 ## [0.15.0] - 2026-08-31
 
 Theme: you choose the facts, and the map stops repeating itself.

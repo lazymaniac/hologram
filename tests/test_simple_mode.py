@@ -883,6 +883,7 @@ class FeatureSelectionTest(unittest.TestCase):
             Symbol(name="quote", kind="method", file="core/engine.py", line=8,
                    container="Engine", visibility="pub", lang="python",
                    size=60, raises=["LookupError"], calls=["_lookup"],
+                   params=["Order"], param_names=["order"],
                    returns="Quote", decorators=["app.get('/quote')"]),
             Symbol(name="_lookup", kind="method", file="core/engine.py",
                    line=40, container="Engine", visibility="priv",
@@ -915,6 +916,7 @@ class FeatureSelectionTest(unittest.TestCase):
         owned = {
             "> _lookup": "calls",
             ":Quote": "types",
+            "(order)": "params",
             " : Base": "relations",
             "{prices}": "fields",
             "MAX_ITEMS=50": "constants",
@@ -949,9 +951,19 @@ class FeatureSelectionTest(unittest.TestCase):
         # selectable, so it is exactly what an empty selection leaves
         self.assertIn("core", bare)
         self.assertIn("Engine", bare)
-        self.assertIn("quote()", bare)
+        # arity is structure and survives; the argument's name is a fact and does not
+        self.assertIn("quote(_)", bare)
         self.assertNotIn("_audit", bare)
         self.assertNotIn("? tests", bare)
+
+    def test_dropping_params_keeps_arity_and_loses_only_the_names(self):
+        """`_` is the placeholder the renderer already uses for an argument no
+        extractor could name, so a caller still learns how many to pass."""
+        without = self._render(frozenset(hologram.FEATURE_NAMES - {"params"}))
+        self.assertIn("quote(_):Quote", without)
+        self.assertNotIn("order", without)
+        with_names = self._render(frozenset(hologram.FEATURE_NAMES))
+        self.assertIn("quote(order):Quote", with_names)
 
     def test_legend_never_promises_a_deselected_notation(self):
         without_fields = self._render(
