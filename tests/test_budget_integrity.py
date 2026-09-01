@@ -377,7 +377,10 @@ class OwnerIdentityTest(unittest.TestCase):
 
         self.assertEqual([target.file for target in raw[id(caller)]],
                          ["one/run.go"])
-        self.assertEqual(displayed[id(caller)], ["one/run.go:Widget.Run"])
+        # the caller is in `one/`, so the package it shares with the target
+        # is not restated; naming the file is what keeps the two apart
+        self.assertEqual(displayed[id(caller)], ["run.go:Widget.Run"])
+        self.assertIn("use() > run.go:Widget.Run", output)
         self.assertNotIn("one/widget.go:Widget", output)
 
     def test_bash_calls_resolve_within_each_script_owner(self):
