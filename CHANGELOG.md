@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an argument no extractor could name — and takes about 7% off a map that keeps
   everything else.
 
+### Changed
+
+- **Call targets are named relative to the caller.** The description ladder
+  picked the shortest name that is unambiguous across the whole project, which
+  is the right question to ask once and the wrong one to answer on every line:
+  a chain inside `a/b/Order.java` that read `> a/b/Order.java:Order.total`
+  spent 24 characters restating the node the reader was standing in. A target
+  now carries only what the caller's own path, file and owner do not already
+  say. Worth 7.9% of a monorepo of near-identical services, 2.4% of a Java
+  example corpus, and 1.2% — 699 tokens — of a 16,000-file Java codebase. Two
+  targets that would shorten to the same text both keep their project-wide
+  names, so one name never stands for two.
+
 ### Fixed
 
 - **Framework-wired code is no longer reported as dead.** `×0` means no static

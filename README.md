@@ -93,7 +93,10 @@ essentials are:
   Here `app` is `app.py` and `models` is `models.py`; both are files, because
   neither has a node below it and neither names a file of its own.
 - `f(args):Ret > calls` shows a callable, its return type, and retained internal
-  calls. `←` shows implementors.
+  calls. `←` shows implementors. A call target is named relative to the caller:
+  it carries only what the caller's own path, file and owner do not already
+  say, so `total` is in the same class, `order.py:Order.total` is a sibling
+  file, and a full path means another part of the tree.
 - `×0` means no static project reference was found; `!E` means a callable
   throws. These are navigation hints, not correctness claims. Code a framework
   constructs or calls — routes, listeners, DI components and `@Bean` factories,

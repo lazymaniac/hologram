@@ -498,6 +498,11 @@ class BudgetStatsContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             components = [f"long_{index}_{'x' * 90}" for index in range(5)]
+            # the payload has to be large for the trial cap to bind, and a
+            # long name is what makes it so: a long *path* no longer reaches
+            # the chain, because a target in the caller's own file is named
+            # relative to it.
+            target = f"target_{'x' * 90}"
             for branch, caller_count in (("a", 128), ("b", 0)):
                 directory = root / branch
                 for component in components:
@@ -505,13 +510,13 @@ class BudgetStatsContractTest(unittest.TestCase):
                 directory.mkdir(parents=True)
                 source = [
                     "class Client:",
-                    "    def target(self):",
+                    f"    def {target}(self):",
                     "        return 1",
                 ]
                 for index in range(caller_count):
                     source.extend([
                         f"    def a{index:03d}(self):",
-                        "        return self.target()",
+                        f"        return self.{target}()",
                     ])
                 (directory / "module.py").write_text("\n".join(source) + "\n")
             (root / "zz.py").write_text(

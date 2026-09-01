@@ -329,6 +329,51 @@ def _target_descriptions(targets: list[Symbol]) -> dict[int, str]:
     return out
 
 
+def _trim_local(description: str, caller: Symbol) -> str:
+    """Drop the part of a target's name that repeats where the caller sits.
+
+    `_target_descriptions` picks the shortest name that is unambiguous across
+    the whole project, which is the right question to ask once and the wrong
+    one to answer on every line: a chain rendered inside `a/b/Order.java` that
+    says `a/b/Order.java:Order.total` spends its length restating the node the
+    reader is standing in. Trim to what is left after the caller's own path,
+    file and owner, so the name resolves outward from the caller the way it
+    does in source.
+    """
+    path, sep, rest = description.partition(":")
+    if sep:
+        if path != caller.file:
+            here, there = Path(caller.file).parent.parts, Path(path).parts
+            shared = 0
+            while (shared < len(here) and shared + 1 < len(there)
+                   and here[shared] == there[shared]):
+                shared += 1
+            # a sibling still needs its file; only the shared prefix goes
+            return ("/".join(there[shared:]) + ":" + rest if shared
+                    else description)
+        description = rest
+    # `Sample.PricingEngine.compute` sheds the file stem, then the owner
+    for _ in range(2):
+        owner, sep, rest = description.partition(".")
+        if not (sep and (owner == caller.container
+                         or owner == Path(caller.file).stem)):
+            break
+        description = rest
+    return description
+
+
+def _localized(descriptions: list[str], caller: Symbol) -> list[str]:
+    """Trim each target against the caller, keeping the chain unambiguous.
+
+    Two overloads of one method trim to the same text; when that happens both
+    keep the project-wide name rather than one silently standing for two.
+    """
+    trimmed = [_trim_local(d, caller) for d in descriptions]
+    collisions = Counter(trimmed)
+    return [short if collisions[short] == 1 else full
+            for short, full in zip(trimmed, descriptions)]
+
+
 def _raw_call_targets(symbols: list[Symbol]) -> dict[int, list[Symbol]]:
     """Each symbol's raw calls resolved to project Symbol targets — the shared
     resolution core under both rendering and `hologram review`."""
@@ -554,7 +599,8 @@ def _resolved_project_calls(symbols: list[Symbol]
                 if not implied:
                     reduced.append(target)
             found = reduced
-        displayed[id(caller)] = [descriptions[id(target)] for target in found]
+        displayed[id(caller)] = _localized(
+            [descriptions[id(target)] for target in found], caller)
 
     tested = {
         id(target)
@@ -1583,9 +1629,14 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         if not visible:
             continue
         for origin in render_origins.get(id(caller), [caller]):
-            for target in raw_targets.get(id(origin), ()):
-                if (target.visibility == "priv"
-                        and target_descriptions.get(id(target)) in visible):
+            reached = list(raw_targets.get(id(origin), ()))
+            # compare the text the chain actually shows, which is trimmed
+            # against this origin exactly as `_resolved_project_calls` trims it
+            shown = _localized(
+                [target_descriptions.get(id(target), target.name)
+                 for target in reached], origin)
+            for target, name in zip(reached, shown):
+                if target.visibility == "priv" and name in visible:
                     visible_private_targets.add(
                         (target.file, target.lang, target.container or "",
                          target.name))
