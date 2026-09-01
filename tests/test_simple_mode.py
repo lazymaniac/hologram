@@ -938,6 +938,7 @@ class FeatureSelectionTest(unittest.TestCase):
             Symbol(name="quote", kind="method", file="core/engine.py", line=8,
                    container="Engine", visibility="pub", lang="python",
                    size=60, raises=["LookupError"], calls=["_lookup"],
+                   params=["Order"], param_names=["order"],
                    returns="Quote", decorators=["app.get('/quote')"]),
             Symbol(name="_lookup", kind="method", file="core/engine.py",
                    line=40, container="Engine", visibility="priv",
@@ -970,6 +971,7 @@ class FeatureSelectionTest(unittest.TestCase):
         owned = {
             "> _lookup": "calls",
             ":Quote": "types",
+            "(order)": "params",
             " : Base": "relations",
             "{prices}": "fields",
             "MAX_ITEMS=50": "constants",
@@ -1004,9 +1006,19 @@ class FeatureSelectionTest(unittest.TestCase):
         # selectable, so it is exactly what an empty selection leaves
         self.assertIn("core", bare)
         self.assertIn("Engine", bare)
-        self.assertIn("quote()", bare)
+        # arity is structure and survives; the argument's name is a fact and does not
+        self.assertIn("quote(_)", bare)
         self.assertNotIn("_audit", bare)
         self.assertNotIn("? tests", bare)
+
+    def test_dropping_params_keeps_arity_and_loses_only_the_names(self):
+        """`_` is the placeholder the renderer already uses for an argument no
+        extractor could name, so a caller still learns how many to pass."""
+        without = self._render(frozenset(hologram.FEATURE_NAMES - {"params"}))
+        self.assertIn("quote(_):Quote", without)
+        self.assertNotIn("order", without)
+        with_names = self._render(frozenset(hologram.FEATURE_NAMES))
+        self.assertIn("quote(order):Quote", with_names)
 
     def test_legend_never_promises_a_deselected_notation(self):
         without_fields = self._render(
@@ -1218,6 +1230,25 @@ class ZeroUsageMarkerTest(unittest.TestCase):
         self.assertIn("plain_dead()×0", out.replace(" ×0", "×0"))
         self.assertNotIn("orders()×0", out.replace(" ×0", "×0"))
         self.assertIn("@GET/orders", out)
+
+    @needs_java
+    def test_framework_wired_components_not_marked_dead(self):
+        """A container constructs these; static fan-in cannot see it. Marking
+        them `×0` invites deleting the wiring an application runs on."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Wiring.java").write_text(
+                "@Configuration\npublic class Wiring {\n"
+                "  @Bean public Clock clock() { return null; }\n}\n")
+            (root / "OrderService.java").write_text(
+                "@Service\npublic class OrderService {\n"
+                "  public void place() {}\n}\n")
+            (root / "Orphan.java").write_text(
+                "public class Orphan {\n  public void run() {}\n}\n")
+            out = build_digest(root).replace(" ×0", "×0")
+        self.assertIn("{OrderService,Wiring}.java(C)\n", out)   # no ×0
+        self.assertNotIn("clock():Clock×0", out)                # the @Bean factory
+        self.assertIn("Orphan.java(C)×0", out)   # unwired code is still called out
 
     def test_rust_route_handler_not_marked_dead(self):
         from hologram.gather import _framework_invoked

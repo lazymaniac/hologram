@@ -63,6 +63,7 @@ TYPE_KINDS = ("class", "interface", "record", "enum", "type")
 FEATURES: tuple[tuple[str, str], ...] = (
     ("calls", "call chains between project symbols (sig > callee)"),
     ("types", "declared return and parameter types (:Ret, arg:T)"),
+    ("params", "parameter names on signatures (f(order,items))"),
     ("relations", "supers, implements, sealed permits, implementors"),
     ("fields", "field names, record components, enum values"),
     ("constants", "public constants and their short values"),
@@ -134,7 +135,27 @@ MARKER_DECORATORS = {
 
 # decorators that mean "invoked by a framework, not by project code": their
 # bearers are exempt from the ×0 no-static-use marker
-ENTRYPOINT_DECORATORS = (set(ROUTE_DECORATORS) | {
+# Constructed or called by a container rather than by project code, so zero
+# static fan-in is the expected shape and never evidence of dead code. These
+# belong here whether or not they also earn a rendered note: without them a
+# wired `@Service` or `@Bean` factory reads as `×0` and invites deletion.
+WIRED_DECORATORS = {
+    # Spring stereotypes, configuration, and DI factories
+    "Service", "Repository", "Configuration", "RestController",
+    "ControllerAdvice", "SpringBootApplication", "Bean", "Autowired",
+    "ConditionalOnProperty", "ConditionalOnMissingBean",
+    "EnableWebSecurity", "EnableScheduling", "EnableAsync",
+    # JSR-330 / Jakarta CDI
+    "Named", "Singleton", "Inject",
+    # container lifecycle callbacks
+    "PostConstruct", "PreDestroy",
+    # the ORM constructs the entity
+    "Entity", "Embeddable",
+    # Spring AI and MCP capability surfaces: the model calls these, not us
+    "Tool", "McpTool", "McpPrompt", "McpResource", "McpComplete",
+}
+
+ENTRYPOINT_DECORATORS = (set(ROUTE_DECORATORS) | WIRED_DECORATORS | {
     "Scheduled", "EventListener", "KafkaListener", "fixture", "Component",
 }) - {"Path"}
 
