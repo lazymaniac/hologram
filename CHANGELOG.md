@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Grouped landmarks take the declared extension too.** `{ItemId,OrderId}.java`
+  now renders `{ItemId,OrderId}` under a `# hologram ·.java` header, like every
+  other leaf. They had been exempt so that payload naming files could tell a
+  reader the bare node above it was a directory — which cost the hoist most of
+  its value exactly where it pays best, on the one-public-class-per-file
+  languages whose every landmark is grouped. Worth 3.9% of the `javamini`
+  fixture, 0.7% of a Spring corpus and 0.5% (306 tokens) of a 16,000-file Java
+  codebase. The reader's rule is now simply that a node with nodes below it is a
+  directory; a directory whose files are all grouped landmarks reads as a file,
+  measured at about one node in fifty, and never silently — the reconstructed
+  path does not exist while the directory does.
+
 ## [0.15.0] - 2026-08-31
 
 Theme: you choose the facts, and the map stops repeating itself.

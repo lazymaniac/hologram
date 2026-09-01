@@ -775,7 +775,8 @@ class PrintCommandTest(unittest.TestCase):
                 code = run_cli(["print", "--root", str(proj)])
             self.assertEqual(code, 0)
             self.assertIn("PricingEngine", out.getvalue())
-            self.assertTrue(out.getvalue().startswith("# hologram\n· "))
+            self.assertTrue(
+                out.getvalue().startswith("# hologram ·.java\n· "))
             self.assertRegex(
                 out.getvalue().splitlines()[-1],
                 r"^· [\d,]+ LOC · input [\d,]+ · output [\d,]+ tokens"

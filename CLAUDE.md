@@ -106,11 +106,14 @@ Consequences worth knowing before editing:
   removes it from file trie nodes only. It refuses a stem another node already owns
   (`extract/` beside `extract.py`) and a stem still holding a dot (`shell.component` would
   read as an extension), and it counts only leaves it can actually strip, so no
-  declaration is made where it does not pay. Grouped landmarks
-  (`{ItemId,OrderId}.java(R{value})`) keep their extension on purpose: payload that names
-  files is what tells a reader the bare node above it is their directory rather than the
-  file itself. Any change here must keep every rendered node resolvable to exactly one
-  real path.
+  declaration is made where it does not pay. Grouped landmarks take it as well, counted
+  in the same universe, which is what makes the hoist pay on one-public-class-per-file
+  languages. The reader's rule is that a node with nodes below it is a directory; a
+  directory whose files are all grouped landmarks therefore reads as a file. That was
+  measured at roughly one node in fifty and it never misleads silently — the
+  reconstructed path does not exist while the directory does — but any change here must
+  keep that property: a wrong reading has to fail, never resolve to a different real
+  file.
 - **The map is push-only by design.** Do not add a query/retrieval step, generated
   side-index, or coaching that requires the agent to remember a tool call. The product
   distinction is maximum useful business-logic semantics already present at session
@@ -233,7 +236,7 @@ hologram
   build_digest(root,langs,targets,budget,features):str ✓ > _build_digest
   build_digest_with_stats(root,langs,targets,budget,features):tuple[str,BudgetStats] ✓ > _build_digest
   estimate_tokens(text):int ✓
-  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,source_tokens,resolved,helpers,features,budget_{selection,catalog,retained}):str ~981 ✓ > _target_descriptions,_dominant_suffix,{_tree,_test_index}_lines,_legend_line,estimate_tokens,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_corpus_size,_hoist_tree_keys,_test_support_ids,_is_production_symbol,_bundle_key,_essential_method,_decorator_notes,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_shared_suffix,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,_hoisted,render._symbol_identity
+  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,source_tokens,resolved,helpers,features,budget_{selection,catalog,retained}):str ~979 ✓ > _dominant_suffix,_target_descriptions,{_tree,_test_index}_lines,_legend_line,estimate_tokens,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_corpus_size,_hoist_tree_keys,_test_support_ids,_is_production_symbol,_bundle_key,_essential_method,_decorator_notes,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_shared_suffix,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,_hoisted,render._symbol_identity
   summarize_budget(requested_budget,{full,selected,skeleton}_tokens,effective_detail,bundles,retained,selection_{trials,candidates},search_truncated,stop_reason):BudgetStats ~41 ✓ > BudgetStats
   BudgetBundle(R{detail,category,key,estimated_chars,source_file,semantic_tier,distinct_file_fanin,reason})
    name():str @property
@@ -412,6 +415,6 @@ tools
 benchmark
  bench: main(argv):int;run_one(...);report(rows,anon):str +11
 ‥ optional facts omitted — NEVER guess; read source before relying on them
-· 20,136 LOC · input 225,637 · output 5,966 tokens · state c50ea77dbb1d · budget 6000 A7
+· 20,136 LOC · input 225,579 · output 5,966 tokens · state 5f9a81dcec35 · budget 6000 A7
 ```
 <!-- hologram:end -->

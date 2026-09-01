@@ -107,8 +107,8 @@ class FixtureTokenCeilingTest(unittest.TestCase):
     corpus and map token counts. That is a flat per-map cost a real corpus
     barely registers; these fixtures are small enough to make it look large.
     Hoisting the repeated extension took two back from `pymini` and one from
-    `polyglot`; fixtures whose landmarks are all grouped pay it inline instead
-    and did not move.
+    `polyglot`, and eleven more from `javamini` once grouped landmarks took the
+    declaration too.
     """
 
     def _assert_ceiling(self, name: str, ceiling: int) -> None:
@@ -120,7 +120,7 @@ class FixtureTokenCeilingTest(unittest.TestCase):
     @_needs_fixture("javamini")
     def test_javamini(self):
         # All three JUnit case methods plus the nested suite stay visible.
-        self._assert_ceiling("javamini", 283)
+        self._assert_ceiling("javamini", 272)
 
     @_needs_fixture("javamini")
     def test_javamini_managed_context_shrinks_with_business_gold_set_intact(self):
@@ -130,16 +130,16 @@ class FixtureTokenCeilingTest(unittest.TestCase):
         # v0.10 needed about 401 managed-context planning tokens here. The
         # ceiling is valid only while these turn-zero architecture and
         # business-rule facts remain present together.
-        self.assertLessEqual(cost.managed_block_tokens, 392)
+        self.assertLessEqual(cost.managed_block_tokens, 381)
         for required in (
-            "PricePort.java(I) ←PricingEngine",
-            "PricingEngine.java(C{basePrices})",
+            "PricePort(I) ←PricingEngine",
+            "PricingEngine(C{basePrices})",
             "evaluate(order,items):Quote !UnknownItem > "
             "UnknownItemException,Quote",
-            "{ItemId,OrderId,UserId}.java(R{value})",
+            "{ItemId,OrderId,UserId}(R{value})",
             "of(raw):Self > Self",
-            "Vehicle.java(I) sealed:Bicycle|Scooter",
-            "? tests ·.java\n src/test\n  PricingEngineTest",
+            "Vehicle(I) sealed:Bicycle|Scooter",
+            "? tests\n src/test\n  PricingEngineTest",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, digest)
@@ -167,7 +167,7 @@ class SameShapeGroupingTest(unittest.TestCase):
     def test_identical_types_grouped_with_hole_notation(self):
         out = build_digest(JAVAMINI)
         # Conventional one-type files group by their exact physical leaves.
-        self.assertIn("{ItemId,OrderId,UserId}.java(R{value})", out)
+        self.assertIn("{ItemId,OrderId,UserId}(R{value})", out)
         self.assertEqual(out.count("of(raw):Self"), 1)
         self.assertNotIn("of(raw):UserId", out)
 
@@ -218,7 +218,7 @@ class EnumValuesTest(unittest.TestCase):
     @needs_java
     def test_enum_values_rendered(self):
         out = build_digest(JAVAMINI)
-        self.assertIn("OrderStatus.java(E{NEW,PAID,SHIPPED})", out)
+        self.assertIn("OrderStatus(E{NEW,PAID,SHIPPED})", out)
 
     def test_python_enum_values_extracted(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -251,7 +251,7 @@ class InterfaceMethodTest(unittest.TestCase):
 
     def test_interface_methods_rendered(self):
         out = build_digest(JAVAMINI)
-        idx = out.index("PricePort.java(I)")
+        idx = out.index("PricePort(I)")
         after = out[idx:idx + 200]
         self.assertIn("quoteFor(order):Quote", after)
 
@@ -276,7 +276,7 @@ class QualifiedCallTest(unittest.TestCase):
 class FieldNamesTest(unittest.TestCase):
     def test_declared_field_names_shown(self):
         out = build_digest(JAVAMINI)
-        self.assertIn("PricingEngine.java(C{basePrices})", out)
+        self.assertIn("PricingEngine(C{basePrices})", out)
         self.assertNotIn("C{Map<ItemId,Long>}", out)
 
 
@@ -305,8 +305,9 @@ class ReconstructablePathTest(unittest.TestCase):
     def test_conventional_file_is_one_hybrid_node_not_a_duplicate_parent(self):
         out = build_digest(JAVAMINI)
         matching = [line.strip() for line in out.splitlines()
-                    if "PricingEngine.java" in line]
-        self.assertEqual(matching, ["PricingEngine.java(C{basePrices})"])
+                    if line.strip() in ("PricingEngine",
+                                        "PricingEngine(C{basePrices})")]
+        self.assertEqual(matching, ["PricingEngine(C{basePrices})"])
 
     def test_repeated_extension_is_declared_once_and_dropped_from_leaves(self):
         out = self._render("pkg/alpha.py", "pkg/beta.py", "pkg/script.sh")
@@ -338,8 +339,8 @@ class ReconstructablePathTest(unittest.TestCase):
         self.assertIn("\n shell.component.ts\n", out)
         self.assertIn("\n app.routes.ts\n", out)
 
-    def test_grouped_landmark_states_the_extension_a_bare_node_would_not(self):
-        """Payload naming files means the node is their directory."""
+    def test_grouped_landmark_takes_the_declared_extension_too(self):
+        """A landmark naming files is not exempt from the declaration."""
         symbols = [
             Symbol(name="Alpha", kind="class", file="pkg/Alpha.py", line=1,
                    visibility="pub", lang="python"),
@@ -353,7 +354,7 @@ class ReconstructablePathTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = render_simple(Path(tmp), symbols, [])
         self.assertIn("# hologram ·.py", out)
-        self.assertIn("{Alpha,Beta}.py(C)", out)
+        self.assertIn("{Alpha,Beta}(C)", out)
         self.assertIn("\n util\n", out)
         self.assertIn("\n helpers\n", out)
 
@@ -416,12 +417,12 @@ class RelationsTest(unittest.TestCase):
     def test_relations_rendered(self):
         out = build_digest(JAVAMINI)
         # interface relations live on the interface line, not per implementor
-        self.assertIn("PricePort.java(I) ←PricingEngine", out)
+        self.assertIn("PricePort(I) ←PricingEngine", out)
         self.assertNotIn(": PricePort", out)
-        self.assertIn("Vehicle.java(I) sealed:Bicycle|Scooter", out)
+        self.assertIn("Vehicle(I) sealed:Bicycle|Scooter", out)
         self.assertNotIn(": Vehicle", out)  # sealed permits already say it
         # non-interface supers keep the : T suffix
-        self.assertIn("UnknownItemException.java(C) : RuntimeException", out)
+        self.assertIn("UnknownItemException(C) : RuntimeException", out)
 
 
 class InterfaceImplementorsTest(unittest.TestCase):
@@ -1134,18 +1135,18 @@ class TightFormatTest(unittest.TestCase):
     def test_ascii_return_sep_and_tight_commas(self):
         out = build_digest(JAVAMINI)
         self.assertIn("evaluate(order,items):Quote", out)
-        self.assertIn("OrderStatus.java(E{NEW,PAID,SHIPPED})", out)
-        self.assertIn("{ItemId,OrderId,UserId}.java(R{value})", out)
-        self.assertIn("Vehicle.java(I) sealed:Bicycle|Scooter", out)
+        self.assertIn("OrderStatus(E{NEW,PAID,SHIPPED})", out)
+        self.assertIn("{ItemId,OrderId,UserId}(R{value})", out)
+        self.assertIn("Vehicle(I) sealed:Bicycle|Scooter", out)
         ev = next(ln for ln in out.splitlines() if "evaluate(order" in ln)
         self.assertNotIn("→", ev)   # ascii `:Ret`, not the pretty arrow
 
     def test_zero_usage_marker(self):
         out = build_digest(JAVAMINI)
-        app = next(ln for ln in out.splitlines() if "App.java(C)" in ln)
+        app = next(ln for ln in out.splitlines() if "App(C)" in ln)
         main = next(ln for ln in out.splitlines() if "main(args)" in ln)
         pricing = next(ln for ln in out.splitlines()
-                       if "PricingEngine.java(C{" in ln)
+                       if "PricingEngine(C{" in ln)
         self.assertIn("×0", app)
         self.assertIn("×0", main)
         self.assertNotIn("×0", pricing)
