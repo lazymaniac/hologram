@@ -95,7 +95,10 @@ essentials are:
 - `f(args):Ret > calls` shows a callable, its return type, and retained internal
   calls. `←` shows implementors.
 - `×0` means no static project reference was found; `!E` means a callable
-  throws. These are navigation hints, not correctness claims.
+  throws. These are navigation hints, not correctness claims. Code a framework
+  constructs or calls — routes, listeners, DI components and `@Bean` factories,
+  ORM entities, lifecycle callbacks — is exempt, because static fan-in cannot
+  see the container.
 - Deselecting `params` keeps each signature's arity and drops only the argument
   names: `place(order,items)` becomes `place(_,_)`, which is the same
   placeholder the map already uses for an argument no extractor could name.
