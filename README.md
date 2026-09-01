@@ -98,7 +98,13 @@ essentials are:
   say, so `total` is in the same class, `order.py:Order.total` is a sibling
   file, and a full path means another part of the tree.
 - `×0` means no static project reference was found; `!E` means a callable
-  throws. These are navigation hints, not correctness claims.
+  throws. These are navigation hints, not correctness claims. Code a framework
+  constructs or calls — routes, listeners, DI components and `@Bean` factories,
+  ORM entities, lifecycle callbacks — is exempt, because static fan-in cannot
+  see the container.
+- Deselecting `params` keeps each signature's arity and drops only the argument
+  names: `place(order,items)` becomes `place(_,_)`, which is the same
+  placeholder the map already uses for an argument no extractor could name.
 - `? tests` uses the same path-compressed tree as the source section and
   retains a compact, reconstructable landmark for every detected test file,
   plus suite names and every recognized function/method case name,
@@ -151,6 +157,7 @@ merely expensive.
 |---|---|
 | `calls` | Call chains between project symbols (`sig > callee`) |
 | `types` | Declared return and parameter types (`:Ret`, `arg:T`) |
+| `params` | Parameter names on signatures (`f(order,items)`) |
 | `relations` | Supers, implements, sealed permits, implementors |
 | `fields` | Field names, record components, enum values |
 | `constants` | Public constants and their short values |

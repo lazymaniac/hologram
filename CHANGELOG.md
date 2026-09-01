@@ -19,6 +19,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example corpus, and 1.2% — 700 tokens — of a 16,000-file Java codebase. Two
   targets that would shorten to the same text both keep their project-wide
   names, so one name never stands for two.
+  
+### Added
+
+- **`--features params`.** Parameter names were 14–24% of a real map and were
+  the one large fact class with no name, because they sat in the always-on
+  "identity" remainder alongside the trie and the type headers. They are a fact
+  about the code, not the map's structure, so they are selectable now.
+  Deselecting keeps arity and drops only the names — `place(order,items)`
+  becomes `place(_,_)`, reusing the placeholder the renderer already emits for
+  an argument no extractor could name — and takes about 7% off a map that keeps
+  everything else.
+
+### Fixed
+
+- **Framework-wired code is no longer reported as dead.** `×0` means no static
+  project reference, and a container's wiring is invisible to static fan-in, so
+  Spring stereotypes and `@Bean` factories, JSR-330 `@Named`/`@Inject`,
+  `@PostConstruct`/`@PreDestroy` lifecycle callbacks, JPA `@Entity`, and Spring
+  AI/MCP `@Tool` surfaces now join routes, listeners and schedulers as
+  entrypoints. On a Spring AI corpus this removed 63 of 113 `×0` markers — a
+  `@Configuration @EnableWebSecurity` class and every `@Bean` factory had been
+  reading as deletable — and made the map 38 tokens smaller in the process.
 
 ## [0.15.0] - 2026-08-31
 
