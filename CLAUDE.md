@@ -412,6 +412,6 @@ tools
 benchmark
  bench: main(argv):int;run_one(...);report(rows,anon):str +11
 ‥ optional facts omitted — NEVER guess; read source before relying on them
-· 20,310 LOC · input 227,885 · output 5,967 tokens · state eeae5c1e4446 · budget 6000 A7
+· 20,310 LOC · input 227,885 · output 5,967 tokens · state db51d5f07b16 · budget 6000 A7
 ```
 <!-- hologram:end -->
