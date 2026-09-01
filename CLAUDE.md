@@ -236,7 +236,7 @@ hologram
   build_digest(root,langs,targets,budget,features):str ✓ > _build_digest
   build_digest_with_stats(root,langs,targets,budget,features):tuple[str,BudgetStats] ✓ > _build_digest
   estimate_tokens(text):int ✓
-  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,source_tokens,resolved,helpers,features,budget_{selection,catalog,retained}):str ~989 ✓ > _target_descriptions,_dominant_suffix,{_tree,_test_index}_lines,_legend_line,estimate_tokens,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_corpus_size,_hoist_tree_keys,_test_support_ids,_is_production_symbol,_bundle_key,_essential_method,_decorator_notes,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_shared_suffix,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,_hoisted,render._symbol_identity
+  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,source_tokens,resolved,helpers,features,budget_{selection,catalog,retained}):str ~987 ✓ > _dominant_suffix,_target_descriptions,{_tree,_test_index}_lines,_legend_line,estimate_tokens,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_corpus_size,_hoist_tree_keys,_test_support_ids,_is_production_symbol,_bundle_key,_essential_method,_decorator_notes,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_shared_suffix,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,_hoisted,render._symbol_identity
   summarize_budget(requested_budget,{full,selected,skeleton}_tokens,effective_detail,bundles,retained,selection_{trials,candidates},search_truncated,stop_reason):BudgetStats ~41 ✓ > BudgetStats
   BudgetBundle(R{detail,category,key,estimated_chars,source_file,semantic_tier,distinct_file_fanin,reason})
    name():str @property
@@ -415,6 +415,6 @@ tools
 benchmark
  bench: main(argv):int;run_one(...);report(rows,anon):str +11
 ‥ optional facts omitted — NEVER guess; read source before relying on them
-· 20,196 LOC · input 226,457 · output 5,967 tokens · state a9a4fc729759 · budget 6000 A7
+· 20,196 LOC · input 226,400 · output 5,967 tokens · state 0ea7254bbea4 · budget 6000 A7
 ```
 <!-- hologram:end -->
