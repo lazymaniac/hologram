@@ -233,7 +233,7 @@ hologram
   build_digest(root,langs,targets,budget,features):str ✓ > _build_digest
   build_digest_with_stats(root,langs,targets,budget,features):tuple[str,BudgetStats] ✓ > _build_digest
   estimate_tokens(text):int ✓
-  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,source_tokens,resolved,helpers,features,budget_{selection,catalog,retained}):str ~994 ✓ > _target_descriptions,_dominant_suffix,{_tree,_test_index}_lines,_legend_line,estimate_tokens,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_corpus_size,_hoist_tree_keys,_test_support_ids,_is_production_symbol,_bundle_key,_essential_method,_localized,_decorator_notes,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_shared_suffix,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,_hoisted,_symbol_identity
+  render_simple(root,symbols,files,state,zero_usage,langs,targets,file_tokens,detail,budget,loc,source_tokens,resolved,helpers,features,budget_{selection,catalog,retained}):str ~992 ✓ > _dominant_suffix,_target_descriptions,{_tree,_test_index}_lines,_legend_line,estimate_tokens,BudgetBundle,_resolved_project_calls,_bundle_estimated_chars,_corpus_size,_hoist_tree_keys,_test_support_ids,_is_production_symbol,_bundle_key,_essential_method,_localized,_decorator_notes,_factored_name_tokens,_private_lines,_is_test_case_method_symbol,_source_role,_shared_suffix,_is_{test_suite_symbol,classless_test_case_symbol,test_path},_strip_exc,_hoisted,_symbol_identity
   summarize_budget(requested_budget,{full,selected,skeleton}_tokens,effective_detail,bundles,retained,selection_{trials,candidates},search_truncated,stop_reason):BudgetStats ~41 ✓ > BudgetStats
   BudgetBundle(R{detail,category,key,estimated_chars,source_file,semantic_tier,distinct_file_fanin,reason})
    name():str @property
@@ -412,6 +412,6 @@ tools
 benchmark
  bench: main(argv):int;run_one(...);report(rows,anon):str +11
 ‥ optional facts omitted — NEVER guess; read source before relying on them
-· 20,310 LOC · input 227,944 · output 5,967 tokens · state c7716b67fad6 · budget 6000 A7
+· 20,310 LOC · input 227,885 · output 5,967 tokens · state eeae5c1e4446 · budget 6000 A7
 ```
 <!-- hologram:end -->

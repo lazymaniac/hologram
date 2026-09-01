@@ -74,11 +74,14 @@ essentials are:
   may be grouped losslessly with braces.
 - A title line such as `# hologram ·.py` declares the extension the map would
   otherwise repeat on every leaf: a bare leaf carries it, and a leaf that states
-  an extension has exactly the one it states. A node with children below it, or
-  whose lines name files of their own (`{ItemId,OrderId}.java(R{value})`), is a
-  directory; a bare node is the file. The declaration is made only where it
-  costs less than the repetition, which is why the Java map above carries none —
-  every one of its landmarks already names its file inline.
+  an extension has exactly the one it states. Grouped landmarks
+  (`{ItemId,OrderId}(R{value})`) take the declaration too. A node with other
+  nodes below it is a directory; otherwise it names a file. That rule reads a
+  directory whose files are all grouped landmarks as a file — about one node in
+  fifty on the corpora it was measured against — but never silently: the
+  reconstructed path simply does not exist, and the directory does. The
+  declaration is made only where it costs less than the repetition, so small or
+  mixed corpora carry none.
 
   ```text
   # hologram ·.py

@@ -1282,6 +1282,14 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         except ValueError:
             return str(path)
 
+    # One extension repeated on every leaf states nothing the header cannot
+    # state once.  Counted over every file that renders a label — trie nodes,
+    # grouped landmarks, and the test and support landmarks alike — so the
+    # declaration is made wherever it is spent.
+    hoisted_ext = _dominant_suffix(
+        {symbol.file for symbol in prod}
+        | {rel for rel in map(_rel, files) if _source_role(rel) != "main"})
+
     def _on(feature: str) -> bool:
         """Whether a selectable fact class renders. The ladder still wins: a
         selected feature can be dropped by depth or budget, but a deselected
@@ -1919,17 +1927,14 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
              named_fields, deco_notes, type_calls), members in groups.items():
             members.sort(key=lambda s: s.name)
             if scope_kind == "dir":
-                # A grouped landmark names files that are *not* this trie node,
-                # so it states their extension even when the header declares
-                # one.  That is what keeps a bare node decidable: payload
-                # naming files means the node is their directory, payload
-                # naming symbols means the node is the file itself.
                 suffix = _shared_suffix(member.file for member in members)
                 if len(members) > 1 and suffix:
                     stems = [Path(member.file).stem for member in members]
-                    names = "{" + ",".join(stems) + "}" + suffix
+                    shown = "" if suffix == hoisted_ext else suffix
+                    names = "{" + ",".join(stems) + "}" + shown
                 else:
-                    names = ",".join(Path(member.file).name
+                    names = ",".join(_hoisted(Path(member.file).name,
+                                              hoisted_ext)
                                      for member in members)
             else:
                 names = ",".join(_top_display(m) for m in members)
@@ -2086,13 +2091,6 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             meta_tail += f" A{budget_selection.level}"
         elif detail:
             meta_tail += f" L{detail}"
-    # One extension repeated on every leaf states nothing the header cannot
-    # state once.  Counted over the labels the hoist can actually reach — file
-    # trie nodes plus the test and support landmarks — never the whole scan, so
-    # a declaration is only made where it is spent.
-    hoisted_ext = _dominant_suffix(
-        source_file_keys
-        | {rel for rel in map(_rel, files) if _source_role(rel) != "main"})
     body = _tree_lines(_hoist_tree_keys(payload_by_dir, source_file_keys,
                                         hoisted_ext))
     helper_ids = (helpers if helpers is not None
