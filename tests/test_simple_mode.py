@@ -271,6 +271,61 @@ class QualifiedCallTest(unittest.TestCase):
         self.assertNotIn("List.of", main_line)               # platform type literal dropped
         self.assertNotIn("getenv", main_line)
 
+    def _twins(self, caller_file: str, caller_container: str | None = None):
+        """Two same-named methods in different packages, so the description
+        ladder has to qualify; the caller decides how much of it is news."""
+        syms = []
+        for package in ("alpha", "beta"):
+            syms += [
+                Symbol(name="Store", kind="class", visibility="pub",
+                       file=f"{package}/store.py", line=1, lang="python"),
+                Symbol(name="load", kind="method", container="Store",
+                       visibility="pub", file=f"{package}/store.py", line=2,
+                       lang="python"),
+            ]
+        syms.append(Symbol(name="use", kind="fn", visibility="pub",
+                           file=caller_file, line=1, lang="python",
+                           container=caller_container,
+                           calls=["s.load"], bindings={"s": "Store"}))
+        displayed, _, _ = hologram.render._resolved_project_calls(syms)
+        return displayed[id(syms[-1])]
+
+    def test_target_in_the_callers_own_file_sheds_path_and_owner(self):
+        self.assertEqual(self._twins("alpha/store.py", "Store"), ["load"])
+
+    def test_sibling_keeps_its_file_and_sheds_the_shared_package(self):
+        self.assertEqual(self._twins("alpha/use.py"), ["store.py:Store.load"])
+
+    def test_distant_target_keeps_the_path_that_identifies_it(self):
+        far = Symbol(name="use", kind="fn", visibility="pub",
+                     file="far/away/use.py", line=1, lang="python")
+        self.assertEqual(
+            hologram.render._trim_local("alpha/store.py:Store.load", far),
+            "alpha/store.py:Store.load")
+
+    def test_targets_that_would_trim_alike_keep_their_full_names(self):
+        """Two overloads shorten to the same text; one name must never stand
+        for two different targets inside a single chain."""
+        syms = [
+            Symbol(name="Store", kind="class", visibility="pub",
+                   file="alpha/store.py", line=1, lang="python"),
+            Symbol(name="load", kind="method", container="Store", params=["int"],
+                   visibility="pub", file="alpha/store.py", line=2, lang="python"),
+            Symbol(name="load", kind="method", container="Store", params=["str"],
+                   visibility="pub", file="alpha/store.py", line=3, lang="python"),
+            Symbol(name="Store", kind="class", visibility="pub",
+                   file="beta/store.py", line=1, lang="python"),
+            Symbol(name="load", kind="method", container="Store",
+                   visibility="pub", file="beta/store.py", line=2, lang="python"),
+        ]
+        caller = Symbol(name="use", kind="method", container="Store",
+                        visibility="pub", file="alpha/store.py", line=9,
+                        lang="python", calls=["self.load"])
+        syms.append(caller)
+        shown = hologram.render._resolved_project_calls(syms)[0][id(caller)]
+        self.assertEqual(len(shown), len(set(shown)))
+        self.assertTrue(all(name != "load" for name in shown), shown)
+
 
 @needs_java
 class FieldNamesTest(unittest.TestCase):
@@ -1192,9 +1247,9 @@ class ZeroUsageMarkerTest(unittest.TestCase):
             (root / "Orphan.java").write_text(
                 "public class Orphan {\n  public void run() {}\n}\n")
             out = build_digest(root).replace(" ×0", "×0")
-        self.assertIn("{OrderService,Wiring}.java(C)\n", out)   # no ×0
+        self.assertIn("{OrderService,Wiring}(C)\n", out)        # no ×0
         self.assertNotIn("clock():Clock×0", out)                # the @Bean factory
-        self.assertIn("Orphan.java(C)×0", out)   # unwired code is still called out
+        self.assertIn("Orphan(C)×0", out)   # unwired code is still called out
 
     def test_rust_route_handler_not_marked_dead(self):
         from hologram.gather import _framework_invoked
