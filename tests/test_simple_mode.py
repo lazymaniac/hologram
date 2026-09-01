@@ -1176,6 +1176,25 @@ class ZeroUsageMarkerTest(unittest.TestCase):
         self.assertNotIn("orders()×0", out.replace(" ×0", "×0"))
         self.assertIn("@GET/orders", out)
 
+    @needs_java
+    def test_framework_wired_components_not_marked_dead(self):
+        """A container constructs these; static fan-in cannot see it. Marking
+        them `×0` invites deleting the wiring an application runs on."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Wiring.java").write_text(
+                "@Configuration\npublic class Wiring {\n"
+                "  @Bean public Clock clock() { return null; }\n}\n")
+            (root / "OrderService.java").write_text(
+                "@Service\npublic class OrderService {\n"
+                "  public void place() {}\n}\n")
+            (root / "Orphan.java").write_text(
+                "public class Orphan {\n  public void run() {}\n}\n")
+            out = build_digest(root).replace(" ×0", "×0")
+        self.assertIn("{OrderService,Wiring}.java(C)\n", out)   # no ×0
+        self.assertNotIn("clock():Clock×0", out)                # the @Bean factory
+        self.assertIn("Orphan.java(C)×0", out)   # unwired code is still called out
+
     def test_rust_route_handler_not_marked_dead(self):
         from hologram.gather import _framework_invoked
         rust = Symbol(name="list_orders", kind="fn", file="m.rs", line=1,

@@ -259,7 +259,7 @@ hologram
   tight_annotation(text):str > tight_type
   tight_type(t):str
   Symbol(R{name,kind,file,line,signature,params,param_names,returns,visibility,container,lang,fields,calls,supers,permits,raises,bindings,decorators,size})
-  = LANG_EXTENSIONS,DENYLIST_DIRS,TYPE_KINDS,FEATURES,{ROUTE,MARKER}_DECORATORS
+  = LANG_EXTENSIONS,DENYLIST_DIRS,TYPE_KINDS,FEATURES,{ROUTE,MARKER,WIRED}_DECORATORS
  treesitter
   has_parser(lang):bool
 ? tests
@@ -412,6 +412,6 @@ tools
 benchmark
  bench: main(argv):int;run_one(...);report(rows,anon):str +11
 ‥ optional facts omitted — NEVER guess; read source before relying on them
-· 20,157 LOC · input 225,944 · output 5,966 tokens · state 74efef9ca06e · budget 6000 A7
+· 20,196 LOC · input 226,457 · output 5,967 tokens · state a9a4fc729759 · budget 6000 A7
 ```
 <!-- hologram:end -->

@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an argument no extractor could name — and takes about 7% off a map that keeps
   everything else.
 
+### Fixed
+
+- **Framework-wired code is no longer reported as dead.** `×0` means no static
+  project reference, and a container's wiring is invisible to static fan-in, so
+  Spring stereotypes and `@Bean` factories, JSR-330 `@Named`/`@Inject`,
+  `@PostConstruct`/`@PreDestroy` lifecycle callbacks, JPA `@Entity`, and Spring
+  AI/MCP `@Tool` surfaces now join routes, listeners and schedulers as
+  entrypoints. On a Spring AI corpus this removed 63 of 113 `×0` markers — a
+  `@Configuration @EnableWebSecurity` class and every `@Bean` factory had been
+  reading as deletable — and made the map 38 tokens smaller in the process.
+
 ## [0.15.0] - 2026-08-31
 
 Theme: you choose the facts, and the map stops repeating itself.
