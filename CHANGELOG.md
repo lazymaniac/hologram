@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-09-02
+
+Theme: only what cannot be read somewhere already.
+
 ### Removed
 
 - **Constructors.** A ctor line stated that a type can be constructed, which its
@@ -828,7 +832,8 @@ agents already read — so the shape of the code is in context from turn zero.
   "hologram-map[grammars]"` for all parsers), or copy `hologram.py` into a repo
   and run it with plain `python3`.
 
-[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/lazymaniac/hologram/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/lazymaniac/hologram/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/lazymaniac/hologram/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/lazymaniac/hologram/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/lazymaniac/hologram/compare/v0.13.0...v0.14.0

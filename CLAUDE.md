@@ -334,6 +334,6 @@ tools
  run_tests: main(argv):int
 benchmark
  bench: main(argv):int;run_one(...);report(rows,anon):str +11
-· 19,933 LOC · input 223,264 · output 1,768 tokens · state 554bb0818a64 · budget 6000
+· 19,933 LOC · input 223,264 · output 1,768 tokens · state 5e249e0941cd · budget 6000
 ```
 <!-- hologram:end -->
