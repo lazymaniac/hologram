@@ -488,27 +488,3 @@ class MeaningfulDunderTest(unittest.TestCase):
         self.assertIn("start() > finish", output)
 
 
-class ConstructorIntegrityTest(unittest.TestCase):
-    def test_only_record_constructor_is_structurally_redundant(self):
-        symbols = [
-            Symbol(name="Engine", kind="class", file="engine.java", line=1,
-                   visibility="pub", lang="java", fields=["price"]),
-            Symbol(name="Engine", kind="ctor", file="engine.java", line=2,
-                   container="Engine", visibility="pub", lang="java",
-                   params=["price"], param_names=["price"]),
-            Symbol(name="Price", kind="record", file="price.java", line=1,
-                   visibility="pub", lang="java", fields=["value"]),
-            Symbol(name="Price", kind="ctor", file="price.java", line=2,
-                   container="Price", visibility="pub", lang="java",
-                   params=["value"], param_names=["value"]),
-        ]
-
-        with tempfile.TemporaryDirectory() as tmp:
-            output = render_simple(Path(tmp), symbols, [])
-
-        self.assertIn("Engine(price)", output)
-        self.assertNotIn("Price(value)", output)
-
-
-if __name__ == "__main__":
-    unittest.main()

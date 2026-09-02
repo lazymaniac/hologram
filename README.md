@@ -46,24 +46,23 @@ install command instead.
 An abridged Java map looks like this:
 
 ```text
-# hologram
+# hologram ·.java
 · C/R/I{fields} · f(args):Ret > calls · ×0=unused · !E=throws · p{a,b}s=pas,pbs · ←A|B=implementors
 src
- App.java(C) ×0
+ App(C) ×0
   main(args) ×0 > PricingEngine,evaluate,{Order,Item}Id.of
  engine
-  PricePort.java(I) ←PricingEngine
+  PricePort(I) ←PricingEngine
    quoteFor(order):Quote ×0
-  PricingEngine.java(C{basePrices})
+  PricingEngine(C{basePrices})
    evaluate(order,items):Quote !UnknownItem > UnknownItemException,Quote
-  Quote.java(R{order,totalCents})
+  Quote(R{order,totalCents})
  ids
-  {ItemId,OrderId,UserId}.java(R{value})
-? tests ·.java
+  {ItemId,OrderId,UserId}(R{value})
+? tests
  src/test
-  PricingEngineTest:BulkDiscounts,ordersOverTenItemsGetTenPercentOff,smallOrdersPayFullPrice,
-    unknownItemIsRejected
-· 186 LOC · input 1,051 · output 285 tokens · state 0123456789ab
+  PricingEngineTest
+· 186 LOC · input 1,051 · output 233 tokens · state 0123456789ab
 ```
 
 The second line is generated with the map and explains its applicable core
@@ -85,10 +84,10 @@ essentials are:
 
   ```text
   # hologram ·.py
-  · C/R/I{fields} · f(args):Ret > calls · ×0=unused · ✓=tested · !E=throws
+  · C/R/I{fields} · f(args):Ret > calls · ×0=unused · !E=throws
   app
    main() ×0 > price_order,OrderId,ItemId
-   price_order(order,items):int ✓
+   price_order(order,items):int
   models
    ItemId,OrderId,UserId(R{value})
   ```
@@ -109,14 +108,14 @@ essentials are:
   names: `place(order,items)` becomes `place(_,_)`, which is the same
   placeholder the map already uses for an argument no extractor could name.
 - `? tests` uses the same path-compressed tree as the source section and
-  retains a compact, reconstructable landmark for every detected test file,
-  plus suite names and every recognized function/method case name,
-  so an agent can inspect existing coverage before recreating it. Same-named
-  methods in different suites gain their suite owner. `*` marks reusable test
-  support: helper classes, declared fixtures, and helper functions another
-  test file uses. The index names no call targets — what a test exercises is
-  read from the test, not from the map. Separate tool/benchmark landmarks stay
-  compact.
+  retains a compact, reconstructable landmark for every detected test file, so
+  an agent can see where coverage lives before adding more. It names files, not
+  cases: case names were the most expensive thing in the map — a third of it on
+  a large corpus — for a fact that is read in the file the landmark points at.
+  `*` marks reusable test support: helper classes, declared fixtures, and helper
+  functions another test file uses, because those are what another test consumes
+  without opening anything. The index names no call targets either. Separate
+  tool/benchmark landmarks stay compact.
 - The footer carries freshness and saved settings, plus what the map cost:
   `input` is the estimated token count of the scanned sources, `output` the
   estimated count of the map itself — the compression the block bought, stated
@@ -166,11 +165,10 @@ merely expensive.
 | `constants` | Public constants and their short values |
 | `decorators` | Routes and framework annotations (`@GET/path`) |
 | `raises` | Declared or thrown exception types (`!E`) |
-| `tested` | The `✓` marker on symbols reached from a test |
 | `usage` | The `×0` marker on symbols with no static reference |
 | `size` | The `~N` body-size marker on large bodies |
 | `private` | The names-only private member inventory |
-| `tests` | The test index: files, case names, fixtures |
+| `tests` | The test index: files, helpers, fixtures |
 | `support` | `tools/` and `benchmark/` landmark lines |
 
 The package tree, type headers, and public signatures are the map's identity
@@ -215,7 +213,7 @@ files.
 Below that floor is one more level, reached only when the semantic floor itself
 cannot fit: a structure-only map that states the same facts in project vocabulary
 alone. Return and parameter types, decorators and route paths, `!throws`, the
-`~N`/`✓`/`×0` markers, `{field}` lists and type relations are language and
+`~N`/`×0` markers, `{field}` lists and type relations are language and
 framework words, and all of them go; the source tree, type names, and function
 names with their parameter names stay. On this repository that is 714 tokens down
 to 460. Ranked facts still compete for whatever slack remains above it. If even

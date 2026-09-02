@@ -69,11 +69,10 @@ FEATURES: tuple[tuple[str, str], ...] = (
     ("constants", "public constants and their short values"),
     ("decorators", "routes and framework annotations (@GET/path)"),
     ("raises", "declared or thrown exception types (!E)"),
-    ("tested", "the ✓ marker on symbols reached from a test"),
     ("usage", "the ×0 marker on symbols with no static reference"),
     ("size", "the ~N body-size marker on large bodies"),
     ("private", "the names-only private member inventory"),
-    ("tests", "the test index: files, case names, fixtures"),
+    ("tests", "the test index: files, helpers, fixtures"),
     ("support", "tools/ and benchmark/ landmark lines"),
 )
 FEATURE_NAMES = frozenset(name for name, _ in FEATURES)

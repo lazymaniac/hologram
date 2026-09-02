@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Constructors.** A ctor line stated that a type can be constructed, which its
+  own header already implies; where its arguments differed from the field list
+  it stated a construction contract, but never the project's purpose. It cost
+  4.6% of a 16,000-file Java map, 4.0% of a Java example corpus and 3.8% of a
+  Spring one — more than all five markers put together — and had no `--features`
+  name because it lived in the always-on signature remainder.
+- **The `✓` tested marker**, and the `tested` fact class with it. It discriminated
+  wildly by corpus — landing on 42% of callable lines in one repository and 1
+  line in 312 in another — and two thirds of its cost on a large map was the
+  lossless grouping it prevented rather than the marker's own characters. The
+  reachability it displayed is still computed and still ranks a tested call path
+  above every other chain in the budget; it is simply no longer rendered.
+- **Individual test case names.** `? tests` now states which files hold tests and
+  what reusable support they expose, and nothing inside them. Case names were the
+  single most expensive thing in the map — 34% of a 16,000-file corpus, 78% of
+  this repository's own — for a fact an agent reads in the file the landmark
+  already points at. Helper and fixture names stay, because those are what
+  another test file consumes without opening anything.
+
+Together these take **39.8%** off a 16,000-file Java map (56,336 → 33,915
+tokens), 12.9% off a Java example corpus, 14.3% off the `javamini` fixture and
+78.2% off this repository's own map.
+
 ## [0.16.0] - 2026-09-01
 
 Theme: a name says only what the reader's position does not.

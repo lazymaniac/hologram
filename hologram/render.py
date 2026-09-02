@@ -630,8 +630,7 @@ _BUNDLE_CATEGORY_ORDER = {
     "cold-methods": 3,
     "untested-call-chains": 4,
     "test-files": 5,
-    "test-cases": 6,
-    "private-names": 7,
+    "private-names": 6,
 }
 
 
@@ -733,8 +732,6 @@ def _bundle_estimated_chars(category: str, symbol: Symbol,
         parts = [symbol.name, *symbol.calls]
     elif category == "const-values":
         parts = [symbol.signature or symbol.name]
-    elif category == "test-cases":
-        parts = [symbol.name, *symbol.calls]
     else:
         display_params = [
             symbol.param_names[index]
@@ -1091,35 +1088,27 @@ def _test_support_ids(symbols: list[Symbol],
 
 # Wrapped case names sit one level inside their file landmark: enough to read
 # as continuation, never as a sibling file.
-_CASE_CONTINUATION = "  "
-
-
 def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                       resolved_calls=None,
                       helper_ids: dict[int, bool] | None = None,
                       sig_line=None,
-                      case_ids: set[int] | None = None,
-                      case_labels: dict[int, str] | None = None,
                       case_files: set[str] | None = None,
                       selected_files: set[str] | None = None,
                       hoisted_ext: str = "") -> list[str]:
-    """Compact test orientation: file, test landmarks, reusable support.
+    """Compact test orientation: which files hold tests, and what they expose.
 
-    Suite names and every recognized function/method case help agents find
-    existing coverage before they add a duplicate.  They remain independently
-    budgetable; an omitted name never removes its file landmark.  Reusable
-    helpers and fixtures remain named, but their internals stay in source.
+    The index names files, not cases.  Case names were the most expensive
+    thing in the map — a third of it on a large corpus — for a fact an agent
+    reads from the file the landmark already points at.  Reusable helpers and
+    fixtures stay named, because those are what another test file consumes
+    without opening anything.
     The index states no call targets: what a test file exercises is guessable
     from the names it already carries, and the headline+N form spent tokens on
     one arbitrary target.  ``sig_line`` and ``resolved_calls`` remain accepted
     for source compatibility with callers from v0.10.
     """
     make_files = {s.file for s in symbols if s.lang == "make"}
-    case_ids = case_ids or set()
-    case_labels = case_labels or {}
-    case_files = case_files or {
-        symbol.file for symbol in symbols if id(symbol) in case_ids
-    }
+    case_files = case_files or set()
     test_paths: list[str] = []
     for path in files:
         try:
@@ -1137,12 +1126,8 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
     strip_first = (len(first_parts) == 1
                    and next(iter(first_parts)).casefold() in ("test", "tests", "__tests__"))
     helper_ids = helper_ids or {}
-    cases: dict[str, list[str]] = {}
     helpers: dict[str, list[str]] = {}
     for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
-        if id(symbol) in case_ids:
-            cases.setdefault(symbol.file, []).append(
-                case_labels.get(id(symbol), symbol.name))
         if id(symbol) in helper_ids:
             helpers.setdefault(symbol.file, []).append(symbol.name)
     shared_ext = _shared_suffix(test_paths)
@@ -1161,16 +1146,11 @@ def _test_index_lines(files: list[Path], symbols: list[Symbol], root: Path,
                            hoisted_ext).removesuffix(shared_ext)
         directory = str(Path(display).parent)
         leaf = Path(display).name
-        case_names = cases.get(path, [])
-        case_lines = (_private_lines(leaf + ":", case_names,
-                                     continuation=_CASE_CONTINUATION)
-                      if case_names else [leaf])
         helper_names = _factored_name_tokens(helpers.get(path, []))
         helper_suffix = (f":*{','.join(helper_names)}"
                          if helper_names else "")
-        case_lines[-1] += helper_suffix
         payload_by_dir.setdefault("" if directory == "." else directory,
-                                  []).extend(case_lines)
+                                  []).append(leaf + helper_suffix)
     header = f"? tests ·{shared_ext}" if shared_ext else "? tests"
     return [header, *(" " + line for line in _tree_lines(payload_by_dir))]
 
@@ -1208,8 +1188,6 @@ def _legend_line(text: str, has_priv: bool,
         items.append("*=helper/fixture")
     if "×0" in text:
         items.append("×0=unused")
-    if "✓" in text:
-        items.append("✓=tested")
     if re.search(r" ~\d", text):
         items.append("~N=lines")
     if re.search(r" !\S", text):
@@ -1309,8 +1287,6 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         cross_file = any(id(origin) in cross_file_callers for origin in origins)
         if category == "tested-call-chains":
             tier, reason = 0, "tested call path"
-        elif category == "test-cases":
-            tier, reason = 2, "existing test case"
         elif category == "untested-call-chains":
             tier = 0 if cross_file else 2
             reason = "cross-file call path" if cross_file else "local call path"
@@ -1414,8 +1390,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     member_order: list[tuple] = []
     for member in main_prod:
         owner_key = _member_owner_key(member)
-        if (owner_key is None
-                or member.kind not in ("method", "ctor")):
+        if owner_key is None or member.kind != "method":
             continue
         shape = (owner_key, member.kind, member.name, member.signature,
                  tuple(member.params), member.returns)
@@ -1462,7 +1437,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     orphan_groups: dict[tuple, list[Symbol]] = {}
     orphan_order: list[tuple] = []
     for member in render_prod:
-        if (not member.container or member.kind not in ("method", "ctor")
+        if (not member.container or member.kind != "method"
                 or _member_owner_key(member) is not None):
             continue
         shape = (member.file, member.lang, member.container, member.kind,
@@ -1566,7 +1541,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     methods_by_owner: dict[tuple[str, str, str], list[Symbol]] = {}
     for s in canonical_members:
-        if (s.container and s.kind in ("method", "ctor")
+        if (s.container and s.kind == "method"
                 and (s.visibility == "pub" or _essential_method(s))):
             if not _essential_method(s):
                 cold = _member_owner_key(s) in cold_types
@@ -1582,7 +1557,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 methods_by_owner.setdefault(owner_key, []).append(s)
     orphan_methods: dict[tuple[str, str, str], list[Symbol]] = {}
     for s in render_prod:
-        if (s.container and s.kind in ("method", "ctor")
+        if (s.container and s.kind == "method"
                 and _member_owner_key(s) is None
                 and (s.visibility == "pub" or _essential_method(s))):
             if (not _essential_method(s)
@@ -1657,7 +1632,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     for s in render_prod if _on("private") else ():
         if s.visibility != "priv" or _essential_method(s):
             continue
-        member_inventory = s.container and s.kind in ("method", "ctor")
+        member_inventory = s.container and s.kind == "method"
         top_inventory = s.container is None and s.kind in TYPE_KINDS + ("fn",)
         if not (member_inventory or top_inventory):
             continue
@@ -1683,7 +1658,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
         marked = (s.kind in ("fn", "method", "class") and s.name in zero_usage
                   and _on("usage"))
         name = f"{s.name}×0" if marked else s.name
-        if s.container and s.kind in ("method", "ctor"):
+        if s.container and s.kind == "method":
             owner_key = (_member_owner_key(s)
                          or (s.file, s.container, s.lang))
             priv_methods_by_owner.setdefault(owner_key, []).append(name)
@@ -1695,7 +1670,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
 
     signature_shapes = Counter(
         (s.file, s.container or "", s.name, tuple(_argument_names(s)))
-        for s in render_prod if s.kind in ("fn", "method", "ctor")
+        for s in render_prod if s.kind in ("fn", "method")
     )
     top_locations: dict[str, set[tuple[str, str]]] = {}
     for symbol in main_prod:
@@ -1724,7 +1699,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             args = [f"{name}:{sym.params[index]}" if name != sym.params[index] else name
                     for index, name in enumerate(args)]
         returns = ("" if not typed else
-                   f":{sym.returns}" if sym.returns and sym.kind != "ctor"
+                   f":{sym.returns}" if sym.returns
                    and sym.returns not in ("void", "Unit", "None") else "")
         if sym.signature and "(" not in sym.signature and sym.lang in ("helm", "html"):
             return sym.signature
@@ -1782,7 +1757,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             chosen = candidates[:3]
             atoms: list[str] = []
             for symbol in chosen:
-                if symbol.kind in ("fn", "method", "ctor"):
+                if symbol.kind in ("fn", "method"):
                     synthetic_bash_owner = (
                         symbol.lang == "bash"
                         and symbol.container == Path(file).name)
@@ -1820,8 +1795,6 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
                 sig = f"{sig} @{note}"
             if sym.size >= 40 and _on("size"):
                 sig = f"{sig} ~{sym.size}"
-            if id(sym) in tested and _on("tested"):
-                sig = f"{sig} ✓"
             if (sym.kind in ("fn", "method") and sym.name in zero_usage
                     and not _essential_method(sym) and _on("usage")):
                 sig = f"{sig} ×0"
@@ -1835,18 +1808,6 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             sig = _norm(sig, own)
         return (f"{sig} > {','.join(_factored_name_tokens(kept, dedupe=False))}"
                 if kept else sig)
-
-    def _redundant_ctor(ms: Symbol, kind: str, components: tuple) -> bool:
-        # Record components define their canonical public construction shape.
-        # Ordinary class fields do not: an equal-looking constructor still
-        # carries the otherwise absent fact that callers can construct it.
-        # Comparing the full line also keeps record ctors with any extra fact.
-        component_names = ",".join(_factored_name_tokens(
-            list(components), dedupe=False))
-        return (kind == "record" and bool(components)
-                and ms.kind == "ctor"
-                and _sig_line(ms, ms.container or ms.name, False)
-                == f"{ms.name}({component_names})")
 
     # Interface relations stated once, on the interface: `I ←Impl|Impl` replaces
     # each implementor's `: I` suffix (sealed permits already carry the list).
@@ -1972,9 +1933,7 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
             # Methods shared by every member print once (Self-normalized); each
             # member's remaining methods print on its own `Name: …` line.
             member_methods = {
-                id(m): [ms for ms in methods_by_owner.get(
-                    (m.file, m.name, m.lang), [])
-                        if not _redundant_ctor(ms, kind, components)]
+                id(m): methods_by_owner.get((m.file, m.name, m.lang), [])
                 for m in members}
             for methods in member_methods.values():
                 for method in methods:
@@ -2120,39 +2079,8 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     test_case_files = {
         symbol.file for symbol in symbols if id(symbol) in test_landmark_ids
     }
-    case_candidates: list[Symbol] = []
-    seen_test_cases: set[tuple[str, str, str]] = set()
-    for symbol in sorted(symbols, key=lambda s: (s.file, s.line, s.name)):
-        if (symbol.lang == "make"
-                or id(symbol) not in test_landmark_ids
-                or (symbol.kind == "class"
-                    and symbol.name == Path(symbol.file).stem)):
-            continue
-        logical_case = (symbol.file, symbol.container or "", symbol.name)
-        if logical_case in seen_test_cases:
-            continue
-        seen_test_cases.add(logical_case)
-        case_candidates.append(symbol)
-    same_name_counts = Counter(
-        (symbol.file, symbol.name) for symbol in case_candidates)
-    case_labels = {
-        id(symbol): (
-            f"{symbol.container}.{symbol.name}"
-            if symbol.container and same_name_counts[(symbol.file, symbol.name)] > 1
-            else symbol.name
-        )
-        for symbol in case_candidates
-    }
-    selected_test_cases: set[int] = set()
-    for symbol in case_candidates:
-        label = case_labels[id(symbol)]
-        if _keep_bundle("test-cases", _FLOOR_LEVEL, symbol,
-                        default=detail < _FLOOR_LEVEL,
-                        payload_chars=len(label) + 1):
-            selected_test_cases.add(id(symbol))
     # The file landmarks are themselves budgetable: at the skeleton the whole
-    # test index goes, and a restored case name pulls its landmark back through
-    # the selection's dependency closure.
+    # test index goes, and a tighter budget restores them one file at a time.
     make_files = {s.file for s in symbols if s.lang == "make"}
     selected_test_files: set[str] = set()
     for path in files if _on("tests") else ():
@@ -2175,8 +2103,6 @@ def render_simple(root: Path, symbols: list[Symbol], files: list[Path],
     tests = _test_index_lines(files, symbols, root,
                               None,
                               helper_ids,
-                              case_ids=selected_test_cases,
-                              case_labels=case_labels,
                               case_files=test_case_files,
                               selected_files=selected_test_files,
                               hoisted_ext=hoisted_ext)
@@ -2350,10 +2276,6 @@ def _build_digest(root: Path, langs: set[str] | None,
             dependency = method_dependencies.get(bundle.key)
             if dependency:
                 names.add(dependency)
-        elif bundle.category == "test-cases":
-            # a case name renders on its file landmark line; admitting one
-            # without the other would drop the fact it was selected for
-            names.add(f"test-files:{bundle.source_file}")
         return frozenset(names)
 
     # Semantic tier dominates size.  Within a tier, round-robin exact source
